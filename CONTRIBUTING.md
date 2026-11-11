@@ -324,8 +324,8 @@ Hookshot is free software under the [GNU General Public License, version 3 or la
 you agree to license it under those terms. Only send code you can license that way. Do not paste code from a project
 with an incompatible license, and do not paste decompiled game code or anything generated from the dump into a PR.
 
-The third-party parts (Eden, suyu, Sirit, the Vulkan Memory Allocator, SDL, Opus, Dear ImGui, zstd, the Libertinus
-fonts, zbic and the a64-kit tools) keep their own notices. Preserve them, and do not relicense their code.
+The third-party parts (Eden, suyu, Sirit, the Vulkan Memory Allocator, SDL, Opus, Dear ImGui, zstd, Monocypher, the
+Libertinus fonts, zbic and the a64-kit tools) keep their own notices. Preserve them, and do not relicense their code.
 
 NVIDIA's DLSS SDK is not one of them: it is never in the repository, and nothing of it may be added (see
 [NVIDIA DLSS](#nvidia-dlss-optional)).

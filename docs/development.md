@@ -405,7 +405,9 @@ number is not the obvious one:
 
 The other rows are 0 Off and 1 On. Some are read at the start, before the menu exists, by the code that needs them:
 `handheld_profile` and `output_res` (`host/nn_applet.c`), `ultrawide` (`host/hos_main.c`), `robust_buffers`
-(`gpu/vk/vk_main.cpp`) and the controls (`host/nn_hid.c`).
+(`gpu/vk/vk_main.cpp`) and the controls (`host/nn_hid.c`). Co-op's `coop`, `coop_name`, `coop_server` and `coop_port`
+are read at the start by `host/coop.c` and have no row yet; the menu keeps lines it does not write
+([coop.md](coop.md)).
 
 `HOS_CONTROL=<socket path>` turns on the control bridge: a local socket a tool or coding agent drives the running game
 through (inputs timed in frames, screenshots, waits for the game's state, the Insert menu's settings, quit), with

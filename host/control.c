@@ -2307,9 +2307,11 @@ static int game_save_root(char *out, size_t cap) {
 static int64_t game_frame(void) { return __atomic_load_n(&hos_present_count, __ATOMIC_RELAXED); }
 static void game_log(const char *line) { hos_log("%s", line); }
 void rx_close_asked(void);   /* (rx_backend.c) */
+void coop_shutdown(void);    /* (coop.c) */
 static void game_quit(void) {   /* (as the window's close: the pipelines made since the last save kept, then out) */
     rx_close_asked();
     hos_log("control: exiting");
+    coop_shutdown();   /* (a co-op room's BYE and LEAVE, at most 0.4 s, as hos_window_closed_exit says them) */
     hos_log_flush();
     ExitProcess(0);
 }

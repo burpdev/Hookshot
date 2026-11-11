@@ -4,9 +4,10 @@ Each player runs their own game and their own save; co-op connects the games of 
 game has no multiplayer of its own and its `nn::socket` stays offline: co-op is the runtime's own, a UDP socket of its
 own on a thread of its own.
 
-What exists so far: the relay (`scripts/coop_relay.py`) and the wire format both ends speak (`host/coop_proto.c`):
-rooms named by a secret, the datagrams between a game and the relay, and the sealed messages between the players. The
-game does not use them yet; the session, the menu's Co-op tab and progress sync come next.
+What exists so far: the relay (`scripts/coop_relay.py`), the wire format both ends speak (`host/coop_proto.c`: rooms
+named by a secret, the datagrams between a game and the relay, the sealed messages between the players), and the
+game's session (`host/coop.c`, `host/coop_net.c`): switched on in the settings, the game makes or joins a room at start
+and stays in it. Nothing is shared yet: the menu's Co-op tab and progress sync come next.
 
 ## Running a relay
 
@@ -56,6 +57,104 @@ makes, and the maker passes it on to the others (by voice, a chat message). The 
 secret whose room is open on the relay is refused (it is not a join), so nobody can be put into a room they did not
 mean to join.
 
+## Switching it on: the game's settings
+
+Co-op is off unless switched on. Off, the game opens no socket and starts no thread (`coop_init` in
+`host/hos_main.c` returns at once). The settings are read once, when the game starts: `hookshot_options.ini` beside the
+game, and the environment over it (a variable that is set wins over the file's line). The Insert menu's Co-op tab
+will change them while the game runs.
+
+| `hookshot_options.ini` | Environment | What it does | Default |
+|---|---|---|---|
+| `coop=1` | `HOS_COOP=1` | co-op on | off |
+| `coop_name=` | `HOS_COOP_NAME` | the player's name in the room: at most 24 bytes of UTF-8 (a control or text-direction character, or a byte that is not UTF-8, shows as `?`) | `Player-` and four random hex digits, new at each start |
+| `coop_server=` | `HOS_COOP_SERVER` | the relay: `host`, `host:port`, `[IPv6]:port` or a bare IPv6 address | none (the players run one); port 24680 |
+| `coop_port=` | `HOS_COOP_PORT` | the game's own UDP port (one forwarded on the router, say) | 0: any free one |
+| | `HOS_COOP_AUTO=create\|join` with `HOS_COOP_ROOM=<secret>` | make or join that room at start, and stay: a room the relay lost (a restart) is made again by its maker and waited for by the others. `create` without a room makes a new one. For tests and LAN parties until the tab exists | off |
+| | `HOS_COOP_DROP=<percent>` | a test's loss: that share of the received datagrams is thrown away | 0 |
+| | `HOS_COOP_TRACE=1` | a log line for every datagram sent and received, and the relay's address | off |
+
+None of these variables is taken from `hookshot_env.txt`: the game leaves out every line of it whose name begins
+`HOS_COOP`. That file is passed around between players and comes with packs; one that could set them would switch
+co-op on, name its author's relay and put whoever uses it into its author's room. Co-op is switched on in
+`hookshot_options.ini` (and, once it exists, the menu); the variables are for the player's own environment and for
+tests (the file `HOS_ENV_FILE` names, a test run's own, sets them like anything else).
+
+In a room the game sends the relay a PING every 2 s (the keep-alive that also holds a home router's mapping open; the
+PONG gives the round trip), and takes 8 s without any datagram from the relay as the relay lost: it joins the same room
+again as the same member (`relay lost; rejoining`). Reaching the relay is a burst of four CONNECTs 250 ms apart, then a
+wait of 1, 2, 4, 8 and 15 s between bursts. When the player leaves the room, switches co-op off or closes the game's
+window, the game says BYE to the others and LEAVE to the relay (twice each, in under half a second), so the others see
+the player go at once. One host thread does all of it, as the Discord status's does; it never touches the game's
+memory. The thread exists only while co-op is switched on: switching co-op off, or closing the game, asks it to end
+and waits for it (at most 0.4 s), with the socket closed; switching co-op on starts it again.
+
+### A game that ends without a goodbye
+
+The goodbye is said on the game's own ways out only (`hos_window_closed_exit` in `host/hos_relaunch.c`, and the control
+bridge's `quit` in `host/control.c`). Co-op installs no signal handler. With a window, SIGTERM and SIGINT close the
+window (SDL turns them into its quit event), so the goodbye is said. A game that is killed (SIGKILL; SIGTERM or SIGINT
+for a game without a window, as `HOS_HEADLESS` test runs are), crashes, or loses its network says nothing, and the
+relay goes by silence:
+
+- **0 to 8 s:** nothing changes for the others. The player is still in their roster; what they send still goes to its
+  address and is lost there. Nothing of their own is held up: no message waits for an answer.
+- **after 8 s** without a datagram from the member, the relay's roster marks it away: the others' logs say
+  `<name> (member <n>) is away`, and the view the menu will draw has the member's `away` set. A game whose network
+  only stalled sends again, and is `is back`.
+- **after 15 s** the relay drops the member: its log says `<name> (member <n>) dropped, silent 15 s`, and the others'
+  `<name> (member <n>) left the room`, as after a goodbye. The relay keeps the member id for a minute, so the same game,
+  still running, joins again as the same member (`rejoined room`); a game started again is a new member.
+
+So a killed game shows as present for 8 s and as away for 7 s more. Its progress up to its last message is with the
+others already; nothing is taken from anyone when it goes.
+
+## The log
+
+Every line of the session starts with `coop: `. The room's secret never reaches the log: a room is named by its first
+three characters and `…` (`room H7K…`). Nor does the relay's address, unless `HOS_COOP_TRACE` is on (`=1`; `=0` is off,
+as for every on/off switch: `env_on`).
+
+| Line | When |
+|---|---|
+| `on, as <name>; the relay from HOS_COOP_SERVER` (or `hookshot_options.ini`), or `...; no relay given (...)` | at start, co-op on |
+| `HOS_COOP_AUTO=<create\|join>: room XXX… at start` (or `a new room at start`) | the room the game makes or joins at start |
+| `connecting to the relay`, `the relay answered in <n> ms` | each attempt; the first answer of one |
+| `room XXX… created (member 1)`, `joined room XXX… as member <n>`, `rejoined room XXX… as member <n>` | in the room |
+| `<name> (member <n>) joined the room`, `... left the room`, `... is away`, `... is back`, `member <n> is now <name>` | the others, from the relay's roster |
+| `stats: sent <n>, accepted <n>, thrown away <n> (tag, sender, not co-op, replay), dropped by the test <n>, outbox full <n>, round trip <n> ms` | every minute in a room while datagrams flow (the keep-alives count) |
+| `relay lost; rejoining`, `room XXX… is gone from the relay`, `creating room XXX… again`, `room XXX… is open already; joining it` | the relay went silent or restarted |
+| `left room (<why>)` | leaving: `leave requested`, `the game is closing`, `co-op turned off`, `the server changed`, `the room's maker removed this player`, ... |
+| `no room: <why>` | an attempt refused: `no such room`, `the room is full`, `a room with this secret is already open on the relay: join it`, `update required: ...`, ... |
+| `removing <name> (member <n>) from the room` | the room's maker removed a member |
+| `a datagram that is not a co-op datagram was thrown away`, `... from an address that is not the relay ...`, `a message that does not open with the room's key ...`, `a message of member <n> that is not of its present session, or seen before, ...` | at most every 30 s each; the stats line has the counts |
+| `cannot open a UDP socket`, `cannot resolve the relay's name`, `the system's random source failed; co-op stays off`, `cannot start the co-op thread`, `HOS_COOP_AUTO must be off, create or join`, `HOS_COOP_ROOM is not a room secret ...` | what went wrong |
+| with `HOS_COOP_TRACE`: `the relay is <address>`, `tx <TYPE> to <member>, <n> bytes`, `rx <TYPE>, <n> bytes`, `rx message kind <k> from member <n>, <n> bytes` | every datagram |
+
+The relay's own log has the other side: `room <id> created`, `room <id>: <name> joined as member <n> (<k>/8)`,
+`... rejoined as member <n>`, `<name> (member <n>) left (<k>/8)`, `... dropped, silent 15 s`, `room <id> closed, ...`.
+
+## Testing it
+
+`tests/test_coop_session.py` (in `tests/run_all.py`) compiles `host/coop.c` and `host/coop_net.c` with
+`tests/coop_session_test.c` (AddressSanitizer and UBSan on Linux) and runs, at once: the sockets on loopback (IPv4 and
+IPv6, a datagram too large dropped), `coop_server_parse`'s cases, and co-op off (no thread, no socket); co-op switched
+off, on and off again as the menu will, each off leaving no thread and no socket behind (counted in `/proc/self/task`
+and `/proc/self/fd`), these two also under ThreadSanitizer; two sessions in
+one process through a relay of the test's own that also acts as a hostile one (changed, forged and replayed messages,
+garbage, forged rosters, lies to a player who connects), with no loss and with 30 % of the datagrams thrown away; and
+the same two through `scripts/coop_relay.py` on 127.0.0.1, restarted midway, with the game's own session started from
+the settings and, on Linux, a child process ended by SIGTERM, which says nothing: the others see it away, then gone
+when the relay drops it 15 s later. Two games on one PC: start a relay
+(`python -I scripts/coop_relay.py --host 127.0.0.1 --port 0 --log-joins`), then each game with `HOS_COOP=1
+HOS_COOP_SERVER=127.0.0.1:<port>`, the first with `HOS_COOP_AUTO=create HOS_COOP_ROOM=<secret>`, the second with
+`HOS_COOP_AUTO=join` and the same secret, each with its own `--user` folder.
+
+`tests/test_coop_env_file.py` checks that `hookshot_env.txt` sets no variable whose name begins `HOS_COOP` (every such
+name the host's sources hold, and one made up), and that the environment and `HOS_ENV_FILE`'s file still do.
+`tests/test_coop_options_text.py` checks that a `coop_server=` line of 159 bytes (the longest relay text the game
+keeps) is read whole from `hookshot_options.ini`, and that text inside such a line is not taken for a setting.
+
 ## The room's secret and the wire
 
 For a reviewer: what is derived from what, what each datagram carries and what a receiver checks. The code is
@@ -101,10 +200,11 @@ nonce (24 bytes) = session (8, LE) | counter (4, LE) | sender's member id (1) | 
 associated data = destination member id, envelope version
 ```
 
-A session is drawn for every join and the counter starts at 1, so a nonce never repeats under `K` (two sessions
-collide with probability about n²/2^65). The kind byte and the message are inside the ciphertext: a new kind of message
-needs only a number, and a later envelope version can change the outer fields without touching the messages. A message
-is at most `COOP_MAX_MESSAGE` = 1146 bytes after its kind.
+A session is drawn for every join and the counter starts at 1. Before the counter wraps, the sender leaves the room
+with an error and requires a new join; it never reuses a counter in that session. Random sessions can collide with
+probability about n²/2^65. The kind byte and the message are inside the ciphertext: a new kind of message needs only
+a number, and a later envelope version can change the outer fields without touching the messages. A message is at
+most `COOP_MAX_MESSAGE` = 1146 bytes after its kind.
 
 **What a receiver checks, in order:** the sender is in the roster and is not itself, the destination is it or
 everyone, the envelope's session is the one the roster lists for that sender, the counter is new within a window of

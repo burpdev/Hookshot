@@ -6,10 +6,9 @@ own on a thread of its own.
 
 What exists so far: the relay (`scripts/coop_relay.py`), the wire format both ends speak (`host/coop_proto.c`: rooms
 named by a secret, the datagrams between a game and the relay, the sealed messages between the players), and the
-game's session (`host/coop.c`, `host/coop_net.c`): switched on in the settings, the game makes or joins a room at start
-and stays in it; and progress sync (`host/oot_coop.c`, [below](#progress-sync)): what one player's game gains, the
-others' games get. The menu's Co-op tab comes next: until then a room is made, joined and accepted with the switches
-below.
+game's session (`host/coop.c`, `host/coop_net.c`): the game makes or joins a room from the Insert menu's Co-op tab, or
+at start from its settings, and stays in it; and progress sync (`host/oot_coop.c`, [below](#progress-sync)): what one
+player's game gains, the others' games get.
 
 ## Running a relay
 
@@ -64,7 +63,7 @@ mean to join.
 Co-op is off unless switched on. Off, the game opens no socket and starts no thread (`coop_init` in
 `host/hos_main.c` returns at once). The settings are read once, when the game starts: `hookshot_options.ini` beside the
 game, and the environment over it (a variable that is set wins over the file's line). The Insert menu's Co-op tab
-will change them while the game runs.
+(below) changes them while the game runs.
 
 | `hookshot_options.ini` | Environment | What it does | Default |
 |---|---|---|---|
@@ -72,14 +71,14 @@ will change them while the game runs.
 | `coop_name=` | `HOS_COOP_NAME` | the player's name in the room: at most 24 bytes of UTF-8 (a control or text-direction character, or a byte that is not UTF-8, shows as `?`) | `Player-` and four random hex digits, new at each start |
 | `coop_server=` | `HOS_COOP_SERVER` | the relay: `host`, `host:port`, `[IPv6]:port` or a bare IPv6 address | none (the players run one); port 24680 |
 | `coop_port=` | `HOS_COOP_PORT` | the game's own UDP port (one forwarded on the router, say) | 0: any free one |
-| | `HOS_COOP_AUTO=create\|join` with `HOS_COOP_ROOM=<secret>` | make or join that room at start, and stay: a room the relay lost (a restart) is made again by its maker and waited for by the others. `create` without a room makes a new one. For tests and LAN parties until the tab exists | off |
+| | `HOS_COOP_AUTO=create\|join` with `HOS_COOP_ROOM=<secret>` | make or join that room at start, and stay: a room the relay lost (a restart) is made again by its maker and waited for by the others. `create` without a room makes a new one. For tests; with `HOS_COOP_ROOM` alone, the tab's Make a room makes the room of that secret | off |
 | | `HOS_COOP_DROP=<percent>` | a test's loss: that share of the received datagrams is thrown away | 0 |
 | | `HOS_COOP_TRACE=1` | a log line for every datagram sent and received, and the relay's address | off |
 
 None of these variables is taken from `hookshot_env.txt`: the game leaves out every line of it whose name begins
 `HOS_COOP`. That file is passed around between players and comes with packs; one that could set them would switch
 co-op on, name its author's relay and put whoever uses it into its author's room. Co-op is switched on in
-`hookshot_options.ini` (and, once it exists, the menu); the variables are for the player's own environment and for
+`hookshot_options.ini` and on the menu's Co-op tab; the variables are for the player's own environment and for
 tests (the file `HOS_ENV_FILE` names, a test run's own, sets them like anything else).
 
 In a room the game sends the relay a PING every 2 s (the keep-alive that also holds a home router's mapping open; the
@@ -102,7 +101,7 @@ relay goes by silence:
 - **0 to 8 s:** nothing changes for the others. The player is still in their roster; what they send still goes to its
   address and is lost there. Nothing of their own is held up: no message waits for an answer.
 - **after 8 s** without a datagram from the member, the relay's roster marks it away: the others' logs say
-  `<name> (member <n>) is away`, and the view the menu will draw has the member's `away` set. A game whose network
+  `<name> (member <n>) is away`, and the Co-op tab shows the member as away. A game whose network
   only stalled sends again, and is `is back`.
 - **after 15 s** the relay drops the member: its log says `<name> (member <n>) dropped, silent 15 s`, and the others'
   `<name> (member <n>) left the room`, as after a goodbye. The relay keeps the member id for a minute, so the same game,
@@ -110,6 +109,19 @@ relay goes by silence:
 
 So a killed game shows as present for 8 s and as away for 7 s more. Its progress up to its last message is with the
 others already; nothing is taken from anyone when it goes.
+
+### The Co-op tab
+
+The Insert menu's last tab does the same from the game, with no setting written by hand. **Your name** and **Relay**
+are `coop_name` and `coop_server`. **Make a room** and **Join a room** (the secret typed or pasted) switch co-op on for
+this run and make or join the room. In a room the tab shows its state and the relay's round trip, the **Room secret**
+(masked until Enter shows it), and a line per player with the fingerprint of the key their game signed; **Accept the
+room** shows while the room waits for your acceptance (see "What joining a room means for your save"), **Leave the
+room** always. The game that holds the maker's key also gets **Remove a player** and **Reset the pools**, once it has
+accepted the room. **Room rules**, outside a room and for that game, opens a page with the rules of a room this game
+makes (`coop_progress` .. `coop_ammo`, see "What is shared") and **Co-op at start** (`coop`). Accept, the remedies and
+Leave take a second press. `HOS_COOP_DEMO=1` runs the tab on a made-up room, for screenshots: no session starts and
+nothing is sent.
 
 ## The log
 
@@ -141,7 +153,7 @@ The relay's own log has the other side: `room <id> created`, `room <id>: <name> 
 `tests/test_coop_session.py` (in `tests/run_all.py`) compiles `host/coop.c` and `host/coop_net.c` with
 `tests/coop_session_test.c` (AddressSanitizer and UBSan on Linux) and runs, at once: the sockets on loopback (IPv4 and
 IPv6, a datagram too large dropped), `coop_server_parse`'s cases, and co-op off (no thread, no socket); co-op switched
-off, on and off again as the menu will, each off leaving no thread and no socket behind (counted in `/proc/self/task`
+off, on and off again as the Co-op tab does, each off leaving no thread and no socket behind (counted in `/proc/self/task`
 and `/proc/self/fd`), these two also under ThreadSanitizer; two sessions in
 one process through a relay of the test's own that also acts as a hostile one (changed, forged and replayed messages,
 garbage, forged rosters, lies to a player who connects), with no loss and with 30 % of the datagrams thrown away; and
@@ -156,6 +168,11 @@ HOS_COOP_SERVER=127.0.0.1:<port>`, the first with `HOS_COOP_AUTO=create HOS_COOP
 name the host's sources hold, and one made up), and that the environment and `HOS_ENV_FILE`'s file still do.
 `tests/test_coop_options_text.py` checks that a `coop_server=` line of 159 bytes (the longest relay text the game
 keeps) is read whole from `hookshot_options.ini`, and that text inside such a line is not taken for a setting.
+
+Besides what they compile and run, the protocol, session, progress and menu tests check in the source where the pieces
+are wired in (the build, the game's start and its ways out, the present, the save mount, the menu's interface and the
+host's table). The menu tests use scripted input and a simulated session; they do not cover a real window's events,
+keyboards or controllers.
 
 ## The room's secret and the wire
 
@@ -348,6 +365,10 @@ only), so a maker whose game restarted is still the room's maker; that file, tog
 whoever has both act as the room's maker: never hand out a copy of your user folder. The maker can change a rule
 during the session (each player accepts the new offer), remove a player by their key's fingerprint (every game drops
 that key and what it took from the pools) and reset the pools.
+
+The menu and control bridge use these named `coop_*` settings; the runtime reads the same keys from the options file.
+There is no separate numeric host-option interface for room rules, so adding unrelated menu options does not renumber
+them or require migrating a player's saved settings.
 
 ### Progress sync's switches and log lines
 

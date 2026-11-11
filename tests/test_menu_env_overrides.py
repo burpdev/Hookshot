@@ -87,6 +87,11 @@ const char* const bind_names[1] = {"a"};
 struct Host { int (*binding)(int, int, int); } host_value{nullptr}, *host = &host_value;
 bool can_bind() { return false; }
 /* INI_KEY */
+// (the Co-op tab's part of save(): its name and relay fields, and row_key for the Room rules rows' keys; none of them in
+// this fixture's rows, so the file's lines are ini_key's: tests/test_menu_coop_tab.py checks the tab's part)
+struct { int len; const char* text; } coop_name_field{0, ""}, coop_relay_field{0, ""};
+bool coop_relay_whole = true;
+const char* row_key(const Row&, const char* named) { return named; }
 /* SAVE */
 void env_part() {
 /* ENV */

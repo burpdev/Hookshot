@@ -98,6 +98,12 @@ struct Options {
     int menu_lang = 0;    // this menu's language: 0 Auto (the game's own, language.txt), else menu_i18n::kLangs[menu_lang - 1]
                           // (vk_menu_i18n.cpp). Saved as menu_language
     int mic = 1;          // (hookshot) the ocarina's microphone: 0 Off, 1 the system's default, 2.. a device as host->mic_name lists it (host/nn_audio_in.c)
+    // (hookshot) the Co-op tab's Room rules page, saved under the coop_* keys: co-op on at the start
+    // (host/coop.c), and the rules of a room this game makes (host/oot_coop.c read_rules; host/coop_state.h's defaults):
+    // 0 per player, 1 shared, 2 one pool
+    int coop = 0;
+    int coop_progress = 1, coop_items = 1, coop_songs = 1, coop_quest = 1;   // (shared or per player)
+    int coop_keys = 2, coop_rupees = 0, coop_ammo = 0;                       // (one pool or per player)
 };
 extern Options opts;
 /// (vk_memory.cpp) true when the quality preset's memory budgets (vram_mb, mirror_mb) are to be used: the card has no more

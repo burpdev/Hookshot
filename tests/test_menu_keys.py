@@ -137,6 +137,18 @@ static int detect_pad_layout() { return 0; }
 static void dlss_probe() {}
 static void fsr4_probe() {}
 static void refresh_mics() {}
+// (the Co-op tab's parts of the Esc block and of the options file's reading: what they reach, stubbed)
+static bool coop_secret_shown;                            // (masked again at each opening; read by nothing here)
+static void coop_refresh(bool*) { (void)coop_secret_shown; }
+static bool coop_option_line(const char*, const char*) { return false; }
+struct TextField { char text[64]; int len = 0, max = 63; };
+static TextField coop_name_field, coop_relay_field;
+static bool coop_relay_whole = true;
+static void text_set(TextField& f, const char* t) {
+    f.len = (int)std::min(std::strlen(t), sizeof f.text - 1);
+    std::memcpy(f.text, t, (size_t)f.len);
+    f.text[f.len] = 0;
+}
 // TX_MENU_SHORTCUT
 
 // One tick with key pressed (0: none) and the options o, the menu open before it or not: whether it is open after. *back:

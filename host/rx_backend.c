@@ -193,6 +193,9 @@ static void host_slept_ns(int64_t out[2]) {
     out[1] = hos_slept_ns[1] + __atomic_load_n(&hos_acquire_slept_ns, __ATOMIC_RELAXED);
 }
 
+void hos_coop_menu_view(MkwVkCoopView *out);                          /* host/coop_menu.c: the Co-op tab */
+int hos_coop_menu_command(int cmd, const char *text, uint32_t number);
+
 /* (hookshot) typed text for the Insert menu's text fields (MkwVkHost.take_text): the window's thread puts each character and
    editing key in (host/display.c WM_CHAR and WM_KEYDOWN, host/posix/display_sdl.c SDL's text input and key events), the menu
    takes them out at its frames, in order. Nothing is kept while no field has the keyboard, and the window then takes no text
@@ -246,7 +249,7 @@ static const MkwVkHost vk_host = {
     host_watch_guest_writes, hos_pad_raw, hos_binding, hos_bind, host_aspect_ratio, host_take_key_press,
     hos_mouse_pointer, hos_mic_count, hos_mic_name, hos_mic_select, hos_sdl_gyro_status, hos_log_flush, hos_prompts_face,
     host_romfs_dir, host_wide_menus, host_slept_ns, host_fps_timing, hos_prompts_live_parts, host_screen_size,
-    host_take_text,
+    host_take_text, hos_coop_menu_view, hos_coop_menu_command,
 };
 
 static const MkwVkRenderer *vk;   /* the Vulkan back end, when it was chosen and started */

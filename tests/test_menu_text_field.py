@@ -358,7 +358,7 @@ def main():
     need(tick, r'!strcmp\(key, "TYPE"\)', "menu_tick: RX_VK_MENU_SCRIPT has no TYPE")
     need(tick, r"pad\(pad_paste\)", "menu_tick: a controller cannot paste")
     need(menu, r'\{TAB_GRAPHICS, "Custom output size", nullptr,', "vk_menu.cpp: no Custom output size row")
-    need(menu, r'const FieldRow field_rows\[\] = \{\{"Custom output size", &output_field, output_field_apply\}\};',
+    need(menu, r'const FieldRow field_rows\[\] = \{\{"Custom output size", &output_field, output_field_apply\}[,}]',
          "vk_menu.cpp: Custom output size is not a text field")
     hid = (ROOT / "host/nn_hid.c").read_text(encoding="utf-8")
     need(hid, r"static int key\(int vk\) \{ return !rx_option\(1, 0\) &&",

@@ -9,6 +9,7 @@ that record whether the thread holds its core in host_path and in CreateFileA, t
   unknown mount, a write to a mount that is not writable, a movie left out (HOS_NO_MOVIES), a blanked icon, a file not
   found;
 - a thread that holds no core when it calls OpenFile takes none.
+- save-writer registration runs without the core; a failed host open balances that registration.
 
 python -I -B tests/test_vcore_fs_open.py [--cxx clang++]
 """
@@ -73,6 +74,11 @@ static const char *gstr(uint64_t a) { return (const char *)(uintptr_t)a; }
 static int held, takes;
 int hos_vcore_away(void) { if (!held) return 0; held = 0; return 1; }
 void hos_vcore_back(void) { if (!held) held = 1, takes++; }
+/* Co-op's blocking save bookkeeping; RomFS observation is off in this core-ownership fixture. */
+static int held_in_save, save_active;
+static int save_writer_open(const char *path) { (void)path; held_in_save = held; save_active++; return 1; }
+static void save_writer_close(void) { save_active--; }
+static void hos_oot_coop_rom_open(const char *path) { (void)path; }
 
 /* host_path: the mount's path (here, the build of a prompt file would run in it); -1 = not called */
 static int path_ok, path_writable, held_in_path, held_in_create, create_ok, blank;
@@ -90,7 +96,7 @@ static HANDLE CreateFileA(const char *p, DWORD a, DWORD s, void *sa, DWORD d, DW
     held_in_create = held;
     return create_ok ? (HANDLE)(intptr_t)0x1234 : INVALID_HANDLE_VALUE;
 }
-typedef struct { HANDLE h; int writable; char path[HOS_FS_PATH]; } Handle;
+typedef struct { HANDLE h; int writable, in_save; char path[HOS_FS_PATH]; } Handle;
 static uint64_t new_handle(Handle *h) { free(h); return 7; }
 
 @OPEN@
@@ -103,7 +109,7 @@ static uint64_t open_file(const char *path, int mode, int core) {
     Ctx c;
     memset(&c, 0, sizeof c);
     c.x[0] = (uint64_t)(uintptr_t)&handle, c.x[1] = (uint64_t)(uintptr_t)path, c.x[2] = (uint64_t)mode;
-    held = core, takes = 0, held_in_path = held_in_create = -1;
+    held = core, takes = 0, held_in_path = held_in_create = held_in_save = -1, save_active = 0;
     imp__ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci(&c);
     return c.x[0];
 }
@@ -146,6 +152,16 @@ int main(void) {
     r = open_file("rom:/missing.bin", 1, 1);
     check(r == R_PATH_NOT_FOUND && held_in_create == 0 && held == 1, "a file not found: the core back");
     create_ok = 1;
+
+    path_writable = 1;
+    r = open_file("save:/authored.bin", 2, 1);
+    check(r == 0 && held_in_save == 0 && held_in_create == 0 && held == 1 && save_active == 1,
+          "save registration and host open run without a core; a successful handle keeps its writer");
+    create_ok = 0;
+    r = open_file("save:/missing.bin", 2, 1);
+    check(r == R_PATH_NOT_FOUND && held_in_save == 0 && save_active == 0 && held == 1,
+          "a failed save open balances its writer registration and restores the core");
+    create_ok = 1, path_writable = 0;
 
     r = open_file("rom:/a.bin", 1, 0);
     check(r == 0 && held == 0 && takes == 0, "a thread that held no core takes none");

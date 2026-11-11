@@ -44,7 +44,11 @@ static nvn_tex texture;
 volatile LONG64 hos_present_count;
 static int has_vcore;
 static int64_t renderer_work, back_work;
-#define NV(name) static void name(void)
+typedef struct Ctx { int unused; } Ctx;   /* (the guest's registers, which the present hands to co-op's sync) */
+static Ctx regs;
+static int coop_presents;
+void hos_oot_coop_present(Ctx *c) { if (c == &regs) ++coop_presents; }
+#define NV(name) static void name(Ctx *c)
 #define P(i) (&window)
 #define I(i) 0
 static void die(const char *fmt, ...) { (void)fmt; exit(91); }
@@ -79,7 +83,7 @@ int main(int argc, char **argv) {
         renderer_work = i == 3 ? 300000000 : 7000000;
         back_work = i == 2 ? 40000000 : 3000000;
         clock_now = times[i] - 3000000 - renderer_work - (has_vcore ? back_work : 0);
-        nvnQueuePresentTexture();
+        nvnQueuePresentTexture(&regs);
         if (enabled && i == 3) {
             FILE *probe = fopen(argv[2], "rb");
             if (!probe) return 1; /* old source is red: no trace */
@@ -90,7 +94,7 @@ int main(int argc, char **argv) {
         }
     }
     if (presents != 5 || shown_count != 5 || scans != 5 || steps != 5 || sleeps != 0 ||
-        reads != (enabled ? 25 : 5) || window.presents != 5 || hos_present_count != 5) return 3;
+        reads != (enabled ? 25 : 5) || window.presents != 5 || hos_present_count != 5 || coop_presents != 5) return 3;
     printf("STATE %lld %lld %lld %d %d %d\n", (long long)presents, (long long)shown_count,
            (long long)next_frame_at, scans, steps, sleeps);
     if (!enabled) {

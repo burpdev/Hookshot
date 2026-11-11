@@ -2512,6 +2512,8 @@ NV(nvnQueuePresentTexture) {
     extern volatile LONG64 hos_present_count;   /* display.c */
     InterlockedIncrement64(&hos_present_count);
     hos_vi_native_presented(phases);
+    void hos_oot_coop_present(Ctx *c);   /* (hookshot) co-op's progress sync, between frames (oot_coop.c) */
+    hos_oot_coop_present(c);
 }
 
 /* ---- NVN2 (mkw-recomp): what the Switch 2's NVN adds, as MKW uses it ---- */

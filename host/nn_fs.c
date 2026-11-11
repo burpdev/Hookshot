@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
@@ -209,6 +210,7 @@ typedef struct { char name[HOS_FS_PATH]; int is_dir; uint64_t size; } ExtraEntry
 typedef struct {
     HANDLE h; int writable; HANDLE find; WIN32_FIND_DATAA fd; int find_done, is_dir; char path[HOS_FS_PATH];
     ExtraEntry *extras; int nextras, extra_pos;
+    int in_save;   /* (hookshot) open for writing in the save folder: counted in save_writers until closed */
 } Handle;
 static Handle *handles[4096];
 static SRWLOCK handle_lock = SRWLOCK_INIT;
@@ -232,6 +234,175 @@ static void free_handle(uint64_t id) {
     ReleaseSRWLockExclusive(&handle_lock);
 }
 
+void hos_oot_coop_rom_open(const char *guest_path);   /* (oot_coop.c) */
+int hos_save_copy(const char *folder, const char *prefix, int keep, char *out, size_t cap);   /* (oot_coop.h) */
+
+/* ---- (hookshot) the save folder copied whole, never in the middle of a save ------------------------------------
+   Co-op copies the save folder before anything of a room is applied to it (host/oot_coop.c). The save mount writes in
+   place and Commit does nothing, so there is no transaction to wait for: every change there (a new file, a removal, a
+   rename, a new or removed folder) takes save_lock shared for its call, a file opened for writing there counts in
+   save_writers until it is closed, and the copy takes the lock alone and goes ahead only when no file is open for
+   writing and nothing changed for SAVE_QUIET_MS (the game writes a save's files one after the other: a copy between two
+   of them would hold half a save). Meanwhile a save waits for the copy, its virtual core given to another thread. */
+#define SAVE_QUIET_MS 500
+static SRWLOCK save_lock = SRWLOCK_INIT;
+/* the save mount's folder (MountSaveData, MountSaveDataReadOnly: save_mounted), "" before it is mounted; save_lock.
+   Also the control bridge's (hos_fs_save_root) */
+static char save_root[HOS_FS_PATH];
+static volatile LONG save_writers;
+static volatile LONG64 save_changed_ms;
+
+static void save_lock_shared(void) {
+    if (TryAcquireSRWLockShared(&save_lock)) return;
+    const int away = hos_vcore_away();   /* (a copy is being made) */
+    AcquireSRWLockShared(&save_lock);
+    if (away) hos_vcore_back();
+}
+/* host path in the save folder (save_lock held); / and \ are one separator (host_path writes \, the root may hold /) */
+static int in_save_root(const char *host) {
+    size_t i = 0;
+    for (; save_root[i]; i++) {
+        const char a = host[i] == '/' ? '\\' : host[i], b = save_root[i] == '/' ? '\\' : save_root[i];
+        if (a != b) return 0;
+    }
+    return i && (host[i] == '\\' || host[i] == '/' || !host[i]);
+}
+static void save_stamp(void) { InterlockedExchange64(&save_changed_ms, hos_now_ns() / 1000000); }
+/* A change of host path begins: 1 when it is in the save folder, save_lock then held shared until save_change_end. */
+static int save_change_begin(const char *host) {
+    save_lock_shared();
+    if (in_save_root(host)) return 1;
+    ReleaseSRWLockShared(&save_lock);
+    return 0;
+}
+static void save_change_end(int held) {
+    if (!held) return;
+    save_stamp();
+    ReleaseSRWLockShared(&save_lock);
+}
+/* A file of host path opened for writing: 1 when it is in the save folder (counted until save_writer_close). */
+static int save_writer_open(const char *host) {
+    const int held = save_change_begin(host);
+    if (held) InterlockedIncrement(&save_writers);
+    save_change_end(held);
+    return held;
+}
+static void save_writer_close(void) {
+    save_stamp();
+    InterlockedDecrement(&save_writers);
+}
+static void save_mounted(const char *root) {
+    AcquireSRWLockExclusive(&save_lock);
+    snprintf(save_root, sizeof save_root, "%s", root);
+    ReleaseSRWLockExclusive(&save_lock);
+}
+
+static void delete_tree(const char *dir);
+/* every file and folder of src into dst (made), links left out; 1 when all of it was copied */
+static int copy_tree(const char *src, const char *dst) {
+    if (!CreateDirectoryA(dst, NULL)) return 0;
+    char pat[HOS_FS_PATH];
+    snprintf(pat, sizeof pat, "%s\\*", src);
+    WIN32_FIND_DATAA fd;
+    HANDLE f = FindFirstFileA(pat, &fd);
+    if (f == INVALID_HANDLE_VALUE) return 1;   /* (an empty folder) */
+    int ok = 1;
+    do {
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..") || fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+        char a[HOS_FS_PATH], b[HOS_FS_PATH];
+        if ((size_t)snprintf(a, sizeof a, "%s\\%s", src, fd.cFileName) >= sizeof a ||
+            (size_t)snprintf(b, sizeof b, "%s\\%s", dst, fd.cFileName) >= sizeof b) {
+            ok = 0;
+            break;
+        }
+        ok = fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY ? copy_tree(a, b) : CopyFileA(a, b, TRUE) != 0;
+    } while (ok && FindNextFileA(f, &fd));
+    FindClose(f);
+    return ok;
+}
+
+static int cmp_name(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+/* <parent>: the copies without a prefix (named by their time, so in order by name) beyond the newest keep removed, and
+   what an interrupted copy left */
+static void prune_copies(const char *parent, int keep) {
+    static char names[256][64];
+    int n = 0;
+    char pat[HOS_FS_PATH], sub[HOS_FS_PATH];
+    snprintf(pat, sizeof pat, "%s\\*", parent);
+    WIN32_FIND_DATAA fd;
+    HANDLE f = FindFirstFileA(pat, &fd);
+    if (f == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+        if (!strncmp(fd.cFileName, ".partial-", 9)) {
+            snprintf(sub, sizeof sub, "%s\\%s", parent, fd.cFileName);
+            delete_tree(sub);
+        } else if (fd.cFileName[0] >= '0' && fd.cFileName[0] <= '9' && strlen(fd.cFileName) < sizeof names[0] && n < 256) {
+            snprintf(names[n++], sizeof names[0], "%s", fd.cFileName);
+        }
+    } while (FindNextFileA(f, &fd));
+    FindClose(f);
+    qsort(names, (size_t)n, sizeof names[0], cmp_name);
+    for (int i = 0; i + keep < n; i++) {
+        snprintf(sub, sizeof sub, "%s\\%s", parent, names[i]);
+        delete_tree(sub);
+    }
+}
+
+int hos_save_copy(const char *folder, const char *prefix, int keep, char *out, size_t cap) {
+    out[0] = 0;
+    AcquireSRWLockExclusive(&save_lock);
+    const int64_t quiet = hos_now_ns() / 1000000 - InterlockedCompareExchange64(&save_changed_ms, 0, 0);
+    if (InterlockedCompareExchange(&save_writers, 0, 0) || quiet < SAVE_QUIET_MS) {
+        ReleaseSRWLockExclusive(&save_lock);
+        return -1;
+    }
+    if (!save_root[0] || GetFileAttributesA(save_root) == INVALID_FILE_ATTRIBUTES) {
+        ReleaseSRWLockExclusive(&save_lock);
+        return 1;   /* (nothing saved yet) */
+    }
+    char parent[HOS_FS_PATH], name[96], part[HOS_FS_PATH], dst[HOS_FS_PATH];
+    snprintf(parent, sizeof parent, "%s\\%s", hos_user_dir, folder);
+    CreateDirectoryA(parent, NULL);
+    /* <prefix><UTC time>, and copies in one second numbered on from the last (-002, -003...): the names sort as the copies
+       were made, also after the oldest of that second was pruned (a number used again would sort first and go next) */
+    static time_t last_second;
+    static int last_number;
+    const time_t now = time(NULL);
+    int number = now == last_second ? last_number + 1 : 1;
+    struct tm t;
+#ifdef _WIN32
+    gmtime_s(&t, &now);
+#else
+    gmtime_r(&now, &t);
+#endif
+    for (;; number++) {
+        snprintf(name, sizeof name, "%s%04d%02d%02d-%02d%02d%02dZ", prefix ? prefix : "", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+                 t.tm_hour, t.tm_min, t.tm_sec);
+        if (number > 1) snprintf(name + strlen(name), sizeof name - strlen(name), "-%03d", number);
+        snprintf(dst, sizeof dst, "%s\\%s", parent, name);
+        if (number > 999 || GetFileAttributesA(dst) == INVALID_FILE_ATTRIBUTES) break;
+    }
+    if (number > 999) {
+        ReleaseSRWLockExclusive(&save_lock);
+        return 0;
+    }
+    last_second = now, last_number = number;
+    snprintf(part, sizeof part, "%s\\.partial-%s", parent, name);
+    delete_tree(part);
+    const int copied = copy_tree(save_root, part);
+    ReleaseSRWLockExclusive(&save_lock);
+    const int ok = copied && MoveFileExA(part, dst, 0);
+    if (!ok) delete_tree(part);
+    else prune_copies(parent, keep);
+    if (ok && (size_t)snprintf(out, cap, "%s", dst) < cap) {
+#ifndef _WIN32
+        for (char *p = out; *p; p++) if (*p == '\\') *p = '/';
+#endif
+    }
+    return ok;
+}
+
 /* ---- mounts --------------------------------------------------------------------------------------------------- */
 HLE(_ZN2nn2fs22QueryMountRomCacheSizeEPm) { G64(ARG(0)) = 0x10000; RET(0); }
 HLE(_ZN2nn2fs8MountRomEPKcPvm) {
@@ -245,13 +416,13 @@ HLE(_ZN2nn2fs8MountRomEPKc) {
     RET(mount(gstr(ARG(0)), hos_romfs_dir, 0) ? 0 : R_NOT_MOUNTED);
 }
 
-/* (hookshot) the folder the game's saves are mounted from, for the control bridge's saves (host/control.c) */
-static char save_root[HOS_FS_PATH];
+/* (hookshot) the folder the game's saves are mounted from, for the control bridge's saves (host/control.c): save_root,
+   which save_mounted keeps under save_lock */
 int hos_fs_save_root(char *out, size_t cap) {
-    AcquireSRWLockShared(&mount_lock);
+    AcquireSRWLockShared(&save_lock);
     const int have = save_root[0] != 0;
     if (have) snprintf(out, cap, "%s", save_root);
-    ReleaseSRWLockShared(&mount_lock);
+    ReleaseSRWLockShared(&save_lock);
     return have;
 }
 
@@ -260,13 +431,7 @@ static int user_mount(const char *name, const char *sub) {
     snprintf(root, sizeof root, "%s\\%s", hos_user_dir, sub);
     make_dirs(root);
     CreateDirectoryA(root, NULL);
-    const int ok = mount(name, root, 1);
-    if (ok && !strncmp(sub, "save\\", 5)) {
-        AcquireSRWLockExclusive(&mount_lock);
-        snprintf(save_root, sizeof save_root, "%s", root);
-        ReleaseSRWLockExclusive(&mount_lock);
-    }
-    return ok;
+    return mount(name, root, 1);
 }
 
 /* nn::fs::IsSaveDataExisting(ApplicationId, account::Uid const&) -> bool */
@@ -278,15 +443,21 @@ HLE(_ZN2nn2fs18IsSaveDataExistingENS_13ApplicationIdERKNS_7account3UidE) {
 }
 /* MountSaveData(char const*, account::Uid const&) */
 HLE(_ZN2nn2fs13MountSaveDataEPKcRKNS_7account3UidE) {
-    char sub[64];
+    char sub[64], root[HOS_FS_PATH];
     snprintf(sub, sizeof sub, "save\\%016llx%016llx", (unsigned long long)G64(ARG(1) + 8), (unsigned long long)G64(ARG(1)));
-    RET(user_mount(gstr(ARG(0)), sub) ? 0 : R_NOT_MOUNTED);
+    const int ok = user_mount(gstr(ARG(0)), sub);
+    snprintf(root, sizeof root, "%s\\%s", hos_user_dir, sub);
+    if (ok) save_mounted(root);
+    RET(ok ? 0 : R_NOT_MOUNTED);
 }
 /* MountSaveDataReadOnly(char const*, ApplicationId, account::Uid const&) */
 HLE(_ZN2nn2fs21MountSaveDataReadOnlyEPKcNS_13ApplicationIdERKNS_7account3UidE) {
-    char sub[64];
+    char sub[64], root[HOS_FS_PATH];
     snprintf(sub, sizeof sub, "save\\%016llx%016llx", (unsigned long long)G64(ARG(2) + 8), (unsigned long long)G64(ARG(2)));
-    RET(user_mount(gstr(ARG(0)), sub) ? 0 : R_NOT_MOUNTED);
+    const int ok = user_mount(gstr(ARG(0)), sub);
+    snprintf(root, sizeof root, "%s\\%s", hos_user_dir, sub);
+    if (ok) save_mounted(root);
+    RET(ok ? 0 : R_NOT_MOUNTED);
 }
 HLE(_ZN2nn2fs21MountTemporaryStorageEPKc) { RET(user_mount(gstr(ARG(0)), "temp") ? 0 : R_NOT_MOUNTED); }
 /* MountCacheStorage(char const*, int index) */
@@ -385,10 +556,13 @@ HLE(_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci) {
             }
         }
     }
+    const int in_save = want_write && save_writer_open(path);   /* (hookshot; the core is away already) */
+    if (!want_write) hos_oot_coop_rom_open(g);   /* (hookshot: co-op notes the title screen, host/oot_coop.c) */
     HANDLE h = CreateFileA(path, GENERIC_READ | (want_write ? GENERIC_WRITE : 0), FILE_SHARE_READ | FILE_SHARE_WRITE,
                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (away) hos_vcore_back();
     if (h == INVALID_HANDLE_VALUE) {
+        if (in_save) save_writer_close();
         if (hos_trace || fs_trace()) hos_log("fs: OpenFile(%s): not found", g);
         RET(R_PATH_NOT_FOUND);
         return;
@@ -396,6 +570,7 @@ HLE(_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci) {
     Handle *fh = (Handle *)calloc(1, sizeof *fh);
     fh->h = h;
     fh->writable = want_write;
+    fh->in_save = in_save;
     snprintf(fh->path, sizeof fh->path, "%s", g);
     G64(ARG(0)) = new_handle(fh);
     if (hos_trace || fs_trace()) hos_log("fs: OpenFile(%s)", g);
@@ -484,6 +659,7 @@ HLE(_ZN2nn2fs9FlushFileENS0_10FileHandleE) { FlushFileBuffers(get_handle(c, ARG(
 HLE(_ZN2nn2fs9CloseFileENS0_10FileHandleE) {
     Handle *fh = get_handle(c, ARG(0));
     CloseHandle(fh->h);
+    if (fh->in_save) save_writer_close();
     free_handle(ARG(0));
     free(fh);
 }
@@ -494,27 +670,41 @@ HLE(_ZN2nn2fs10CreateFileEPKcl) {
     int writable = 0;
     if (!host_path(gstr(ARG(0)), path, sizeof path, &writable) || !writable) { RET(R_PATH_NOT_FOUND); return; }
     make_dirs(path);
+    const int held = save_change_begin(path);
     HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) { RET(GetLastError() == ERROR_FILE_EXISTS ? R_PATH_EXISTS : R_PATH_NOT_FOUND); return; }
+    if (h == INVALID_HANDLE_VALUE) {
+        const DWORD e = GetLastError();
+        save_change_end(held);
+        RET(e == ERROR_FILE_EXISTS ? R_PATH_EXISTS : R_PATH_NOT_FOUND);
+        return;
+    }
     LARGE_INTEGER sz;
     sz.QuadPart = (LONGLONG)ARG(1);
     SetFilePointerEx(h, sz, NULL, FILE_BEGIN);
     SetEndOfFile(h);
     CloseHandle(h);
+    save_change_end(held);
     RET(0);
 }
 HLE(_ZN2nn2fs10DeleteFileEPKc) {
     char path[HOS_FS_PATH];
     int writable = 0;
-    if (!host_path(gstr(ARG(0)), path, sizeof path, &writable) || !writable || !DeleteFileA(path)) { RET(R_PATH_NOT_FOUND); return; }
-    RET(0);
+    if (!host_path(gstr(ARG(0)), path, sizeof path, &writable) || !writable) { RET(R_PATH_NOT_FOUND); return; }
+    const int held = save_change_begin(path);
+    const BOOL ok = DeleteFileA(path);
+    save_change_end(held);
+    RET(ok ? 0 : R_PATH_NOT_FOUND);
 }
 HLE(_ZN2nn2fs15CreateDirectoryEPKc) {
     char path[HOS_FS_PATH];
     int writable = 0;
     if (!host_path(gstr(ARG(0)), path, sizeof path, &writable) || !writable) { RET(R_PATH_NOT_FOUND); return; }
     make_dirs(path);
-    RET(CreateDirectoryA(path, NULL) ? 0 : GetLastError() == ERROR_ALREADY_EXISTS ? R_PATH_EXISTS : R_PATH_NOT_FOUND);
+    const int held = save_change_begin(path);
+    const BOOL ok = CreateDirectoryA(path, NULL);
+    const DWORD e = ok ? 0 : GetLastError();
+    save_change_end(held);
+    RET(ok ? 0 : e == ERROR_ALREADY_EXISTS ? R_PATH_EXISTS : R_PATH_NOT_FOUND);
 }
 static void delete_tree(const char *dir) {
     char pat[HOS_FS_PATH];
@@ -539,21 +729,26 @@ HLE(_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc) {
     char path[HOS_FS_PATH];
     int writable = 0;
     if (!host_path(gstr(ARG(0)), path, sizeof path, &writable) || !writable) { RET(R_PATH_NOT_FOUND); return; }
+    const int held = save_change_begin(path);
     /* (hookshot) the folder named itself a link: the link goes, never what it points to (as for the links inside) */
     const DWORD at = GetFileAttributesA(path);
     if (at != INVALID_FILE_ATTRIBUTES && (at & FILE_ATTRIBUTE_REPARSE_POINT)) {
         if (!DeleteFileA(path)) RemoveDirectoryA(path);
-        RET(0);
-        return;
+    } else {
+        delete_tree(path);
     }
-    delete_tree(path);
+    save_change_end(held);
     RET(0);
 }
 HLE(_ZN2nn2fs10RenameFileEPKcS2_) {
     char a[HOS_FS_PATH], b[HOS_FS_PATH];
     int w1 = 0, w2 = 0;
     if (!host_path(gstr(ARG(0)), a, sizeof a, &w1) || !host_path(gstr(ARG(1)), b, sizeof b, &w2) || !w1 || !w2) { RET(R_PATH_NOT_FOUND); return; }
-    RET(MoveFileExA(a, b, MOVEFILE_REPLACE_EXISTING) ? 0 : R_PATH_NOT_FOUND);
+    int held = save_change_begin(a);
+    if (!held) held = save_change_begin(b);
+    const BOOL ok = MoveFileExA(a, b, MOVEFILE_REPLACE_EXISTING);
+    save_change_end(held);
+    RET(ok ? 0 : R_PATH_NOT_FOUND);
 }
 /* a RomFS folder that only mods have: rom:/x -> some mod entry lies under x */
 static void count_extra(void *arg, const char *name, int is_dir, uint64_t size) { (void)name, (void)is_dir, (void)size; ++*(int *)arg; }

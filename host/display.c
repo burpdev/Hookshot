@@ -26,6 +26,8 @@ void rx_close_asked(void);   /* host/rx_backend.c */
 
 void hos_relaunch_ask(void);        /* (host/hos_relaunch.c) */
 void hos_window_closed_exit(void);
+int hos_text_focus(void);          /* (host/rx_backend.c: the Insert menu's text fields, MkwVkHost.take_text) */
+void hos_text_put(uint32_t c);
 #ifndef WM_DPICHANGED
 #define WM_DPICHANGED 0x02E0
 #endif
@@ -265,6 +267,23 @@ static void menu_press(HWND w, LPARAM lp, LONG bit) {   /* (a click while the me
     SetCapture(w);   /* a drag past the window edge still reaches it */
     pointer_publish_at(w, at, (uint32_t)bit, 0);
 }
+/* (hookshot) the clipboard's first line into the Insert menu's text field that has the keyboard (Ctrl+V, Shift+Insert, or the
+   menu's own Paste: WM_APP + 12), as typed: its characters as code points, a pair of UTF-16 halves as one */
+static void paste_clipboard(HWND w) {
+    if (!hos_text_focus() || !OpenClipboard(w)) return;
+    HANDLE data = GetClipboardData(CF_UNICODETEXT);
+    const WCHAR *t = data ? (const WCHAR *)GlobalLock(data) : NULL;
+    for (size_t i = 0; t && t[i] && t[i] != '\r' && t[i] != '\n'; i++) {
+        uint32_t c = t[i];
+        if (c >= 0xD800 && c < 0xDC00 && t[i + 1] >= 0xDC00 && t[i + 1] < 0xE000) c = 0x10000 + ((c - 0xD800) << 10) + (t[++i] - 0xDC00);
+        hos_text_put(c);
+    }
+    if (t) GlobalUnlock(data);
+    CloseClipboard();
+}
+void hos_display_paste(void) {
+    if (hwnd) PostMessageA(hwnd, WM_APP + 12, 0, 0);
+}
 
 static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
@@ -369,6 +388,22 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             const int mod = (GetKeyState(VK_SHIFT) | GetKeyState(VK_CONTROL) | GetKeyState(VK_MENU)) & 0x8000;
             if (!mod) set_fullscreen(w, !fullscreen);
         }
+        if (hos_text_focus()) {   /* (a text field of the Insert menu has the keyboard: its editing keys, repeats too, and paste) */
+            if ((wp == 'V' && GetKeyState(VK_CONTROL) < 0) || (wp == VK_INSERT && GetKeyState(VK_SHIFT) < 0)) paste_clipboard(w);
+            else if (wp == VK_LEFT || wp == VK_RIGHT || wp == VK_HOME || wp == VK_END || wp == VK_BACK || wp == VK_DELETE ||
+                     wp == VK_RETURN || wp == VK_ESCAPE)
+                hos_text_put(HOS_TEXT_KEY | (uint32_t)wp);
+        }
+        return 0;
+    }
+    case WM_CHAR: {   /* (hookshot) a character typed, for the Insert menu's text fields (TranslateMessage, by the keyboard's
+                         layout). The window is an ANSI one: a byte of the code page, ASCII as itself, which is what a field
+                         takes; a double-byte character's two (a lead byte, then its trail) are left out together */
+        static int trail;
+        const BYTE c = (BYTE)wp;
+        if (trail) trail = 0;
+        else if (IsDBCSLeadByte(c)) trail = 1;
+        else if (c >= 0x20 && c != 0x7F) hos_text_put(c);   /* (Backspace, Enter, Esc and Ctrl+letters: WM_KEYDOWN above) */
         return 0;
     }
     case WM_SYSKEYDOWN:   /* Alt+Enter, as on Linux (display_sdl.c); other Alt keys (Alt+F4) go on to Windows */
@@ -382,6 +417,9 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_APP + 7:   /* (the Insert menu's row) */
         set_fullscreen(w, (int)wp);
+        return 0;
+    case WM_APP + 12:   /* (hookshot: the Insert menu's Paste, MkwVkHost.take_text) */
+        paste_clipboard(w);
         return 0;
     case WM_DPICHANGED:
         if (!fullscreen) {

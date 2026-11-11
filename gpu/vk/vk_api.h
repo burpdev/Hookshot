@@ -102,6 +102,13 @@ typedef struct MkwVkSetting {
     int restart, fixed;   /* the change applies at the next start; nothing to choose on this PC (the menu shows it greyed) */
 } MkwVkSetting;
 
+/* (hookshot, version 20) typed text for the Insert menu's text fields (MkwVkHost.take_text, host/rx_backend.c): a character
+   comes as its Unicode code point, an editing key as HOS_TEXT_KEY | its Windows key code (VK_LEFT, VK_RIGHT, VK_HOME, VK_END,
+   VK_BACK, VK_DELETE, VK_RETURN, VK_ESCAPE). The focus take_text is given: none, a field has the keyboard, or that and a paste
+   asked (the clipboard's first line comes as typed) */
+enum { HOS_TEXT_KEY = 0x40000000 };
+enum { HOS_TEXT_OFF, HOS_TEXT_ON, HOS_TEXT_PASTE };
+
 /* what the executable gives the back end */
 typedef struct MkwVkHost {
     uint32_t version;   /* MKWVK_API_VERSION */
@@ -195,6 +202,12 @@ typedef struct MkwVkHost {
     /* (version 20, hookshot) the main screen's size in pixels, as host/hos_main.c takes its shape at the start (Windows: the
        primary's; Linux: SDL's primary desktop), for the Insert menu's Aspect ratio and Output resolution rows: 0 when not known */
     int (*screen_size)(int *width, int *height);
+    /* (version 21, hookshot) the Insert menu's text fields: focus HOS_TEXT_OFF while none has the keyboard (the window takes no
+       text then: no input method opens over the game, and what was queued is dropped), HOS_TEXT_ON while one has it,
+       HOS_TEXT_PASTE to paste the clipboard's first line into it; then what was typed since the last call into out, at most
+       max, in order (characters and HOS_TEXT_KEY editing keys, repeats included; Ctrl+V and Shift+Insert paste): the count.
+       host/display.c (WM_CHAR, WM_KEYDOWN) and host/posix/display_sdl.c (SDL's text input and key events) put them in */
+    int (*take_text)(int focus, uint32_t *out, int max);
 } MkwVkHost;
 
 /* One completed temporal-upscale sample; all zero while inactive. */

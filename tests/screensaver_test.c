@@ -94,6 +94,14 @@ static void hos_relaunch_ask(void) { unexpected(); }         /* (host/hos_relaun
 static void hos_window_closed_exit(void) { unexpected(); }
 static void rx_close_asked(void) { unexpected(); }   /* (host/rx_backend.c: WM_CLOSE, not one of the checked messages) */
 void hos_vk_note_key_press(unsigned key) { (void)key; }   /* (host/rx_backend.c: the menu notes key presses; nothing here) */
+/* (the Insert menu's text fields, host/rx_backend.c MkwVkHost.take_text: none has the keyboard here, nothing is typed) */
+enum { WM_CHAR = 0x102, VK_BACK = 8, VK_END = 0x23, VK_HOME = 0x24, VK_LEFT = 0x25, VK_RIGHT = 0x27, VK_INSERT = 0x2d,
+       VK_DELETE = 0x2e, HOS_TEXT_KEY = 0x40000000 };
+typedef unsigned char BYTE;
+static int hos_text_focus(void) { return 0; }
+static void hos_text_put(uint32_t c) { (void)c; unexpected(); }
+static void paste_clipboard(HWND w) { (void)w; unexpected(); }
+static BOOL IsDBCSLeadByte(BYTE c) { (void)c; unexpected(); return FALSE; }
 
 /* (PR 946: the Insert menu takes the mouse while it is open; these branches never run here either) */
 enum {

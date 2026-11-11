@@ -249,7 +249,8 @@ def main():
     tick = menu[menu.index("void menu_tick() {"):]
     key_poll = tick[tick.index("    enum { K_N ="):tick.index("    // (hookshot) the gamepads")]
     esc_at = tick.index("    const bool esc_opens")
-    esc_block = tick[esc_at:tick.index("    if (open_now.load() && page == 5) {", esc_at)]
+    # (the Esc block ends where the keys' branches begin: the text field's first, as the Insert menu's text fields have it)
+    esc_block = tick[esc_at:tick.index("    if (open_now.load() && editing) {", esc_at)]
     tx_at = menu.index("const char* tx_menu_shortcut(int v) {")
     tx = menu[tx_at:menu.index("\n}\n", tx_at) + 3]
     header = (ROOT / "gpu/vk/vk_menu.h").read_text(encoding="utf-8")

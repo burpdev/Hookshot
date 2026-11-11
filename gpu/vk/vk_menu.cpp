@@ -813,6 +813,7 @@ const char* tx_rumble(int v) { return v ? tx_percent(v) : "Off"; }
 constexpr float kVersionMinPt = 10;   // (the banner's version at Small and Medium: shrunk to fit, no smaller than this, in points)
 bool pad_last = false;   // (a controller was the menu's last input: its buttons in the prompts)
 int pad_confirm = 0, pad_back = 1;   // (the face buttons that confirm and go back, HOS_PAD_*: menu_keys::confirm_back, each tick)
+int pad_paste = 3;   // (hookshot: the one that pastes into a text field while it has the keyboard: menu_keys::paste)
 const char* tx_menu_size(int v) {
     static const char* t[] = {"Small", "Medium", "Large"};
     return v >= 1 && v <= 3 ? t[v - 1] : t[1];
@@ -1029,7 +1030,7 @@ const char* hn_output_res(int v, int variant) {
         "Larger than your screen: drawn bigger, then scaled down to the window. Sharper, and slower. The game's render "
         "targets get a bigger GPU pool, so a full-size 3D fits.",
         "Smaller than your screen: faster, and scaled up to the window.",
-        "Your own size, from output_res= in hookshot_options.ini."};
+        "Your own size, from Custom output size below."};
     if (variant >= 0) return variant < (int)std::size(t) ? t[variant] : nullptr;
     v = output_choice(v);
     if (!v) return t[0];
@@ -1101,6 +1102,55 @@ MENU_HINTS(hn_prompts, 0,
            "The Switch's buttons.", "An Xbox controller's.", "A PlayStation 4 controller's.", "A PlayStation 5 controller's.",
            "A Steam Deck's.", "The keys and mouse buttons your controls put each action on.")
 
+// ---- (hookshot) text fields: rows whose value is typed (MkwVkHost.take_text: WM_CHAR on Windows, SDL's text input on Linux;
+// RX_VK_MENU_SCRIPT's TYPE). A field holds printable ASCII alone, as the menu's glyphs are baked for it (vk_imgui.cpp
+// bake_some): any other character, typed or pasted, is left out, and its allow() can take fewer. While a field has the keyboard
+// (editing, menu_tick) the keys type into it and do nothing else: Left, Right, Home and End move the caret, Backspace and
+// Delete remove a character, Ctrl+V and Shift+Insert paste the clipboard's first line (the host does: take_text), Enter sets
+// the text (the field's apply, which can refuse it and say why), Esc puts the text back as it was. A controller's confirm and
+// back are Enter and Esc, its D-pad's Left and Right move the caret, its paste button (menu_keys::paste) pastes; a click
+// elsewhere is Enter, a right click Esc; F1, Home and closing the menu are Esc too ----
+struct TextField {
+    char text[64];                     // (NUL-terminated)
+    int len = 0, caret = 0;            // (in bytes, a character each: ASCII)
+    int max = 63;                      // (the most it holds, below sizeof text)
+    bool (*allow)(char c) = nullptr;   // (of the printable ASCII, what it takes; nullptr all of it)
+};
+enum { kTextGoOn, kTextDone, kTextCancel };
+/// One input to a field: a character typed (a Unicode code point) or HOS_TEXT_KEY | an editing key (vk_api.h). The text and its
+/// caret changed; kTextDone for Enter, kTextCancel for Esc, else kTextGoOn
+int text_edit(TextField& f, uint32_t in) {
+    f.len = std::clamp(f.len, 0, (int)sizeof f.text - 1), f.caret = std::clamp(f.caret, 0, f.len);
+    if (in & HOS_TEXT_KEY) {
+        switch (in & ~(uint32_t)HOS_TEXT_KEY) {
+        case VK_RETURN: return kTextDone;
+        case VK_ESCAPE: return kTextCancel;
+        case VK_LEFT: f.caret = std::max(f.caret - 1, 0); break;
+        case VK_RIGHT: f.caret = std::min(f.caret + 1, f.len); break;
+        case VK_HOME: f.caret = 0; break;
+        case VK_END: f.caret = f.len; break;
+        case VK_BACK:
+            if (f.caret > 0) memmove(f.text + f.caret - 1, f.text + f.caret, (size_t)(f.len - f.caret + 1)), f.caret--, f.len--;
+            break;
+        case VK_DELETE:
+            if (f.caret < f.len) memmove(f.text + f.caret, f.text + f.caret + 1, (size_t)(f.len - f.caret)), f.len--;
+            break;
+        }
+        return kTextGoOn;
+    }
+    if (in < 0x20 || in > 0x7e || f.len >= std::min(f.max, (int)sizeof f.text - 1) || (f.allow && !f.allow((char)in)))
+        return kTextGoOn;   // (not printable ASCII, not this field's, or no room: left out)
+    memmove(f.text + f.caret + 1, f.text + f.caret, (size_t)(f.len - f.caret + 1));
+    f.text[f.caret++] = (char)in;
+    f.len++;
+    return kTextGoOn;
+}
+/// A field's text set whole, cut to what it holds, the caret at its end
+void text_set(TextField& f, const char* t) {
+    snprintf(f.text, sizeof f.text, "%.*s", std::clamp(f.max, 0, (int)sizeof f.text - 1), t ? t : "");
+    f.len = f.caret = (int)strlen(f.text);
+}
+
 Row rows[] = {
     // Graphics, in sections: a heading row is a section's title (draw_options draws it, the selection steps over it). The
     // Quality preset first, as it sets rows in every section. (Reflex, Anti-Lag 2, the Upscaler and the DLSS model only where
@@ -1119,6 +1169,10 @@ Row rows[] = {
     {TAB_GRAPHICS, "Output resolution", &opts.output_res, 0, 0, 1, tx_output_res,
      "The game's whole frame, HUD included, before it is scaled to the window. Docked only. Applies after a restart.",
      hn_output_res, true, true},
+    {TAB_GRAPHICS, "Custom output size", nullptr, 0, 0, 0, nullptr,   // (hookshot: a text field, field_rows)
+     "An Output resolution of your own, typed as width x height: your monitor's size, such as 3440x1440, 2560x1080 or "
+     "2560x1600. Each side is rounded down to a multiple of 8; a size the Output resolution offers is chosen there. Empty: "
+     "none. Docked only. Applies after a restart."},
     {TAB_GRAPHICS, "Profile", &opts.handheld, 0, 1, 1, tx_profile,
      "Runs the game as the console docked or handheld. Applies after a restart.", hn_handheld, true},
     {TAB_GRAPHICS, "Upscaler", &opts.dlss, 0, ur::kUpscalers - 1, 1, tx_upscaler, "What scales the 3D up to the Output resolution.",
@@ -1553,13 +1607,20 @@ namespace mr = menu_restart;
 mr::State restart_state;
 int restart_slot[kRows];             // (a row's slot in restart_state, -1 none)
 const char* restart_names[mr::kMax];
+/// (hookshot) A row's value as a restart compares it: the Output resolution's size itself, so another size of the player's own
+/// (Custom output size), on the same choice, is a change too
+int restart_value(const Row& r) {
+    if (r.value != &opts.output_res) return *r.value;
+    const Out o = output_at(*r.value);
+    return (int)(o.w << 16 | o.h);
+}
 void restart_init() {
     static bool done = false;
     if (done) return;
     done = true;
     opts.game_lang = i18n::game_lang_index();   // (language.txt's, the language the game started in)
     for (int i = 0; i < kRows; i++) {
-        restart_slot[i] = rows[i].restart && rows[i].value ? restart_state.add(*rows[i].value) : -1;
+        restart_slot[i] = rows[i].restart && rows[i].value ? restart_state.add(restart_value(rows[i])) : -1;
         if (restart_slot[i] >= 0) restart_names[restart_slot[i]] = rows[i].name;
     }
 }
@@ -1567,11 +1628,11 @@ int restart_slot_of(const Row& r) { return restart_slot[&r - rows]; }
 /// A row that takes a restart, changed from what the game started with (a row past menu_restart.h's kMax has no slot: never)
 bool restart_changed(const Row& r) {
     const int slot = restart_slot_of(r);
-    return r.value && r.restart && slot >= 0 && *r.value != restart_state.start[slot];
+    return r.value && r.restart && slot >= 0 && restart_value(r) != restart_state.start[slot];
 }
 void restart_values(int* now) {
     for (int i = 0; i < kRows; i++)
-        if (restart_slot[i] >= 0) now[restart_slot[i]] = *rows[i].value;
+        if (restart_slot[i] >= 0) now[restart_slot[i]] = restart_value(rows[i]);
 }
 /// The rows whose value is not the one the game runs with (a bit a slot)
 unsigned restart_pending() {
@@ -2319,6 +2380,108 @@ void set_row(Row& r, int v, int dir, bool keep = true) {
     if (keep) save();
 }
 
+// ---- (hookshot) the rows that are text fields (text_edit): their fields, what Enter on each sets, the one being edited ----
+/// Custom output size: the Output resolution's size of the player's own (custom_output), typed, as output_res= in
+/// hookshot_options.ini sets it (parse_output: the same rules)
+bool output_size_char(char c) { return (c >= '0' && c <= '9') || c == 'x' || c == 'X'; }
+TextField output_field{{}, 0, 0, 11, output_size_char};
+/// The field as the setting is: the size of the player's own, or empty
+void output_field_show() {
+    char t[24] = "";
+    if (custom_output.w) snprintf(t, sizeof t, "%ux%u", custom_output.w, custom_output.h);
+    text_set(output_field, t);
+}
+/// "<width>x<height>", each side 1 to 5 digits, nothing else: into *w, *h
+bool size_text(const char* t, unsigned* w, unsigned* h) {
+    unsigned* side[2] = {w, h};
+    for (int k = 0; k < 2; k++) {
+        int digits = 0;
+        for (*side[k] = 0; *t >= '0' && *t <= '9'; t++, digits++) *side[k] = *side[k] * 10 + (unsigned)(*t - '0');
+        const bool end = k ? *t == 0 : *t == 'x' || *t == 'X';   // (the width ends at the x, the height at the text's end)
+        if (digits < 1 || digits > 5 || !end) return false;
+        t += !k;
+    }
+    return true;
+}
+/// Enter on Custom output size: the Output resolution row on the size typed (one it offers, or the player's own), or, emptied,
+/// none of the player's own; saved. nullptr when taken, else why not
+const char* output_field_apply() {
+    unsigned w = 0, h = 0;
+    if (output_field.len) {
+        if (!size_text(output_field.text, &w, &h)) return "Type the width, an x, then the height: 3440x1440.";
+        w &= ~7u, h &= ~7u;
+        if (!hos_output_size_valid(w, h))
+            return "Not a size the game can draw: at least 640x360, at most 5120x2880's pixels, from 5:4 to 48:9 in shape.";
+    }
+    // (changing the custom size can reorder the shape list: keep the startup and Later choices by shape, not index)
+    int aspect_slot = -1;
+    for (const Row& r : rows)
+        if (r.value == &opts.ultrawide) aspect_slot = restart_slot_of(r);
+    const bool follow_host = aspect_follows_host(opts.ultrawide), started_monitor = aspect_started == aspect_monitor_value();
+    const std::string started_shape = aspect_shape(aspect_started);
+    const bool later = aspect_slot >= 0 && restart_state.later;
+    const int declined = later ? restart_state.declined[aspect_slot] : 0;
+    const bool declined_monitor = later && declined == aspect_monitor_value();
+    const std::string declined_shape = later ? aspect_shape(declined) : std::string();
+    const bool start_custom = output_started == custom_index() && custom_output.w;
+    const Out started = output_at(output_started);
+    if (output_field.len) opts.output_res = output_choice_of(w, h);
+    // (an offered size, including one found on a new screen, or an empty field: no separate custom choice)
+    if (opts.output_res != custom_index() || !output_field.len)
+        custom_output = {0, 0}, opts.output_res = output_choice(opts.output_res);
+    // (the run's original custom size must still be reachable when returning to its starting shape)
+    if (start_custom && (custom_output.w != started.w || custom_output.h != started.h)) {
+        output_extras.push_back(started);
+        output_started = last_choice();
+    }
+    aspect_started = started_monitor ? aspect_monitor_value() : aspect_index(started_shape);
+    opts.ultrawide = aspect_of_choice(opts.output_res, output_field.len ? 0 : follow_host);
+    for (Row& r : rows) {
+        if (r.value == &opts.output_res) r.hi = last_choice();
+        if (r.value == &opts.ultrawide) r.hi = aspect_last();
+    }
+    if (aspect_slot >= 0) restart_state.restart_value(aspect_slot, aspect_started);
+    if (later) restart_state.declined[aspect_slot] = declined_monitor ? aspect_monitor_value() : aspect_index(declined_shape);
+    menu_refresh = true;
+    output_field_show();   // (as taken: each side a multiple of 8)
+    // (the player's from now on, also over HOS_OUTPUT_RES; the preset is unchanged, as for the Output resolution row)
+    env_release(&opts.output_res);
+    int now[mr::kMax];
+    restart_values(now);
+    restart_state.note(now);
+    save();
+    return nullptr;
+}
+struct FieldRow {
+    const char* name;
+    TextField* field;
+    const char* (*apply)();
+};
+const FieldRow field_rows[] = {{"Custom output size", &output_field, output_field_apply}};
+/// A row that is a text field (a row with no value, by its name, as is_motion_row): its field and apply; nullptr any other
+const FieldRow* field_row(const Row& r) {
+    for (const FieldRow& f : field_rows)
+        if (!r.value && !strcmp(r.name, f.name)) return &f;
+    return nullptr;
+}
+TextField* editing = nullptr;            // (the field that has the keyboard, menu_tick; nullptr none)
+const char* (*edit_apply)() = nullptr;   // (what its Enter sets)
+char edit_kept[sizeof TextField::text];  // (its text before: Esc puts it back)
+const char* edit_why = nullptr;          // (why Enter did not take its text: the help's line, until the next key)
+bool edit_enter_held = false;            // (the Enter that started it is still down: its repeats are not the field's Enter)
+void edit_start(TextField& f, const char* (*apply)()) {
+    editing = &f, edit_apply = apply, edit_why = nullptr, edit_enter_held = true;
+    memcpy(edit_kept, f.text, sizeof edit_kept);
+    f.caret = f.len;
+}
+/// The field lets the keyboard go: done (Enter: its apply takes the text, or says why not and it keeps the keyboard) or not (its
+/// text back as it was)
+void edit_end(bool done) {
+    if (!editing || (done && edit_apply && (edit_why = edit_apply()))) return;
+    if (!done) text_set(*editing, edit_kept), edit_why = nullptr;
+    editing = nullptr, edit_apply = nullptr;
+}
+
 // ---- (hookshot) the Controls page: what presses each of the Switch's buttons, a gamepad input and up to two keys ----
 struct Control {
     int button;   // HOS_SW_*, or HOS_KEY_* (keys only)
@@ -2475,6 +2638,7 @@ float ease_step = 0;     // (this drawing's share of the way: the time since the
 ui::Ctx ui_ctx(uint32_t w, uint32_t h) {
     ui::Ctx c{ImGui::GetForegroundDrawList(), ui::fonts(), 1, (float)w, (float)h, 0, pad_last};
     c.confirm_dot = menu_keys::dot(pad_confirm), c.back_dot = menu_keys::dot(pad_back);
+    c.paste_dot = menu_keys::dot(pad_paste);   // (hookshot: a text field's Paste)
     c.s = ui::unit((float)h, opts.menu_size, &c.safe);
     return c;
 }
@@ -2687,6 +2851,31 @@ void slider_cell(ui::Ctx& c, ImVec2 a, ImVec2 b, const char* value, int permille
     ui::triangle(c, ImVec2(a.x + in + 11 * s, mid), 9 * s, 0, arrow), ui::triangle(c, ImVec2(b.x - in - 11 * s, mid), 9 * s, 1, arrow);
     if (sel) ui::glow(c, a, b);
     *t0 = x0, *t1 = x1;
+}
+/// (hookshot) A text field's value cell: its text from the left (cut with "..." when too long); empty, the placeholder, dim.
+/// While it has the keyboard (typing): light text on the dark cell inside a gold frame, a steady caret at its place, the text slid
+/// left to keep the caret in view
+void text_cell(ui::Ctx& c, ImVec2 a, ImVec2 b, const TextField& f, bool sel, bool typing, const char* placeholder) {
+    const float s = c.s, mid = (a.y + b.y) * 0.5f, in = 4 * s, px = 18 * s, x0 = a.x + in + 12 * s, room = b.x - in - 12 * s - x0;
+    c.d->AddRectFilled(a, b, ui::kCellDark);
+    c.d->AddRect(a, b, ui::kEdge, 0, std::max(1.0f, s));
+    if (sel && !typing) ui::gold(c, a + ImVec2(in, in), b - ImVec2(in, in));
+    ImFont* font = sel ? c.f.strong : c.f.body;
+    const std::string t(f.text, (size_t)std::clamp(f.len, 0, (int)sizeof f.text - 1));
+    if (t.empty() && !typing) {
+        ui::text_mid(c, c.f.body, px, x0, mid, sel ? ui::kGoldInk : ui::kDim, placeholder);
+    } else if (!typing) {
+        ui::text_mid(c, font, px, x0, mid, sel ? ui::kGoldInk : ui::kInk, fit(c, font, px, room, t, false).c_str());
+    } else {
+        const float caret = ui::size_of(font, px, t.substr(0, (size_t)std::clamp(f.caret, 0, (int)t.size())).c_str()).x;
+        const float shift = std::max(0.0f, caret - room);
+        c.d->PushClipRect(ImVec2(x0 - 3 * s, a.y), ImVec2(x0 + room + 3 * s, b.y), true);
+        ui::text_mid(c, font, px, x0 - shift, mid, ui::kInkBright, t.c_str());
+        c.d->AddRectFilled(ImVec2(x0 - shift + caret, mid - 11 * s), ImVec2(x0 - shift + caret + 2 * s, mid + 11 * s), ui::kGoldHi);
+        c.d->PopClipRect();
+        c.d->AddRect(a + ImVec2(in * 0.5f, in * 0.5f), b - ImVec2(in * 0.5f, in * 0.5f), ui::kGoldHi, 0, 2.5f * s);
+    }
+    if (sel) ui::glow(c, a, b);
 }
 /// "Restart needed: " and the pending rows, on one line of width: the last ones as "and N more" when they do not fit
 std::string restart_line(ui::Ctx& c, float px, float width) {
@@ -2936,6 +3125,8 @@ void row_value_cell(ui::Ctx& c, const Row& r, ImVec2 va, ImVec2 vb, bool selecte
         choice_cell(c, va, vb, tool, selected, cheat_chooses(r.cheat), cheat_chooses(r.cheat));
     } else if (r.cheat >= 0 && *cheat_button_text(r.cheat)) {
         choice_cell(c, va, vb, cheat_button_text(r.cheat), selected, false, false, r.cheat == 9);
+    } else if (const FieldRow* f = field_row(r)) {
+        text_cell(c, va, vb, *f->field, selected, editing == f->field, "None");
     } else if (!r.value) {
         if (pending == &r) choice_cell(c, va, vb, "Press again to confirm", selected, false, false);
         else if (is_share_row(r)) choice_cell(c, va, vb, share_value.empty() ? "Save" : share_value, selected, false, false);   // (an action, not a page)
@@ -3011,7 +3202,8 @@ void draw_options(ui::Ctx& c) {
     column(c, cx0, cx1, hh);
     const int count = tab_row_count(cur_tab), sel = tab_selected[cur_tab];
     const Row& selr = rows[tab_row_to_global(cur_tab, sel)];
-    const char* hint = selr.value && selr.hint ? selr.hint(*selr.value, -1) : nullptr;
+    const FieldRow* field = field_row(selr);   // (hookshot: a text field: why Enter did not take it, while it is edited)
+    const char* hint = selr.value && selr.hint ? selr.hint(*selr.value, -1) : field && editing == field->field ? edit_why : nullptr;
     if (is_share_row(selr) && !share_said.empty()) hint = share_said.c_str();   // (what the last save did)
     if (&selr == &rows[kBugReportRow]) hint = bug_report_hint();   // (the Bug report: where it was saved, or why not)
     const std::string pending_line = (cur_tab == TAB_GRAPHICS || cur_tab == TAB_DEBUG) && restart_pending() ? restart_line(c, 16 * s, hx1 - hx0 - 66 * s) : "";
@@ -3024,19 +3216,27 @@ void draw_options(ui::Ctx& c) {
     ui::Prompt prompt_list[7] = {{ui::kUpDown, "Choose"}};
     int prompts_n = 1;
     const char* compact_key_name = opts.compact_menu_key == 1 ? "RCtrl" : "RShift";
-    if (selr.value || (selr.cheat >= 0 && (selr.cheat <= 1 || selr.cheat == 7 || cheat_chooses(selr.cheat) || age_shown(selr.cheat)))) {
-        prompt_list[prompts_n++] = {ui::kLeftRight, "Change"};
-        if (selr.cheat >= 0) if (const char* says = cheat_confirm(selr.cheat)) prompt_list[prompts_n++] = {ui::kConfirm, says};
-        prompt_list[prompts_n++] = {ui::kCompact, "Compact", compact_key_name};
-    } else if (selr.cheat >= 0) {
-        if (const char* says = cheat_confirm(selr.cheat)) prompt_list[prompts_n++] = {ui::kConfirm, says};
-        prompt_list[prompts_n++] = {ui::kCompact, "Compact", compact_key_name};
+    if (field && editing == field->field) {
+        prompts_n = 0;
+        prompt_list[prompts_n++] = {ui::kPaste, "Paste"};
+        prompt_list[prompts_n++] = {ui::kConfirm, "Done"}, prompt_list[prompts_n++] = {ui::kBack, "Cancel"};
     } else {
-        prompt_list[prompts_n++] = {ui::kConfirm, confirms ? (pending == &selr ? "Confirm" : selr.name) : &selr == &rows[kBugReportRow] || is_share_row(selr) ? "Save" : "Open"};
-    }
-    if (cur_tab == TAB_MOTION) prompt_list[prompts_n++] = {ui::kBack, "Back"};   // (Esc: to Controls)
-    else {
-        prompt_list[prompts_n++] = {ui::kTabs, "Tabs"}, prompt_list[prompts_n++] = {ui::kBack, "Close"};
+        if (field) {
+            prompt_list[prompts_n++] = {ui::kConfirm, "Edit"};
+        } else if (selr.value || (selr.cheat >= 0 && (selr.cheat <= 1 || selr.cheat == 7 || cheat_chooses(selr.cheat) || age_shown(selr.cheat)))) {
+            prompt_list[prompts_n++] = {ui::kLeftRight, "Change"};
+            if (selr.cheat >= 0) if (const char* says = cheat_confirm(selr.cheat)) prompt_list[prompts_n++] = {ui::kConfirm, says};
+            prompt_list[prompts_n++] = {ui::kCompact, "Compact", compact_key_name};
+        } else if (selr.cheat >= 0) {
+            if (const char* says = cheat_confirm(selr.cheat)) prompt_list[prompts_n++] = {ui::kConfirm, says};
+            prompt_list[prompts_n++] = {ui::kCompact, "Compact", compact_key_name};
+        } else {
+            prompt_list[prompts_n++] = {ui::kConfirm, confirms ? (pending == &selr ? "Confirm" : selr.name) : &selr == &rows[kBugReportRow] || is_share_row(selr) ? "Save" : "Open"};
+        }
+        if (cur_tab == TAB_MOTION) prompt_list[prompts_n++] = {ui::kBack, "Back"};   // (Esc: to Controls)
+        else {
+            prompt_list[prompts_n++] = {ui::kTabs, "Tabs"}, prompt_list[prompts_n++] = {ui::kBack, "Close"};
+        }
     }
     const float bar_top = ui::prompt_bar_top(c);   // (the strip itself drawn last, over all: below)
     float bottom = std::min(c.h - c.safe, bar_top) - 10 * s;   // (the rows end above the prompts)
@@ -4054,6 +4254,7 @@ void menu_init() {
     vram_budget_sync();
     fps_cap_started = opts.fps_cap;   // (the FPS counter's graph: the cap applies from the start, host/nn_vi.c)
     fps_level_now.store(fps_stats::level_of(opts.show_fps), std::memory_order_relaxed);
+    output_field_show();   // (hookshot: Custom output size, the size of the player's own, as the file has it)
     // (the environment over the saved rows, for this run only: env_override, save)
     if (const char* e = getenv("RX_VK_FRAMEGEN_MULT")) env_override(&opts.framegen, std::min(std::max(atoi(e), 2), 8));
     if (const char* e = getenv("RX_VK_PACE")) env_override(&opts.pace, !env_value_off(e));
@@ -4557,6 +4758,7 @@ void menu_tick() {
     if (host && host->binding)   // (A and B as bound now: the Controls page or the Layout preset can change them)
         menu_keys::confirm_back(host->binding(HOS_BIND_PAD, HOS_SW_A, 0), host->binding(HOS_BIND_PAD, HOS_SW_B, 0), &pad_confirm,
                                 &pad_back);
+    pad_paste = menu_keys::paste(pad_confirm, pad_back);   // (hookshot: a text field's paste, on a button neither is on)
     if (pad(HOS_PAD_GUIDE) || chord_now) press[0] = true;
     {   // holding an arrow or the D-pad repeats it: after 0.35 s, 12 a second, then 30 a second after 1.5 s held
         static int64_t held_since[5], next_repeat[5];
@@ -4576,8 +4778,11 @@ void menu_tick() {
         press[1] |= pad(HOS_PAD_UP), press[2] |= pad(HOS_PAD_DOWN), press[3] |= pad(HOS_PAD_LEFT);
         press[4] |= pad(HOS_PAD_RIGHT), press[5] |= pad(pad_back), press[7] |= pad(pad_confirm);
     }
+    std::vector<uint32_t> scripted;   // (hookshot: RX_VK_MENU_SCRIPT's typing, for the text field that has the keyboard)
     {   // RX_VK_MENU_SCRIPT (test runs, which never have the focus): timed menu keys, "<seconds>:<INS|UP|DOWN|LEFT|RIGHT|ESC|ENTER|TABL|TABR>,...";
-        // and the gamepad's face buttons by position, PADS PADE PADW PADN (bottom, right, left, top), as a controller's press
+        // and the gamepad's face buttons by position, PADS PADE PADW PADN (bottom, right, left, top), as a controller's press.
+        // (hookshot) TYPE:<text> types the text up to the next comma, as the keyboard would; while a text field has the
+        // keyboard ENTER, ESC, LEFT, RIGHT, HOME, END, BACK (Backspace) and DEL are its keys, and the pad's confirm and back too
         static const char* next = getenv("RX_VK_MENU_SCRIPT");
         static const int64_t start = prof_now();
         double at;
@@ -4585,16 +4790,42 @@ void menu_tick() {
         int n = 0;
         if (next && sscanf(next, "%lf:%7[A-Z]%n", &at, key, &n) == 2 && (prof_now() - start) / 1e9 >= at) {
             static const char* names[] = {"INS", "UP", "DOWN", "LEFT", "RIGHT", "ESC", "", "ENTER", "", "", "TABL", "TABR"};
+            static const struct { const char* name; int vk; } edit_keys[] = {
+                {"ENTER", VK_RETURN}, {"ESC", VK_ESCAPE}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT}, {"HOME", VK_HOME},
+                {"END", VK_END}, {"BACK", VK_BACK}, {"DEL", VK_DELETE}};
+            if (!strcmp(key, "TYPE") && next[n] == ':') {
+                const size_t len = strcspn(next + n + 1, ",");
+                for (size_t i = 0; i < len; i++) scripted.push_back((unsigned char)next[n + 1 + i]);
+                n += (int)len + 1;
+            }
+            for (const auto& k : edit_keys)
+                if (editing && !strcmp(key, k.name)) scripted.push_back(HOS_TEXT_KEY | (uint32_t)k.vk);
             for (int i = 0; i < 12; i++) press[i] |= *names[i] && !strcmp(key, names[i]);
             static const char* pads[] = {"PADS", "PADE", "PADW", "PADN"};
             for (int p = 0; p < 4; p++)
                 if (!strcmp(key, pads[p]) && open_now.load() && listening != 1) {
                     press[5] |= p == pad_back, press[7] |= p == pad_confirm;
+                    if (editing && (p == pad_back || p == pad_confirm))
+                        scripted.push_back(HOS_TEXT_KEY | (uint32_t)(p == pad_confirm ? VK_RETURN : VK_ESCAPE));
                     pad_last = true;
                 }
             next = next[n] == ',' ? next + n + 1 : nullptr;
         }
     }
+    // (hookshot) the text field that has the keyboard (editing): what was typed since the last frame, in order, and a paste asked
+    // with the controller's paste button; the host is told whether one has it, so that the window takes text only then
+    uint32_t typed[64];
+    int typed_n = 0;
+    const bool pasting = editing && open_now.load() && pad(pad_paste);
+    if (host && host->take_text) typed_n = host->take_text(!editing ? HOS_TEXT_OFF : pasting ? HOS_TEXT_PASTE : HOS_TEXT_ON, typed, 64);
+    if (editing && press[0] && !(pad(HOS_PAD_GUIDE) || chord_now)) press[0] = false;   // (Insert is the field's: Shift+Insert pastes)
+    if (editing && (press[0] || press[6])) edit_end(false);   // (F1 or Home: the menu closes, the text as it was)
+    // (the keyboard's Enter or Esc that ended an edit, as the menu's own press too: its queued press or its key state can come a
+    // frame after the text's, and would open the field again or close the menu. Not taken until both keys are up, 50 ms on)
+    static int64_t edit_keys_until = 0;
+    if (edit_keys_until && (prof_now() < edit_keys_until || ((GetAsyncKeyState(VK_RETURN) | GetAsyncKeyState(VK_ESCAPE)) & 0x8000)))
+        press[5] = press[7] = false;
+    else edit_keys_until = 0;
     bool tab_left = press[10] || pad(HOS_PAD_LSHOULDER) || pad(HOS_PAD_LTRIGGER);
     bool tab_right = press[11] || press[12] || pad(HOS_PAD_RSHOULDER) || pad(HOS_PAD_RTRIGGER);
     if (press[12] && (GetAsyncKeyState(VK_SHIFT) & 0x8000)) tab_left = true, tab_right = false;
@@ -4645,7 +4876,30 @@ void menu_tick() {
         if (open_now.load()) dlss_probe(), fsr4_probe();   // (whether the Upscaler row can offer DLSS and FSR here: asked once)
         if (open_now.load()) refresh_mics();   // (the microphones as they are now)
     }
-    if (open_now.load() && page == 5) {   // (hookshot) the restart question: Later (the default) or Restart now
+    if (open_now.load() && editing) {   // (hookshot) a text field has the keyboard: the keys type into it (text_edit), nothing else
+        int done = kTextGoOn;
+        auto feed = [&](uint32_t in) {
+            if (done == kTextGoOn) done = text_edit(*editing, in), edit_why = nullptr, changed = true;
+        };
+        if (!(GetAsyncKeyState(VK_RETURN) & 0x8000)) edit_enter_held = false;
+        for (int i = 0; i < typed_n; i++)
+            if (!edit_enter_held || typed[i] != (HOS_TEXT_KEY | VK_RETURN)) feed(typed[i]);
+        if (done != kTextGoOn) edit_keys_until = prof_now() + 50000000LL;   // (the keyboard's Enter or Esc: above)
+        for (const uint32_t in : scripted) feed(in);
+        // (the controller: the D-pad's Left and Right move the caret, confirm and back are Enter and Esc)
+        if (pad(HOS_PAD_LEFT)) feed(HOS_TEXT_KEY | VK_LEFT);
+        if (pad(HOS_PAD_RIGHT)) feed(HOS_TEXT_KEY | VK_RIGHT);
+        if (pad(pad_confirm)) feed(HOS_TEXT_KEY | VK_RETURN);
+        if (pad(pad_back)) feed(HOS_TEXT_KEY | VK_ESCAPE);
+        if (mouse && done == kTextGoOn) {   // (a click elsewhere sets the text, a right click puts it back; the wheel scrolls)
+            const menu_hit::Hit hit = hits.at((float)mx, (float)my);
+            const bool on_field = hit.part == menu_hit::kRow && hit.index == tab_selected[cur_tab];
+            if ((ptr.pressed & HOS_MOUSE_LEFT) && !on_field) done = kTextDone;
+            if (ptr.pressed & HOS_MOUSE_RIGHT) done = kTextCancel;
+            if (ptr.wheel) wheel_rows[cur_tab] += ptr.wheel, changed = true;
+        }
+        if (done != kTextGoOn) edit_end(done == kTextDone), changed = true;
+    } else if (open_now.load() && page == 5) {   // (hookshot) the restart question: Later (the default) or Restart now
         if (mouse) {   // (a button under the cursor chosen, a click on it pressed, a right click is Later; no list: the wheel does nothing)
             const menu_hit::Hit hit = hits.at((float)mx, (float)my);
             if (hit.part == menu_hit::kButton && (moved || ptr.pressed) && hit.index != ask_sel) ask_sel = hit.index, changed = true;
@@ -4907,6 +5161,7 @@ void menu_tick() {
         else if (press[7] && is_motion_row(r)) cur_tab = TAB_MOTION, tab_selected[TAB_MOTION] = 0, press[7] = false, changed = true;
         else if (press[7] && is_share_row(r)) share_pipeline_list(), press[7] = false, changed = true;
         else if (press[7] && &r == &rows[kBugReportRow]) bug_report_save(), press[7] = false, changed = true;
+        else if (const FieldRow* f = press[7] ? field_row(r) : nullptr) edit_start(*f->field, f->apply), changed = true;   // (hookshot)
         else if (press[7] && !r.value && can_bind()) page = 1, csel = 0, ccol = menu_hit::kCtlPrimary, changed = true;
         if ((press[3] || press[4] || press[7]) && r.value) {   // (Enter, or A, as Right)
             if (press[7]) press[4] = true;
@@ -4931,6 +5186,7 @@ void menu_tick() {
             if (drag_row >= 0) save();   // (a slider let go off the window: kept now)
             hover_tab = -1, drag_row = -1, mouse_read = false;
             pending = nullptr;
+            edit_end(false);   // (hookshot: a text field being edited, its text as it was)
         }
         if (now_open != told && app_window()) {
             told = now_open;

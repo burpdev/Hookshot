@@ -122,7 +122,7 @@ def main():
     p.add_argument("--source-root", type=Path, default=ROOT, help="production sources for a failing-before check; this checkout's fixture is retained")
     a = p.parse_args()
     host = a.source_root.resolve() / "host"
-    coop = (host / "oot_coop.c").read_text(encoding="utf-8")
+    coop = (host / "coop_oot.c").read_text(encoding="utf-8")
     try:
         wiring((host / "nn_fs.c").read_text(encoding="utf-8"), (host / "nvn_native.c").read_text(encoding="utf-8"), coop)
     except AssertionError as e:
@@ -131,9 +131,9 @@ def main():
     print("the wiring: the present's last call, OpenFile's hook, the save lock in the save mount's writes, no direct write")
     with tempfile.TemporaryDirectory(prefix="hookshot-oot-coop-") as temp:
         temp = Path(temp)
-        pieces = temp / "oot_coop_pieces.c"
+        pieces = temp / "coop_oot_pieces.c"
         pieces.write_text("\n".join(piece(coop, m) for m in PIECES) + "\n", encoding="utf-8")
-        exe = temp / "oot_coop_test.exe"
+        exe = temp / "coop_oot_test.exe"
         base = [a.cc, "-std=gnu11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-I" + str(host),
                 '-DCOOP_OOT_PIECES="%s"' % pieces.as_posix(), str(ROOT / "tests" / "coop_oot_test.c"), str(host / "coop_state.c"),
                 str(host / "coop_proto.c"), str(ROOT / "third_party" / "monocypher" / "monocypher.c"), "-lm", "-o", str(exe)]

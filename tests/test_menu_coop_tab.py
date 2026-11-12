@@ -468,7 +468,9 @@ def main():
         "@@TEXT@@": "\n".join([block(menu, "struct TextField {"), between(menu, "enum { kTextGoOn", "\n") + "\n",
                                block(menu, "int text_edit("), block(menu, "void text_set(")]),
         "@@RULES@@": between(menu, "const char* tx_rule_shared(int v)", "const char* tx_onoff(int v)"),
-        "@@ROWS@@": between(menu, "    // (hookshot) Co-op (host/coop_menu.c)", "    // (hookshot) the Gameplay tab's Bug report"),
+        # (the tab also carries the direct link's rows: this fixture is the room's ten)
+        "@@ROWS@@": between(menu, "    // (hookshot) Co-op (host/coop_menu.c)",
+                                "    // (hookshot: the Co-op tab's rows for the direct link"),
         "@@COOP@@": between(menu, "MkwVkCoopView coop_now{};", "// ---- the rows that take a restart"),
         "@@ROWMAP@@": block(menu, "int tab_row_to_global("),
         "@@APPLY@@": between(menu, "/// (hookshot) Enter on the Co-op tab's Your name", "/// Custom output size: the Output"),

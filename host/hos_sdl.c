@@ -111,7 +111,6 @@ static int get_all(HMODULE m, int three) {
         GET(DeviceInstanceID, "SDL_JoystickGetDeviceInstanceID");
         GET(GetJoystick, "SDL_GameControllerGetJoystick");
         GET(JoystickInstanceID, "SDL_JoystickInstanceID");
-        *(FARPROC *)&f.Free = GetProcAddress(m, "SDL_free");   /* (hookshot: the clipboard's text, hos_sdl_free) */
     }
 #undef GET2
 #undef GET

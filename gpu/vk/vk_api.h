@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define MKWVK_API_VERSION 21
+#define MKWVK_API_VERSION 22
 enum { HOS_OPT_CHEAT_HEARTS = 32, HOS_OPT_CHEAT_FLIGHT, HOS_OPT_CHEAT_ACTION, HOS_OPT_CHEAT_CAMERA, HOS_OPT_CHEAT_SPEED };
 /* (hookshot) the Gameplay tab's Text size (host/oot_text_size.c): 0 the game's, 1 110%, 2 125%, 3 150%, 4 175% */
 enum { HOS_OPT_TEXT_SIZE = 10 };
@@ -202,8 +202,9 @@ typedef struct MkwVkHost {
     /* (version 20, hookshot) the main screen's size in pixels, as host/hos_main.c takes its shape at the start (Windows: the
        primary's; Linux: SDL's primary desktop), for the Insert menu's Aspect ratio and Output resolution rows: 0 when not known */
     int (*screen_size)(int *width, int *height);
-    /* (version 21, hookshot) the Insert menu's text fields: focus HOS_TEXT_OFF while none has the keyboard (the window takes no
-       text then: no input method opens over the game, and what was queued is dropped), HOS_TEXT_ON while one has it,
+    /* (version 22, hookshot) the Insert menu's text fields (21 added the renderer's nvn_program_created).
+       focus HOS_TEXT_OFF while none has the keyboard (the window takes no text then: no input method opens over the game,
+       and what was queued is dropped), HOS_TEXT_ON while one has it,
        HOS_TEXT_PASTE to paste the clipboard's first line into it; then what was typed since the last call into out, at most
        max, in order (characters and HOS_TEXT_KEY editing keys, repeats included; Ctrl+V and Shift+Insert paste): the count.
        host/display.c (WM_CHAR, WM_KEYDOWN) and host/posix/display_sdl.c (SDL's text input and key events) put them in */

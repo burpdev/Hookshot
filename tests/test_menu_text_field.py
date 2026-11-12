@@ -317,7 +317,7 @@ def main():
 
     # ---- the wiring ----
     version = int(re.search(r"#define MKWVK_API_VERSION (\d+)", api).group(1))
-    if version < 21:
+    if version < 22:
         raise SystemExit("FAIL: vk_api.h: MkwVkHost grew without an MKWVK_API_VERSION bump")
     # (host/rx_backend.c fills MkwVkHost by position: take_text's place in the struct is host_take_text's in vk_host)
     def code(text):   # (comments out: they hold ; and ,)

@@ -1263,6 +1263,15 @@ int coop_sync_accept(CoopSync *s, uint32_t token) {
     return 1;
 }
 
+int coop_sync_member_accepted(const CoopSync *s, int member, uint64_t session) {
+    if (!s || !s->in_room || !s->accepted || s->acc_save_gen != s->save_gen ||
+        member < 1 || member > COOP_MAX_MEMBERS || member == s->self || !session) return 0;
+    const Peer *p = &s->peer[member];
+    if (p->session != session || !peer_counts(s, p)) return 0;
+    int accepted = acc_index(s, p->kid);
+    return accepted >= 0 && !strcmp(s->acc_name[accepted], p->raw);
+}
+
 int coop_sync_copy_wanted(const CoopSync *s) { return s->copy_wanted; }
 
 void coop_sync_copied(CoopSync *s, int ok) {

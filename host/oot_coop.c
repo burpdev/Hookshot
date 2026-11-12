@@ -611,10 +611,23 @@ static int send_fn(int member, uint8_t kind, const uint8_t *bytes, size_t n, voi
     return member ? coop_send_to(member, kind, bytes, n) : coop_send(kind, bytes, n);
 }
 
+/* The engine owns consent; the session gets only current member/session bindings (G.lock held).
+   Read the live view, not G.view: a roster and a removal can arrive in the same receive batch before on_view. */
+static void publish_members(void) {
+    CoopView v;
+    coop_view_get(&v);
+    uint32_t members = 0;
+    for (int i = 0; G.eng && v.state == COOP_JOINED && i < v.n; i++)
+        if (coop_sync_member_accepted(G.eng, v.member[i].id, v.member[i].session))
+            members |= 1u << v.member[i].id;
+    coop_accept_members(&v, members);
+}
+
 static void on_message(int from, const uint8_t *bytes, size_t n, void *user) {
     const uint8_t kind = (uint8_t)(uintptr_t)user;
     AcquireSRWLockExclusive(&G.lock);
     if (G.eng) coop_sync_receive(G.eng, from, kind, bytes, n, coop_now_ms());
+    publish_members();   /* revocations take effect before the next event in this receive batch */
     ReleaseSRWLockExclusive(&G.lock);
 }
 
@@ -705,6 +718,7 @@ static void view_changed(const CoopView *v) {
         read_rules(&mine, 0);
         coop_sync_settings(G.eng, &mine, in_room && v->made);
     }
+    publish_members();
     ReleaseSRWLockExclusive(&G.lock);
 }
 
@@ -744,6 +758,7 @@ static int offer_of(CoopOffer *o, uint64_t now) {
 /* What the menu reads (G.lock held): the offer offer_update settled on, whether this game is the maker, the
    contributors at most every 500 ms. */
 static void publish(const CoopOffer *o, int has, uint64_t now) {
+    publish_members();
     const int maker = coop_sync_is_maker(G.eng), fresh = !G.pub_contrib_at || now - G.pub_contrib_at >= 500;
     CoopContributor k[PUB_CONTRIBUTORS];
     const int n = fresh ? coop_sync_contributors(G.eng, k, PUB_CONTRIBUTORS) : 0;
@@ -755,6 +770,7 @@ static void publish(const CoopOffer *o, int has, uint64_t now) {
 
 /* No engine (co-op off, or no save played yet): nothing to read. */
 static void publish_none(void) {
+    coop_accept_members(NULL, 0);
     AcquireSRWLockExclusive(&G.pub_lock);
     if (G.pub_has || G.pub.n || G.pub_ncontrib || G.pub_maker)
         memset(&G.pub, 0, sizeof G.pub), G.pub_has = G.pub_maker = G.pub_ncontrib = 0, G.pub_contrib_at = 0;
@@ -860,6 +876,7 @@ static void remove_key(const char *fingerprint) {
     if (ok) hos_log("coop: sync: key %s removed: every game drops it and its pool records, and ignores it from now on", fingerprint);
     else hos_log("coop: sync: key %s was not removed: only the room's maker removes, and only a key the room knows", fingerprint);
     G.pub_contrib_at = 0;
+    publish_members();
 }
 
 int hos_oot_coop_remove_key(const char *fingerprint) {
@@ -904,6 +921,7 @@ static int on_remove(int member, void *user) {
     (void)user;
     AcquireSRWLockExclusive(&G.lock);
     const int ok = G.eng && coop_sync_remove(G.eng, member);
+    publish_members();
     ReleaseSRWLockExclusive(&G.lock);
     if (ok) hos_log("coop: sync: member %d removed: every game drops its identity and its pool records", member);
     return ok;
@@ -1086,6 +1104,7 @@ static void bind_tables(Ctx *c, uint64_t mgr) {
     }
     const uint64_t now = coop_now_ms();
     if (G.eng) coop_sync_schema(G.eng, G.schema), coop_sync_rebind(G.eng);
+    publish_members();   /* another save must be accepted before its members count again */
     for (int i = 0; i < G.nflags; i++) {
         GFlag *f = &G.flags[i];
         f->last = raw_of(c, f);

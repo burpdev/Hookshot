@@ -57,7 +57,7 @@ PIECES = [
     "static GFlag *add_flag(", "static int cmp_pool_last(", "static int cmp_by_hash(", "static int build_table(", "static int32_t raw_of(",
     "static uint32_t reg_of(", "static GFlag *flag_by_hash(", "static int int_pending(", "static int apply_value(",
     "static int game_get_bool(", "static int set_flag(", "static int check_table(", "static uint32_t limit_fn(",
-    "static void sync_on(", "static void on_view(",
+    "static void publish_members(", "static void publish_none(", "static void sync_on(", "static void on_view(",
     "static void unbind(", "static void say_counts(", "static void bind_tables(", "static int player_in_world(",
     "static volatile int title_starts;", "void hos_oot_coop_rom_open(", "static int gate(",
     "static int start(", "void hos_oot_coop_present(",
@@ -110,6 +110,10 @@ def wiring(fs, nvn, coop):
     assert not re.search(r"oot_gamedata_set_bool\s*\(", coop), "host/oot_coop.c never calls the debug tools' direct table write"
     tick = coop[coop.index("static void on_tick("):]
     assert tick[:tick.index("\n}\n")].split("\n")[2].strip() == "sync_on();", "the session's tick switches sync on, as its view hook does"
+    for marker in ("static void on_message(", "static void view_changed(", "static void publish(",
+                   "static void remove_key(", "static int on_remove(", "static void bind_tables("):
+        assert "publish_members();" in piece(coop, marker), marker + " republishes consent after changing the engine"
+    assert "coop_accept_members(NULL, 0);" in piece(coop, "static void publish_none(")
 
 
 def main():

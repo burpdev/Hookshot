@@ -3449,12 +3449,44 @@ static void check_h7_moved_key(void) {
     printf("coop-sync-test: sync moved key: a key the player accepted under another member's name is a new offer, and a key that changes is said\n");
 }
 
+// The layers' consent query uses signed identity, not merely the relay's roster or its member number.
+static void check_member_acceptance(void) {
+    Net net = {0};
+    Game a, b;
+    game_init(&a, 1, 0xBA01), game_init(&b, 2, 0xBA02);
+    defaults(&a, 1), defaults(&b, 0);
+    a.ask = 1;
+    net.games[0] = &a, net.games[1] = &b, net.present[0] = net.present[1] = 1;
+    uint64_t now = run(&net, (net_roster(&net, "ACCEPT", 1000), 1000), 4000);
+    CHECK(!coop_sync_member_accepted(a.eng, 2, b.session), "member acceptance: roster and identity alone do not accept a member");
+    CoopOffer offer;
+    coop_sync_offer(a.eng, &offer, now);
+    CHECK(coop_sync_accept(a.eng, offer.token), "member acceptance: accept the offered identity");
+    CHECK(coop_sync_member_accepted(a.eng, 2, b.session), "member acceptance: accepted current identity");
+    CHECK(!coop_sync_member_accepted(a.eng, 2, b.session + 1), "member acceptance: another session does not inherit consent");
+    CHECK(!coop_sync_member_accepted(a.eng, 0, b.session) && !coop_sync_member_accepted(a.eng, 9, b.session) &&
+          !coop_sync_member_accepted(a.eng, 1, a.session), "member acceptance: invalid ids and self are not remote members");
+    b.session ^= 0x77;
+    net_roster(&net, "ACCEPT", now);
+    CHECK(!coop_sync_member_accepted(a.eng, 2, b.session), "member acceptance: a changed roster session needs a signed identity");
+    now = run(&net, now, 4000);
+    CHECK(coop_sync_member_accepted(a.eng, 2, b.session), "member acceptance: the accepted key can prove its new session");
+    CHECK(coop_sync_remove(a.eng, 2), "member acceptance: maker removes the member");
+    CHECK(!coop_sync_member_accepted(a.eng, 2, b.session), "member acceptance: removed while still in the roster");
+    coop_sync_room(b.eng, "", 0, NULL, NULL, 0, 0, now);
+    CHECK(!coop_sync_member_accepted(b.eng, 1, a.session), "member acceptance: after local leave no accepted member remains");
+    game_free(&a), game_free(&b);
+    free(net.q);
+    puts("coop-sync-test: member acceptance: unaccepted, accepted, removed, left and changed session");
+}
+
 int main(void) {
     fails = 0;
     if (getenv("COOP_ADVERSARY")) {
         check_adversary();
         return fails != 0;
     }
+    check_member_acceptance();
     check_algebra();
     check_rooms(0, 2, 1);
     check_rooms(30, 4, 1);

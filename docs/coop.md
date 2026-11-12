@@ -234,6 +234,19 @@ a gameplay authority or protection against a trusted member lying.
 deterministic relay clock: loss, reordering, duplicated envelopes, full queues, departure, consent and fragmentation.
 Its concurrent caller case also runs under ThreadSanitizer on Linux when the compiler provides it.
 
+### Accepted members
+
+Layers call `coop_member_accepted(id)`. A roster entry alone is not consent. The answer is false before this player
+accepted that member's signed identity and name, when that identity is disputed, ignored or removed, after a new save
+needs acceptance, and outside a joined session. A roster's changed session immediately loses the old binding. An
+accepted key can prove its new session with its signed identity; merely claiming the old name or member number cannot.
+
+The knowledge lives in `coop_sync_member_accepted(engine, id, session)` in the game-free progress engine.
+`oot_coop.c` publishes those answers with the current roster sessions through `coop_accept_members`. Incoming progress,
+removal, roster, acceptance and save changes refresh them; the session invokes no game code to answer a query or
+receive an event. A layer must still check its signed feature rule and its own authority/context. This call is not
+the save-backup gate; progress continues to use `coop_sync_open` before handing anything to the game.
+
 ## The room's secret and the wire
 
 For a reviewer: what is derived from what, what each datagram carries and what a receiver checks. The code is

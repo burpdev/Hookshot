@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MONOCYPHER = ROOT / "third_party" / "monocypher"
 
 
-def compile_fixture(cc, folder):
+def compile_fixture(cc, folder, source=ROOT):
     """The fixture's path; with sanitizers on Linux when this compiler links them."""
     run = lambda cmd: subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     exe = folder / "coop_sync_test.exe"
@@ -31,11 +31,11 @@ def compile_fixture(cc, folder):
     tries = [["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"], []] if os.name != "nt" else [["-D__USE_MINGW_ANSI_STDIO=1"]]
     for i, extra in enumerate(tries):
         mono = folder / "monocypher.o"
-        r = run([cc, "-std=c99", "-O2", "-w", "-c", str(MONOCYPHER / "monocypher.c"), "-o", str(mono)] + extra)
+        r = run([cc, "-std=c99", "-O2", "-w", "-c", str(source / "third_party/monocypher/monocypher.c"), "-o", str(mono)] + extra)
         if r.returncode == 0:
             r = run([cc, "-std=c11", "-O2" if not extra or extra[0].startswith("-D") else "-O1", "-g", "-Wall", "-Wextra", "-Werror",
-                     "-I" + str(ROOT / "host"), str(ROOT / "tests" / "coop_sync_test.c"), str(ROOT / "host" / "coop_state.c"),
-                     str(ROOT / "host" / "coop_proto.c"), str(mono), "-o", str(exe)] + extra)
+                     "-I" + str(source / "host"), str(ROOT / "tests" / "coop_sync_test.c"), str(source / "host" / "coop_state.c"),
+                     str(source / "host" / "coop_proto.c"), str(mono), "-o", str(exe)] + extra)
         if r.returncode == 0:
             print("compiled%s" % (" with " + " ".join(extra) if extra else ""))
             return exe
@@ -48,9 +48,10 @@ def compile_fixture(cc, folder):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--cc", default=os.environ.get("CC") or shutil.which("gcc") or shutil.which("clang") or "gcc")
+    p.add_argument("--source-root", type=Path, default=ROOT)
     a = p.parse_args()
     with tempfile.TemporaryDirectory(prefix="hookshot-coop-sync-") as temp:
-        exe = compile_fixture(a.cc, Path(temp))
+        exe = compile_fixture(a.cc, Path(temp), a.source_root)
         r = subprocess.run([str(exe)], capture_output=True, text=True, timeout=900)
         sys.stdout.write(r.stdout)
         sys.stdout.write(r.stderr)

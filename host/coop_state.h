@@ -179,6 +179,10 @@ int coop_sync_offer(CoopSync *s, CoopOffer *out, uint64_t now_ms);   // 1 when t
 // token is the current offer's and no member in the room is unidentified. A copy of the save is wanted when none was
 // made for the save being played.
 int coop_sync_accept(CoopSync *s, uint32_t token);
+// A current remote session whose signed identity/name this player accepted, not disputed, ignored or removed.
+// False outside the room, before acceptance, for another session, or after a different save needs acceptance.
+// This is identity consent, not a feature-rule/authority check and not permission to write a save.
+int coop_sync_member_accepted(const CoopSync *s, int member, uint64_t session);
 int coop_sync_copy_wanted(const CoopSync *s);
 void coop_sync_copied(CoopSync *s, int ok);
 // Values are handed out: the current offer is accepted and its copy made (coop_sync_take checks it itself).

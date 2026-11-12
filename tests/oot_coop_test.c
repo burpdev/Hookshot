@@ -1,6 +1,7 @@
 /* The game side of co-op's progress sync without the game: host/oot_coop.c's reader, classification, apply rules,
    table check, guest calls, gate and switch, cut out of the source by tests/test_oot_coop.py (OOT_COOP_PIECES) and run
    on a made-up flag database in a fake guest memory, with a fake getter and fake setters in place of the game's. */
+#define _CRT_SECURE_NO_WARNINGS
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -110,6 +111,14 @@ int coop_on_message(uint8_t kind, CoopMsgFn fn, void *user) { (void)kind, (void)
 int coop_on_view(CoopViewFn fn, void *user) { (void)user; hooks.view++, hooks.view_fn = fn; return 1; }
 int coop_on_tick(CoopTickFn fn, void *user) { (void)user; hooks.tick += fn != NULL; return 1; }
 int coop_on_remove(CoopRemoveFn fn, void *user) { (void)user; hooks.remove += fn != NULL; return 1; }
+static CoopView current_view, accepted_view;
+static uint32_t accepted_members;
+void coop_view_get(CoopView *out) { *out = current_view; }
+void coop_accept_members(const CoopView *v, uint32_t members) {
+    if (v) accepted_view = *v;
+    else memset(&accepted_view, 0, sizeof accepted_view);
+    accepted_members = members;
+}
 static int rules_said, views, scans, applies, probes;
 static void read_rules(CoopRules *r, int say) { coop_rules_default(r); rules_said += say; }
 static void read_test_aid(void) {}
@@ -209,6 +218,59 @@ static GFlag *must(uint32_t hash) {
 static int discard_message(int member, uint8_t kind, const uint8_t *bytes, size_t size, void *user) {
     (void)member, (void)kind, (void)bytes, (void)size, (void)user;
     return 1;
+}
+
+typedef struct { CoopSync *receiver; int sender; } ConsentLink;
+static int consent_send(int member, uint8_t kind, const uint8_t *bytes, size_t n, void *user) {
+    ConsentLink *link = user;
+    (void)member;
+    coop_sync_receive(link->receiver, link->sender, kind, bytes, n, now_ms);
+    return 1;
+}
+
+static void check_consent_publication(void) {
+    CoopSync *one = coop_sync_new(1, 77), *two = coop_sync_new(2, 77);
+    uint8_t seed[32] = {1};
+    coop_sync_seed(one, seed);
+    seed[0] = 2, coop_sync_seed(two, seed);
+    coop_sync_name(one, "One"), coop_sync_name(two, "Two");
+    const int ids[] = {1, 2};
+    const uint64_t sessions[] = {101, 202};
+    CoopRules rules;
+    coop_rules_default(&rules);
+    coop_sync_settings(one, &rules, 1), coop_sync_settings(two, &rules, 0);
+    coop_sync_room(one, "CONSENT", 1, ids, sessions, 2, 1, now_ms);
+    coop_sync_room(two, "CONSENT", 2, ids, sessions, 2, 1, now_ms);
+    ConsentLink to_one = {one, 2}, to_two = {two, 1};
+    for (int i = 0; i < 60; i++) {
+        now_ms += 100;
+        coop_sync_tick(one, now_ms, consent_send, &to_two);
+        coop_sync_tick(two, now_ms, consent_send, &to_one);
+    }
+    G.eng = one;
+    current_view = (CoopView){.state = COOP_JOINED, .version = 7, .self = 1, .session = 101, .n = 2,
+                             .member = {{.id = 1, .session = 101}, {.id = 2, .session = 202}}};
+    publish_members();
+    CHECK(accepted_members == 0);   /* in the roster and identified, not accepted */
+    CoopOffer offer;
+    CHECK(coop_sync_offer(one, &offer, now_ms) && coop_sync_accept(one, offer.token));
+    publish_members();
+    CHECK(accepted_members == (1u << 2) && accepted_view.version == 7 && accepted_view.member[1].session == 202);
+    current_view.member[1].session = 303;
+    publish_members();
+    CHECK(!accepted_members);       /* publication reads the live view, not the cached G.view */
+    current_view.member[1].session = 202;
+    CHECK(coop_sync_remove(one, 2));
+    publish_members();
+    CHECK(!accepted_members);       /* removed, still in the roster */
+    current_view.state = COOP_LEFT;
+    publish_members();
+    CHECK(!accepted_members);
+    accepted_members = 1u << 2;
+    publish_none();
+    CHECK(!accepted_members && !accepted_view.session);
+    G.eng = NULL;
+    coop_sync_free(one), coop_sync_free(two);
 }
 
 int main(void) {
@@ -622,6 +684,7 @@ int main(void) {
 #undef TICK
     }
 
+    check_consent_publication();
     if (failures) {
         fprintf(stderr, "%d checks failed; the log:\n%s", failures, logbuf);
         return 1;

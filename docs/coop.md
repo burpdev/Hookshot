@@ -174,6 +174,9 @@ name the host's sources hold, and one made up), and that the environment and `HO
 `tests/test_coop_options_text.py` checks that a `coop_server=` line of 159 bytes (the longest relay text the game
 keeps) is read whole from `hookshot_options.ini`, and that text inside such a line is not taken for a setting.
 
+Wire byte counts in diagnostics are bounded by `COOP_MAX_DGRAM` and printed as `unsigned`, so the same source and
+fixtures pass Microsoft's printf-format checking without changing the format attribute or requiring GNU stdio.
+
 Besides what they compile and run, the protocol, session, progress and menu tests check in the source where the pieces
 are wired in (the build, the game's start and its ways out, the present, the save mount, the menu's interface and the
 host's table). The menu tests use scripted input and a simulated session; they do not cover a real window's events,

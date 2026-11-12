@@ -288,7 +288,7 @@ static void send_dgram(CoopSess *s, uint8_t type, uint32_t room, uint8_t src, ui
     if (!k || !s->sock || !s->relay_known) return;
     coop_udp_send(s->sock, &s->relay, d, k);
     bump(&s->n_tx);
-    TRACE(s, "tx %s to %u, %zu bytes", type_name(type), dst, k);
+    TRACE(s, "tx %s to %u, %u bytes", type_name(type), dst, (unsigned)k);
 }
 
 // A datagram of the room we are in.
@@ -764,7 +764,7 @@ static int on_data(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, co
     coop_lock(&s->lock);
     s->heard_at[h->src] = now;
     coop_unlock(&s->lock);
-    TRACE(s, "rx message kind %u from member %u, %zu bytes", kind, h->src, nb);
+    TRACE(s, "rx message kind %u from member %u, %u bytes", kind, h->src, (unsigned)nb);
     CoopMsgFn fn = __atomic_load_n(&s->msg[kind].fn, __ATOMIC_ACQUIRE);
     if (fn) fn(h->src, bytes, nb, s->msg[kind].user);
     return 1;
@@ -797,7 +797,7 @@ static void handle_datagram(CoopSess *s, size_t n, const CoopAddr *from, uint64_
         }
         return;
     }
-    TRACE(s, "rx %s, %zu bytes", type_name(h.type), n);
+    TRACE(s, "rx %s, %u bytes", type_name(h.type), (unsigned)n);
     int ok = 0;
     switch (h.type) {
     case COOP_T_CHALLENGE: ok = on_challenge(s, s->rx, n, &h, p, now); break;

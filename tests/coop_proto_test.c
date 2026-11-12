@@ -76,7 +76,7 @@ static void check_crypto(void) {
     for (size_t i = 0; i < sizeof msg; i++) msg[i] = (uint8_t)(i * 13);
     size_t n = coop_seal(box, sizeof box, mk, 3, COOP_DST_ALL, 0x1234, 77, 0x42, msg, sizeof msg), ng = 0;
     uint8_t kind = 0;
-    CHECK(n == COOP_MAX_PAYLOAD, "the largest message fills a datagram (%zu)", n);
+    CHECK(n == COOP_MAX_PAYLOAD, "the largest message fills a datagram (%u)", (unsigned)n);
     CHECK(!coop_seal(box, sizeof box, mk, 3, COOP_DST_ALL, 1, 1, 0x42, msg, sizeof msg + 1), "a larger one is refused");
     CHECK(coop_open(box, n, mk, 3, COOP_DST_ALL, &kind, got, sizeof got, &ng) && kind == 0x42 && ng == sizeof msg && !memcmp(got, msg, ng),
           "sealed and opened");

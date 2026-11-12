@@ -13,7 +13,7 @@ player's game gains, the others' games get.
 ## Running a relay
 
 ```
-python -I scripts/coop_relay.py [--host 0.0.0.0] [--port 24680] [--log-addrs] [--log-joins] [--max-rooms 1000] [--rooms-per-network 8]
+python -I scripts/coop_relay.py [--host 0.0.0.0] [--port 24680] [--log-addrs] [--log-joins] [--max-rooms 1000] [--rooms-per-network 8] [--member-copies 480] [--member-bytes 262144]
 ```
 
 Python 3, standard library only. A player who can reach it by UDP (forward the port on the router, open it in the
@@ -30,8 +30,10 @@ where each network's joins went.
 - The roster (who is in the room, each one's session, which one made it) goes out at a change, again 0.25 s and 0.75 s
   later, and every 5 s: a datagram is lost now and then, and nothing is acknowledged.
 - Limits: a source address answers a cookie challenge before the relay sends it anything larger than it sent; each
-  member is limited to 200 datagrams and 64 KB per second, a datagram forwarded to seven counted seven times; each
-  network (an IPv4 /24, an IPv6 /48) to 20 challenges a second, a join every 3 s after a burst of 20, and 8 open rooms;
+  member is limited to 480 forwarded copies and 256 KiB per second, a datagram forwarded to seven counted seven times
+  in both budgets (bursts 960 copies and 512 KiB). `--member-copies` and `--member-bytes` change the rates; each burst
+  is twice its rate. A control datagram or one sent to nobody still costs one packet and its bytes. Each
+  network (an IPv4 /24, an IPv6 /48) gets 20 challenges a second, a join every 3 s after a burst of 20, and 8 open rooms;
   each room that forwarded to someone in the last 2 s to an equal share of the forwarding (rooms that send nothing, or
   send to nobody, take nothing); the relay as a whole to 5000 challenges a second and 8 MB/s of forwarding. A join
   attempt costs its network one join whatever the answer, and the same attempt sent again (its answer was lost, or it
@@ -49,6 +51,15 @@ where each network's joins went.
   refused (the last 4096 of each room are kept). A flood from many networks can still use up the relay's 5000
   challenges a second for newcomers: a relay has finite capacity, and its operator's firewall is the place for more.
 - `--host ::` listens for IPv6 as well as IPv4.
+
+A full room can sustain 30 broadcasts per second from each of eight players: 210 forwarded copies per sender,
+1,680 for the room. Even at the 1,200-byte datagram ceiling that is 252,000 bytes/s per sender and 2,016,000 for the
+room. Design for one body update at 15 Hz and one batch of all enemies a game leads at 10–15 Hz, not one packet per
+enemy. Smaller state messages leave room for events and progress; 30 maximum-sized broadcasts leave only 10,144
+bytes/s of each sender's byte budget, not room for another full-rate stream. Progress still paces itself at 32 KiB/s
+before relay fan-out; this is a ceiling, not bandwidth reserved in addition to gameplay. The relay's unchanged
+8 MiB/s total and equal shares support four such full rooms by bytes alone; more active rooms share less. Room shares
+and the relay's total can limit traffic before a member's own ceiling. None of these rates promises delivery.
 
 ## Rooms and secrets
 

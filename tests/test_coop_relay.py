@@ -16,6 +16,7 @@ import struct
 import subprocess
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -745,18 +746,47 @@ class RelayTest(unittest.TestCase):
     # -- limits
 
     def test_a_member_over_its_packet_rate_is_dropped(self):
-        relay = cr.Relay(pkt_rate=200, pkt_burst=20)
+        relay = cr.Relay()
         (a,), _ = self.room_of(1, relay=relay)
-        answered = sum(1 for _ in range(100) if a.send(relay, cr.T_PING, b'\0\0\0\0', now=1)[0])
-        self.assertEqual((answered, relay.stats['rate_limited']), (20, 80))
+        answered = sum(1 for _ in range(1000) if a.send(relay, cr.T_PING, b'\0\0\0\0', now=1)[0])
+        self.assertEqual((answered, relay.stats['rate_limited']), (960, 40))
+        refilled = sum(1 for _ in range(500) if a.send(relay, cr.T_PING, b'\0\0\0\0', now=2)[0])
+        self.assertEqual(refilled, 480)
 
     def test_fan_out_is_charged_to_the_sender(self):
-        relay = cr.Relay(byte_rate=10000, byte_burst=20000)
+        relay = cr.Relay()
+        self.assertEqual(relay.limits, (480, 960, 256 << 10, 512 << 10))
         clients, _ = self.room_of(8, relay=relay)
-        big = bytes(1000)
-        sent = sum(1 for _ in range(20) if clients[0].send(relay, cr.T_DATA, big, dst=cr.DST_ALL, now=2)[0])
-        self.assertLessEqual(sent, 3)   # 7 copies of 1024 bytes each: 20 KB lasts for two or three
-        self.assertGreaterEqual(sent, 2)
+        big = bytes(cr.MAX_DGRAM - cr.HDR_LEN)
+        sent = sum(1 for _ in range(100) if clients[0].send(relay, cr.T_DATA, big, dst=cr.DST_ALL, now=2)[0])
+        self.assertEqual(sent, (512 << 10) // (7 * cr.MAX_DGRAM))
+
+    def test_small_broadcasts_pay_for_every_packet_copy(self):
+        clients, _ = self.room_of(8)
+        sent = sum(1 for _ in range(1000) if clients[0].send(self.relay, cr.T_DATA, b'\x01sealed', dst=cr.DST_ALL, now=1)[0])
+        self.assertEqual(sent, 960 // 7)
+
+    def test_full_room_sustains_thirty_broadcasts_per_player(self):
+        clients, _ = self.room_of(8)
+        big = bytes(cr.MAX_DGRAM - cr.HDR_LEN)
+        for tick in range(300):
+            for c in clients:
+                out, _ = c.send(self.relay, cr.T_DATA, big, dst=cr.DST_ALL, now=1 + tick / 30)
+                self.assertEqual(len(out), 7)
+        self.assertEqual(self.relay.stats['rate_limited'], 0)
+
+    def test_member_limit_command_line_options(self):
+        help_text = subprocess.check_output([sys.executable, str(RELAY_PY), '--help'], text=True)
+        self.assertIn('--member-copies', help_text)
+        self.assertIn('--member-bytes', help_text)
+        with mock.patch.object(sys, 'argv', ['coop_relay', '--member-copies', '700', '--member-bytes', '300000']), \
+                mock.patch.object(cr, 'open_socket') as sock, mock.patch.object(cr, 'serve') as serve:
+            sock.return_value.getsockname.return_value = ('127.0.0.1', 24680)
+            self.assertEqual(cr.main(), 0)
+            self.assertEqual(serve.call_args.args[0].limits, (700, 1400, 300000, 600000))
+        for option in ('--member-copies', '--member-bytes'):
+            r = subprocess.run([sys.executable, str(RELAY_PY), option, '0'], capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)
 
     def test_the_relay_limits_what_it_sends_in_all(self):
         relay = cr.Relay(egress_rate=20000)

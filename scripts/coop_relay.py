@@ -356,7 +356,7 @@ class Relay:
     can run the timeouts without waiting. An address is the tuple socket.recvfrom gives."""
 
     def __init__(self, max_rooms=1000, log=None, log_addrs=False, secret=None,
-                 pkt_rate=200, pkt_burst=400, byte_rate=65536, byte_burst=131072, join_rate=1 / 3, join_burst=20,
+                 pkt_rate=480, pkt_burst=None, byte_rate=256 << 10, byte_burst=None, join_rate=1 / 3, join_burst=20,
                  challenge_rate=5000, prefix_challenge_rate=20, prefix_challenge_burst=40, rooms_per_prefix=8,
                  egress_rate=8 << 20, rejoin_challenge_rate=1000, log_joins=False):
         self.max_rooms = max_rooms
@@ -364,7 +364,8 @@ class Relay:
         self.log_addrs = log_addrs
         self.log_joins = log_joins
         self.secret = secret or secrets.token_bytes(32)
-        self.limits = (pkt_rate, pkt_burst, byte_rate, byte_burst)
+        self.limits = (pkt_rate, pkt_rate * 2 if pkt_burst is None else pkt_burst,
+                       byte_rate, byte_rate * 2 if byte_burst is None else byte_burst)
         self.join_limit = (join_rate, join_burst)
         self.challenge_rate = challenge_rate
         self.rejoin_challenge_rate = rejoin_challenge_rate
@@ -591,11 +592,11 @@ class Relay:
         else:
             target = room.members.get(dg.dst)
             targets = [target] if target and target.live and target is not member else []
-        # each copy counts against the sender (its byte budget already paid one) and against the relay's
+        # each copy counts against the sender (both budgets already paid one) and against the relay's
         if not targets:   # to nobody: nothing to forward, and the room does not count among those that share the budget
             return []
-        extra = len(data) * max(0, len(targets) - 1)
-        if extra and not member.bytes.take(extra, now):
+        extra = len(targets) - 1
+        if extra and not (member.pkts.take(extra, now) and member.bytes.take(len(data) * extra, now)):
             self.stats['rate_limited'] += 1
             return []
         if not self.take_egress(room, len(data) * len(targets), now):
@@ -850,12 +851,19 @@ def main():
     ap.add_argument('--max-rooms', type=int, default=1000, help='rooms at most (default 1000)')
     ap.add_argument('--rooms-per-network', type=int, default=8, help='open rooms one /24 or /48 may make (default 8)')
     ap.add_argument('--log-joins', action='store_true', help="write where each network's join budget goes to the log")
+    ap.add_argument('--member-copies', type=int, default=480,
+                    help='forwarded copies per member per second (default 480; burst twice this)')
+    ap.add_argument('--member-bytes', type=int, default=256 << 10,
+                    help='forwarded bytes per member per second (default 262144; burst twice this)')
     a = ap.parse_args()
+    if a.member_copies <= 0 or a.member_bytes <= 0:
+        ap.error('member limits must be positive')
 
     def log(text):
         print(time.strftime('%H:%M:%S ') + text, flush=True)
 
-    relay = Relay(max_rooms=a.max_rooms, log=log, log_addrs=a.log_addrs, rooms_per_prefix=a.rooms_per_network, log_joins=a.log_joins)
+    relay = Relay(max_rooms=a.max_rooms, log=log, log_addrs=a.log_addrs, rooms_per_prefix=a.rooms_per_network,
+                  log_joins=a.log_joins, pkt_rate=a.member_copies, byte_rate=a.member_bytes)
     sock = open_socket(a.host, a.port)
     log(f'coop_relay: listening on {a.host}:{sock.getsockname()[1]}')
     try:

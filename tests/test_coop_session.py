@@ -49,7 +49,7 @@ def compile_fixture(cc, folder, thread_sanitizer=False):
     run = lambda cmd: subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     exe = folder / ("coop_session_test" + ("_tsan" if thread_sanitizer else "") + (".exe" if os.name == "nt" else ""))
     if os.name == "nt":   # (mingw's printf takes %zu with its own stdio; Winsock and BCryptGenRandom)
-        tries, libs = [["-D__USE_MINGW_ANSI_STDIO=1"]], ["-lws2_32", "-lbcrypt"]
+        tries, libs = [["-D__USE_MINGW_ANSI_STDIO=1"]], ["-lws2_32", "-lbcrypt", "-liphlpapi"]
     elif thread_sanitizer:
         tries, libs = [["-fsanitize=thread"]], ["-pthread"]
     else:
@@ -62,6 +62,7 @@ def compile_fixture(cc, folder, thread_sanitizer=False):
         if r.returncode == 0:
             r = run([cc, "-std=c11", "-D_GNU_SOURCE", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-I" + str(ROOT / "host"),
                      str(ROOT / "tests" / "coop_session_test.c"), str(ROOT / "host" / "coop.c"), str(ROOT / "host" / "coop_net.c"),
+                     str(ROOT / "host" / "coop_relay.c"),
                      str(ROOT / "host" / "coop_proto.c"), str(mono), "-o", str(exe)] + extra + libs)
         if r.returncode == 0:
             print("compiled%s" % (" with " + " ".join(extra) if extra else ""))

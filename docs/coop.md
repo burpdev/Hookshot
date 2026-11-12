@@ -62,6 +62,44 @@ ceiling, not bandwidth reserved in addition to gameplay. The relay's unchanged
 8 MiB/s total and equal shares support four such full rooms by bytes alone; more active rooms share less. Room shares
 and the relay's total can limit traffic before a member's own ceiling. None of these rates promises delivery.
 
+### Hosting a room on your own PC
+
+Set `coop_host=1` in `hookshot_options.ini`, or `HOS_COOP_HOST=1` in your own environment, then **Make a room**.
+Nothing else needs starting. This is off by default and applies only to Make, not Join. Leave **Relay** empty for UDP
+port 24680, or use `127.0.0.1:<port>` to choose another. An address in `coop_server` must be `localhost`, loopback or a
+numeric address of this PC; a different host is refused with a clear log line, not silently replaced. `coop_port`
+still selects the game's own client socket, not the relay port: normally leave it at 0.
+
+On one home network, give friends one of the addresses printed as `hosting: players on this network can try ...`,
+and the room secret separately. They put that address in **Relay** and join with the secret. The maker's own game
+connects over loopback; the relay listens for IPv4 and IPv6 on its own UDP socket and thread, forwards the sealed
+messages without reading them, and never touches game memory.
+
+Across the internet, forward that **one UDP port** on the router to the maker's PC, allow it through the PC's firewall,
+and give friends the router's public address and port. A router behind carrier-grade NAT may not accept a port forward;
+use a reachable relay elsewhere in that case. The game does not discover a public address or change a router or firewall.
+Windows may ask whether to allow Hookshot on a network: allow the network you intend to host on, not every network
+indiscriminately. That prompt and Windows networking have not been tested here.
+
+The maker pays for forwarding: each member has 480 forwarded copies and 256 KiB per second, with a two-second burst;
+a broadcast to seven costs seven copies and seven times its bytes. With eight members this bounds DATA forwarding at
+2 MiB/s sustained, a 4 MiB burst, plus the rate-limited connection and roster traffic. The relay's outer forwarding
+cap remains 8 MiB/s. Playing below the limits uses less. This is not a bandwidth measurement from a game run.
+
+Unlike a relay elsewhere, this room ends when the maker leaves, turns co-op off or closes the game. The other games
+can keep playing their own saves, but cannot exchange messages until the maker hosts again. No room state is saved.
+
+The hosted relay uses the same datagrams, cookie challenge, roster repeats, rejoin tokens, silence/drop times and
+network budgets as the script. It accepts only the room and local maker socket authorized by Make; remote CREATEs
+cannot start another room. Multiple-room fairness and per-network room counts therefore reduce to one room. Its
+opaque cookies use keyed BLAKE2b rather than HMAC-SHA256, still bound to the address, port and current/previous minute.
+It remembers 4096 sessions and refusals, and at most 4096 network budgets. Unlike the script's unbounded removal set,
+it keeps at most 4096 removals; once full, it refuses new members rather than forgetting a removed player.
+
+`tests/test_coop_host_relay.py` runs the applicable hostile-client and fake-clock cases from the Python relay tests
+against both relays, using real loopback UDP for the C fixture. It also runs the session fixture through the C relay
+at 0% and 30% simulated receive loss, and counts threads and sockets across starts, stops and hosted settings.
+
 ## Rooms and secrets
 
 A room is its secret: 18 characters of `23456789BCDFGHJKMNPRSTVWXYZ` (no vowels, no 0/1/O/I/L, no Q or E), typed in
@@ -83,6 +121,7 @@ game, and the environment over it (a variable that is set wins over the file's l
 | `coop_name=` | `HOS_COOP_NAME` | the player's name in the room: at most 24 bytes of UTF-8 (a control or text-direction character, or a byte that is not UTF-8, shows as `?`) | `Player-` and four random hex digits, new at each start |
 | `coop_server=` | `HOS_COOP_SERVER` | the relay: `host`, `host:port`, `[IPv6]:port` or a bare IPv6 address | none (the players run one); port 24680 |
 | `coop_port=` | `HOS_COOP_PORT` | the game's own UDP port (one forwarded on the router, say) | 0: any free one |
+| `coop_host=1` | `HOS_COOP_HOST=1` | Make a room hosts the relay on this PC; `coop_server` selects its local address/port, as above | off |
 | | `HOS_COOP_AUTO=create\|join` with `HOS_COOP_ROOM=<secret>` | make or join that room at start, and stay: a room the relay lost (a restart) is made again by its maker and waited for by the others. `create` without a room makes a new one. For tests; with `HOS_COOP_ROOM` alone, the tab's Make a room makes the room of that secret | off |
 | | `HOS_COOP_DROP=<percent>` | a test's loss: that share of the received datagrams is thrown away | 0 |
 | | `HOS_COOP_TRACE=1` | a log line for every datagram sent and received, and the relay's address | off |
@@ -138,8 +177,9 @@ nothing is sent.
 ## The log
 
 Every line of the session starts with `coop: `. The room's secret never reaches the log: a room is named by its first
-three characters and `…` (`room H7K…`). Nor does the relay's address, unless `HOS_COOP_TRACE` is on (`=1`; `=0` is off,
-as for every on/off switch: `env_on`).
+three characters and `…` (`room H7K…`). A remote relay's address is logged only with `HOS_COOP_TRACE` on (`=1`; `=0`
+is off, as for every on/off switch: `env_on`). Hosting deliberately logs this PC's candidate LAN addresses and port
+so that the maker can give one to friends; it never logs the room secret.
 
 | Line | When |
 |---|---|

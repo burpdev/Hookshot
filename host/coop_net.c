@@ -9,12 +9,16 @@
 #ifdef _WIN32
 #include <ws2tcpip.h>
 #include <bcrypt.h>
+#include <iphlpapi.h>
 typedef SOCKET Sock;
 #define SOCK_NONE INVALID_SOCKET
 #define sock_close closesocket
 #else
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -280,6 +284,40 @@ void coop_addr_str(const CoopAddr *a, char *out, size_t cap) {
     snprintf(out, cap, is_v4(a) ? "%s:%u" : "[%s]:%u", ip, (unsigned)a->port);
 }
 
+static void local_address_add(CoopAddr *out, unsigned *count, unsigned cap, const struct sockaddr *sa, uint16_t port) {
+    if (!sa || (sa->sa_family != AF_INET && sa->sa_family != AF_INET6) || *count >= cap) return;
+    CoopAddr a;
+    addr_from(&a, sa);
+    a.port = port;
+    /* Link-local IPv6 needs the other PC's interface scope, not ours: do not advertise it as a join address. */
+    if (a.ip[0] == 0xfe && (a.ip[1] & 0xc0) == 0x80) return;
+    for (unsigned i = 0; i < *count; i++) if (coop_addr_eq(&out[i], &a)) return;
+    out[(*count)++] = a;
+}
+unsigned coop_net_local_addresses(CoopAddr *out, unsigned cap, uint16_t port) {
+    unsigned count = 0;
+#ifdef _WIN32
+    union { IP_ADAPTER_ADDRESSES align; unsigned char bytes[16384]; } buffer;
+    ULONG size = sizeof buffer;
+    IP_ADAPTER_ADDRESSES *list = (IP_ADAPTER_ADDRESSES *)buffer.bytes;
+    if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                             NULL, list, &size) != NO_ERROR) return 0;
+    for (IP_ADAPTER_ADDRESSES *a = list; a; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        for (IP_ADAPTER_UNICAST_ADDRESS *u = a->FirstUnicastAddress; u; u = u->Next)
+            local_address_add(out, &count, cap, u->Address.lpSockaddr, port);
+    }
+#else
+    struct ifaddrs *list = NULL;
+    if (getifaddrs(&list)) return 0;
+    for (const struct ifaddrs *a = list; a; a = a->ifa_next)
+        if ((a->ifa_flags & IFF_UP) && !(a->ifa_flags & IFF_LOOPBACK))
+            local_address_add(out, &count, cap, a->ifa_addr, port);
+    freeifaddrs(list);
+#endif
+    return count;
+}
+
 /* ---- the socket */
 
 CoopUdp *coop_udp_open(uint16_t port) {
@@ -305,6 +343,15 @@ CoopUdp *coop_udp_open(uint16_t port) {
     DWORD got = 0;
     WSAIoctl(s, _WSAIOW(IOC_VENDOR, 12) /* SIO_UDP_CONNRESET */, &no, sizeof no, NULL, 0, &got, NULL, NULL);
 #endif
+#ifdef _WIN32
+    u_long nonblocking = 1;
+    if (ioctlsocket(s, FIONBIO, &nonblocking)) {
+#else
+    if (fcntl(s, F_SETFL, O_NONBLOCK) < 0) {
+#endif
+        sock_close(s);
+        return NULL;
+    }
     CoopUdp *u = calloc(1, sizeof *u);
     if (!u) {
         sock_close(s);

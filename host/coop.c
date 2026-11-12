@@ -37,6 +37,7 @@
 #include <string.h>
 
 #include "coop.h"
+#include "coop_relay.h"
 #ifndef HOOKSHOT_ENV_H   // (env_on: the switches' one rule)
 #include "../gpu/vk/compat/hookshot_env.h"
 #endif
@@ -137,6 +138,8 @@ struct CoopSess {
     // ---- the stepping thread's
     CoopState state;
     CoopUdp *sock;
+    CoopRelay *host_relay;                      // optional, only the process's Make a room owns one
+    int process_session;
     CoopAddr relay;
     int relay_known;
     char relay_text[64];                        // the relay's resolved address, for the trace
@@ -366,6 +369,14 @@ static void say_goodbye(CoopSess *s) {
     }
 }
 
+static void stop_host_relay(CoopSess *s) {
+    if (!s->host_relay) return;
+    coop_relay_stop(&s->host_relay);
+    s->host[0] = 0;
+    if (s->server[0]) coop_server_parse(s->server, s->host, sizeof s->host, &s->port);
+    s->relay_known = 0;
+}
+
 // Out of the room (or never in): closes the socket and shows why.
 static void go_left(CoopSess *s, const char *why, int log_it) {
     int was_in = s->state == COOP_JOINED || s->state == COOP_RECONNECTING;
@@ -374,6 +385,7 @@ static void go_left(CoopSess *s, const char *why, int log_it) {
         else say(s, "no room: %s", why);
     }
     close_socket(s);
+    stop_host_relay(s);
     s->room = 0, s->self = 0, s->made_room = 0;
     s->roster.n = 0;
     s->have_token = 0;
@@ -1153,6 +1165,7 @@ static void apply_settings(CoopSess *s, uint64_t now) {
             say(s, "left room (%s)", why[0] ? why : "co-op turned off");
         }
         close_socket(s);
+        stop_host_relay(s);
         s->room = 0, s->self = 0, s->made_room = 0, s->roster.n = 0;
         s->rename_at = 0;
         set_state(s, COOP_OFF);
@@ -1177,12 +1190,22 @@ static void do_command(CoopSess *s, int cmd, const char *secret, uint64_t now) {
         break;
     case COOP_CMD_CREATE:
     case COOP_CMD_JOIN:
+        if (s->state == COOP_JOINED || s->state == COOP_RECONNECTING) say_goodbye(s);
+        stop_host_relay(s);
+        if (cmd == COOP_CMD_CREATE && s->process_session && coop_relay_enabled()) {
+            uint8_t locator[COOP_KEY_LEN], key[COOP_MSG_KEY_LEN];
+            coop_room_keys(secret, locator, key);
+            if (!s->sock) s->sock = coop_udp_open(s->local_port);
+            const char *error = s->sock ? coop_relay_host_start(&s->host_relay, s->server, locator, s->client_id,
+                coop_udp_port(s->sock), &s->port) : "cannot open the maker's UDP socket";
+            if (error) { go_left(s, error, 1); break; }
+            copy_str(s->host, sizeof s->host, "127.0.0.1");
+        }
         if (!s->host[0]) {
             SAY_LIMITED(s, L_NO_SERVER, now, "no relay given (coop_server= in hookshot_options.ini or HOS_COOP_SERVER)");
             go_left(s, "no server configured", 0);
             break;
         }
-        if (s->state == COOP_JOINED || s->state == COOP_RECONNECTING) say_goodbye(s);
         begin_episode(s, cmd == COOP_CMD_CREATE ? COOP_INTENT_CREATE : COOP_INTENT_JOIN, secret, 0, now);
         break;
     }
@@ -1307,6 +1330,7 @@ static void publish(CoopSess *s) {
 
 void coop_sess_step(CoopSess *s) {
     uint64_t now = coop_now_ms();
+    if (s->host_relay && (s->state == COOP_LEFT || s->state == COOP_OFF)) stop_host_relay(s);
     coop_lock(&s->lock);
     int cmd = s->cmd, remove = s->cmd_remove;
     uint64_t remove_session = s->cmd_remove_session;
@@ -1380,6 +1404,7 @@ CoopSess *coop_sess_new(const CoopParams *p) {
 
 void coop_sess_free(CoopSess *s) {
     if (!s) return;
+    if (!coop_relay_stop(&s->host_relay)) return; // still owned by its thread; never free a live relay
     close_socket(s);
     free(s->out);
     free(s);
@@ -1493,6 +1518,7 @@ static void make_session(void *arg) {
     (void)arg;
     CoopParams p = {0};
     g_sess = coop_sess_new(&p);
+    if (g_sess) g_sess->process_session = 1;
     if (!g_sess) hos_log("coop: out of memory");
 }
 
@@ -1625,7 +1651,7 @@ static void coop_main(void *arg) {
     CoopSess *s = arg;
     for (;;) {
         coop_sess_step(s);
-        if (!__atomic_load_n(&g_stop, __ATOMIC_ACQUIRE) || s->state != COOP_OFF) continue;
+        if (!__atomic_load_n(&g_stop, __ATOMIC_ACQUIRE) || s->state != COOP_OFF || s->host_relay) continue;
         coop_lock(&g_set_lock);
         coop_lock(&s->lock);
         const int end = g_stop && !s->cfg_pending;   // (not when co-op was switched on again meanwhile, or a later stop waits)

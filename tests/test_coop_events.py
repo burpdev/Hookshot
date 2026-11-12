@@ -20,7 +20,7 @@ CASES = ("no-loss", "loss", "reorder", "parts", "duplicate", "queue", "acceptanc
 def compile_fixture(cc, source, folder, tsan=False):
     exe = folder / ("events-tsan.exe" if tsan else "events.exe")
     if os.name == "nt":
-        flags, libs = ["-D__USE_MINGW_ANSI_STDIO=1"], ["-lws2_32", "-lbcrypt"]
+        flags, libs = ["-D__USE_MINGW_ANSI_STDIO=1"], ["-lws2_32", "-lbcrypt", "-liphlpapi"]
     else:
         flags = ["-fsanitize=thread"] if tsan else ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"]
         libs = ["-pthread"]
@@ -29,7 +29,7 @@ def compile_fixture(cc, source, folder, tsan=False):
         [cc, "-std=c99", "-O2", "-w", "-c", str(source / "third_party/monocypher/monocypher.c"), "-o", str(mono)] + flags,
         [cc, "-std=c11", "-D_GNU_SOURCE", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-I" + str(source / "host"),
          str(ROOT / "tests/coop_events_test.c"), str(source / "host/coop_net.c"), str(source / "host/coop_proto.c"),
-         str(mono), "-o", str(exe)] + flags + libs,
+         str(source / "host/coop_relay.c"), str(mono), "-o", str(exe)] + flags + libs,
     ]
     for command in commands:
         r = subprocess.run(command, capture_output=True, text=True, timeout=300)

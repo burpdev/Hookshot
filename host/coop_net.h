@@ -53,6 +53,9 @@ int coop_thread_join(CoopThread *t, uint32_t ms);
 int coop_net_resolve(const char *host, uint16_t port, CoopAddr *out);
 int coop_addr_eq(const CoopAddr *a, const CoopAddr *b);
 void coop_addr_str(const CoopAddr *a, char *out, size_t cap);   /* "1.2.3.4:5" or "[::1]:5" */
+/* Numeric, non-loopback addresses of this PC, no DNS or network traffic; at most cap, with port attached.
+   Used once when hosting to check the configured host and show LAN addresses. */
+unsigned coop_net_local_addresses(CoopAddr *out, unsigned cap, uint16_t port);
 /* A UDP socket bound to port (0: any) on every address, IPv6 and IPv4; NULL when none could be made */
 CoopUdp *coop_udp_open(uint16_t port);
 uint16_t coop_udp_port(const CoopUdp *u);   /* the port it is bound to */

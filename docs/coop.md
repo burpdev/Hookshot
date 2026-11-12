@@ -56,8 +56,9 @@ A full room can sustain 30 broadcasts per second from each of eight players: 210
 1,680 for the room. Even at the 1,200-byte datagram ceiling that is 252,000 bytes/s per sender and 2,016,000 for the
 room. Design for one body update at 15 Hz and one batch of all enemies a game leads at 10–15 Hz, not one packet per
 enemy. Smaller state messages leave room for events and progress; 30 maximum-sized broadcasts leave only 10,144
-bytes/s of each sender's byte budget, not room for another full-rate stream. Progress still paces itself at 32 KiB/s
-before relay fan-out; this is a ceiling, not bandwidth reserved in addition to gameplay. The relay's unchanged
+bytes/s of each sender's byte budget, not room for another full-rate stream. Progress sections and pushes still pace
+themselves at 32 KiB/s before relay fan-out (8 KiB burst); the periodic and on-join digests are separate. This is a
+ceiling, not bandwidth reserved in addition to gameplay. The relay's unchanged
 8 MiB/s total and equal shares support four such full rooms by bytes alone; more active rooms share less. Room shares
 and the relay's total can limit traffic before a member's own ceiling. None of these rates promises delivery.
 
@@ -246,6 +247,72 @@ The knowledge lives in `coop_sync_member_accepted(engine, id, session)` in the g
 removal, roster, acceptance and save changes refresh them; the session invokes no game code to answer a query or
 receive an event. A layer must still check its signed feature rule and its own authority/context. This call is not
 the save-backup gate; progress continues to use `coop_sync_open` before handing anything to the game.
+
+## Adding a layer
+
+Keep gameplay in its own file; the session knows bytes, members and consent, not actors. Allocate a kind in the shared
+co-op registry before using it. This is the allocation table; a reservation is not an implemented feature in this base.
+
+| Kind | Name | Owner / status |
+|---|---|---|
+| 1 | HELLO | Draft definition; current progress identities ride in DIGEST |
+| 2 | POS | Small position/area codec; `coop-players` sends it |
+| 3 | DIGEST | Progress identities, signed room rules and section sums |
+| 4 | SECTION | Signed progress values |
+| 5 | SYNC_NEED | Draft definition; not emitted by current progress |
+| 6 | NOTICE | Draft definition; not emitted by current progress |
+| 7 | BYE | Session goodbye |
+| 8 | HIT | Reserved by `coop-hits` (committed-hit observations there) |
+| 9 | COMBAT_CONTROL | Reserved by `coop-hits` |
+| 10 | ATTACK | Reserved by `coop-hits` |
+| 11 | WORLD | Reserved by `coop-world` (batched enemy state) |
+| 12 | WORLD_EVENT | Reserved by `coop-world` (authority/lifecycle events) |
+| 13 | AREA | Reserved by `coop-area` (optional room clock) |
+| 14 | WARP | Reserved by `coop-warp`; that branch currently uses POS |
+| 15 | CHAT | Reserved for chat; no branch implements it |
+| 16 | EVENT | Session helper, not an application payload |
+| 17 | EVENT_ACK | Session helper, not an application payload |
+| 0xF0 | TEST | Fixtures only; 0xF0–0xFF are not production allocations |
+
+Use `coop_send(kind, bytes, n)` for a replaceable state broadcast, `coop_send_to(member, kind, bytes, n)` for one peer,
+and `coop_on_message(kind, fn, user)` to receive it. Both sends return 1 when copied to the bounded outbox, not when
+delivered. `coop_on_tick(fn, user)` supplies the monotonic millisecond clock for pacing; callbacks share the co-op
+thread, so keep them short and never call `coop_command`, `coop_configure` or `coop_shutdown` from them. Register
+callbacks before messages can arrive. `coop_on_view` reports roster changes; a sender/session pair, not a member
+number alone, identifies pending work. Use `coop_send_event` / `coop_on_event` for one-offs or initial state above
+1,146 bytes, with the bounds and cancellation rules [above](#reliable-events). Check `coop_member_accepted` before
+counting state or events. The session helper already checks it for events, but game-thread work must check again
+when it runs.
+
+Design to 1,146 payload bytes per message (1,200 bytes including the sealed datagram), about 30 state datagrams/s per
+player, and one batch for **all** enemies that game leads at 10–15 Hz. Keep POS small; a richer body description uses
+another registered kind, not a larger POS. Pace progress, events and state within the same relay ceilings, not as
+separate bandwidth allowances. State should heal itself (for damage, total damage so far with highest-wins, not a
+lost subtraction); don't turn every animation frame into a reliable event.
+
+Before received bytes count: check accepted current member/session, exact version and length, finite numbers and
+bounded text/counts; signed rule **present and on** (absent is off); matching area/encounter and object generation;
+the sender's authority and plausible values/timing; and a state counter that rejects stale/repeated updates. The
+session has checked roster, destination, session and the sealed envelope, not those gameplay facts. Only the game
+thread applies bounded queued work, rechecking consent and context. Durable save changes keep their signatures and
+backup/acceptance gate; the room key alone is not an individual identity proof.
+
+Ten-line sketch: `MY_STATE` / `MY_EVENT` are the layer's registered kinds; its `*_valid` functions do the checks above,
+its queues copy the bytes for the game thread, and `state_due` enforces its rate. The action's caller handles every
+event return code rather than silently losing a full-queue event.
+
+```c
+static void state(int from, const uint8_t *b, size_t n, void *u) {
+    (void)u; if (coop_member_accepted(from) && state_valid(from, b, n)) queue_state(from, b, n);
+}
+static void event(int from, uint64_t session, uint64_t id, const uint8_t *b, size_t n, void *u) {
+    (void)u; if (coop_member_accepted(from) && event_valid(from, session, b, n)) queue_event(from, session, id, b, n);
+}
+static void tick(uint64_t now, void *u) { (void)u; if (state_due(now)) coop_send(MY_STATE, state_bytes, state_size); }
+void layer_start(void) { coop_on_message(MY_STATE, state, NULL); coop_on_event(MY_EVENT, event, NULL);
+    coop_on_tick(tick, NULL); }
+int layer_action(int peer) { return coop_send_event(peer, MY_EVENT, event_bytes, event_size); }
+```
 
 ## The room's secret and the wire
 

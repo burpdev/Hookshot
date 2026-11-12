@@ -122,7 +122,7 @@ int coop_on_tick(CoopTickFn fn, void *user);
 // recipient (no order across senders or with ordinary messages). At most 8 queued events, each at most 16 KiB.
 // member 0/COOP_DST_ALL snapshots the currently accepted peers; a later join is not a recipient. Retries have new
 // sealed counters. Leaving, reconnecting in a new session, or losing the member/session/acceptance cancels delivery
-// to that member. No other timeout: eventual delivery needs a working path and a registered handler at both ends.
+// to that member. No other timeout: eventual delivery needs a working path and a registered handler at the receiver.
 // ACK means dispatch to the callback, NOT permission to apply gameplay; the callback still validates its payload.
 // The bytes are borrowed for the callback only. It runs on the session thread, with no session lock held.
 enum { COOP_EVENT_SLOTS = 8, COOP_EVENT_INVALID = -2, COOP_EVENT_FULL = -1,

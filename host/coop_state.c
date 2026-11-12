@@ -48,7 +48,7 @@ enum {
     PUSH_SLOTS = 4096,           // local changes waiting for their three sends
     DIGEST_MS = 2000,            // every digest_ms plus up to 400 ms
     ANSWER_MS = 500,             // a section goes to the same peer at most this often
-    RATE_BYTES = 32768,          // section and push bytes per second, under the relay's 64 KB/s per member
+    RATE_BYTES = 32768,          // section and push bytes per second; shares the relay budget with the other layers
     BURST_BYTES = 8192,
     IDENT_WAIT_MS = 5000,        // a member that appeared this recently and is not identified holds the offer back
     IDENT_HOLD_MS = 10000,       // another key's identity for a member's session takes its place only after this long

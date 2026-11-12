@@ -50,8 +50,8 @@ enum { COOP_E_NO_ROOM = 1, COOP_E_ROOM_FULL = 2, COOP_E_PROTO = 3, COOP_E_RATE =
        COOP_E_ROOM_EXISTS = 7, COOP_E_REMOVED = 8, COOP_E_SESSION_USED = 9 };   // 9: a session used in the room before
 enum { COOP_FLAG_AWAY = 1, COOP_FLAG_MAKER = 2 };   // roster flags: not heard from for a while; made the room
 
-// The kinds of player messages (the first byte of a sealed message). The session only carries them; HELLO, POS, DIGEST,
-// SECTION, SYNC_NEED and NOTICE belong to the layers that send them. A kind of 0xF0 and above is free for tests.
+// The kinds of player messages (the first byte of a sealed message). The session carries application kinds and owns
+// EVENT / EVENT_ACK for reliable delivery. A kind of 0xF0 and above is free for tests, not production layers.
 enum { COOP_K_HELLO = 1, COOP_K_POS = 2, COOP_K_DIGEST = 3, COOP_K_SECTION = 4, COOP_K_SYNC_NEED = 5, COOP_K_NOTICE = 6,
        COOP_K_BYE = 7, COOP_K_EVENT = 16, COOP_K_EVENT_ACK = 17, COOP_K_TEST = 0xF0 };
 

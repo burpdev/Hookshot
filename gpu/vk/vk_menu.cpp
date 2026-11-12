@@ -5565,7 +5565,7 @@ void menu_tick() {
             if ((letter || (coop_edit == 2 && (ch == '.' || ch == ':'))) && coop_edit_text.size() < most) coop_edit_text.push_back(ch);
         };
         for (int vk = 0x08; vk < 0xc0; vk++) {
-            const bool text_key = (vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z') || (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) ||
+            const bool text_key = (vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z') || (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD0 + 9) ||
                                   vk == VK_OEM_MINUS || vk == VK_OEM_PERIOD || vk == VK_DECIMAL || vk == VK_OEM_1 || vk == VK_SUBTRACT;
             if (!text_key) continue;
             const bool down = mine && (GetAsyncKeyState(vk) & 0x8000) != 0, hit = down && !key_held[vk];
@@ -5586,7 +5586,7 @@ void menu_tick() {
             } else if (ctrl) {
             } else if (vk >= 'A' && vk <= 'Z') typed((char)(shift ? vk : vk + 32));
             else if (vk >= '0' && vk <= '9') typed((char)vk);
-            else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) typed((char)('0' + vk - VK_NUMPAD0));
+            else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD0 + 9) typed((char)('0' + vk - VK_NUMPAD0));
             else if (vk == VK_OEM_MINUS || vk == VK_SUBTRACT) typed(shift && vk == VK_OEM_MINUS ? '_' : '-');
             else if (vk == VK_OEM_PERIOD || vk == VK_DECIMAL) typed('.');
             else if (vk == VK_OEM_1 && shift) typed(':');
@@ -5604,8 +5604,6 @@ void menu_tick() {
         } else if (press[5] || press[0] || press[6]) coop_edit = 0, menu_refresh = true;   // (Esc: as it was)
         for (bool& p : press) p = false;   // (nothing typed moves the menu: Q and E are letters here)
     }
-    bool tab_left = !typing && (press[10] || pad(HOS_PAD_LSHOULDER) || pad(HOS_PAD_LTRIGGER));
-    bool tab_right = !typing && (press[11] || press[12] || pad(HOS_PAD_RSHOULDER) || pad(HOS_PAD_RTRIGGER));
     // (hookshot) the text field that has the keyboard (editing): what was typed since the last frame, in order, and a paste asked
     // with the controller's paste button; the host is told whether one has it, so that the window takes text only then
     uint32_t typed[64];

@@ -7,7 +7,7 @@ ASCII alone, as the menu's glyphs are baked; a character outside it is left out)
 Enter, which sets the Output resolution row to the size typed, or says why not. The host's side, cut out of host/rx_backend.c,
 is compiled as C: the queue between the window's thread and the menu, nothing kept while no field has the keyboard, UTF-8 from
 SDL's text input and the clipboard, its first line alone, a broken sequence left out. Then the wiring is checked in the
-source: the interface's new member last and its version bumped, WM_CHAR and SDL's text input put into the queue, the menu
+source: the screen_size/take_text pair's order, matching callback slots and version bump; WM_CHAR and SDL's input queue; the menu
 telling the host whether a field has the keyboard, RX_VK_MENU_SCRIPT's TYPE. No GPU, game or window.
 
 Each generated source opts out of Microsoft's secure-CRT deprecation annotations before any header, as the other
@@ -329,7 +329,8 @@ def main():
     if "take_text" not in fields or len(table) != len(fields) or table[fields.index("take_text")] != "host_take_text":
         raise SystemExit("FAIL: vk_api.h / rx_backend.c: vk_host does not give host_take_text in take_text's place (%d members, "
                          "%d values)" % (len(fields), len(table)))
-    if fields[-2:] != ["screen_size", "take_text"] or table[fields.index("screen_size")] != "host_screen_size":
+    screen = fields.index("screen_size") if "screen_size" in fields else -1
+    if screen < 0 or fields[screen:screen + 2] != ["screen_size", "take_text"] or table[screen] != "host_screen_size":
         raise SystemExit("FAIL: take_text must follow screen_size, with both callbacks in their interface slots")
     win = (ROOT / "host/display.c").read_text(encoding="utf-8")
     need(win, r"case WM_CHAR: \{.*?hos_text_put\(c\);.*?return 0;", "display.c: WM_CHAR does not reach the menu's text field")

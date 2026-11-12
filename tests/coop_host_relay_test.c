@@ -206,8 +206,15 @@ static void host_settings(const char *mode) {
     char server[64];
     snprintf(server, sizeof server, "127.0.0.1:%u", port);
     ini_set("coop_host", "1");
-    set_env("HOS_COOP_HOST", !strcmp(mode, "ini") ? NULL : mode);
-    CHECK(coop_relay_enabled() == (!strcmp(mode, "ini") || !env_value_off(mode)), "host switch environment precedence");
+    /* (a Windows process cannot hold an empty variable: _putenv_s(name, "") removes it, so there the empty case is the
+       unset one and the ini value decides; elsewhere an empty HOS_COOP_HOST is set, and means off) */
+#ifdef _WIN32
+    int unset = !strcmp(mode, "ini") || !mode[0];
+#else
+    int unset = !strcmp(mode, "ini");
+#endif
+    set_env("HOS_COOP_HOST", unset ? NULL : mode);
+    CHECK(coop_relay_enabled() == (unset || !env_value_off(mode)), "host switch environment precedence");
     if (!strcmp(mode, "foreign")) {
         set_env("HOS_COOP_HOST", "1");
         snprintf(server, sizeof server, "relay.example:%u", port);
@@ -217,7 +224,7 @@ static void host_settings(const char *mode) {
     set_env("HOS_COOP_AUTO", "create");
     set_env("HOS_COOP_ROOM", ROOM_SECRET);
     coop_init();
-    int enabled = !strcmp(mode, "ini") || !env_value_off(mode);
+    int enabled = unset || !env_value_off(mode);
     if (!strcmp(mode, "foreign")) {
         CHECK(WAIT_FOR(strstr(process_view().status, "must name this PC") != NULL, 2000), "foreign relay refused clearly");
         CHECK(files() == before_files, "foreign host opens no relay or session socket");

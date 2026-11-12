@@ -68,7 +68,7 @@ typedef struct { CoopTickFn fn; void *user; } TickHook;
 enum { EVENT_RETRY_MS = 250, EVENT_ACK_MS = 50, EVENT_SEND_MS = 32 };
 typedef struct { CoopEventFn fn; void *user; } EventHandler;
 typedef struct {
-    uint64_t session, next;
+    uint64_t session, next, ack_epoch;
     uint16_t acked, sent;
 } EventTarget;
 typedef struct {
@@ -79,7 +79,7 @@ typedef struct {
     uint8_t bytes[COOP_EVENT_MAX];
 } EventOut;
 typedef struct {
-    uint64_t session, id, high, ack_at;
+    uint64_t session, id, high, ack_at, epoch, consent_epoch;
     uint16_t len, parts;
     uint8_t kind, dirty;
     uint8_t bytes[COOP_EVENT_MAX];
@@ -127,6 +127,7 @@ struct CoopSess {
     int pub_state;                              // state, readable without the lock
     int pub_joined;
     uint64_t accepted_self, accepted[COOP_MAX_MEMBERS + 1];
+    uint64_t accepted_epoch[COOP_MAX_MEMBERS + 1]; // revocations remembered even across revoke/reaccept between steps
     EventHandler event_handler[256];
     EventOut event_out[COOP_EVENT_SLOTS];
     uint64_t event_id;                         // allocated under lock, never reused in a session
@@ -518,13 +519,20 @@ void coop_sess_accept_members(CoopSess *s, const CoopView *view, uint32_t member
         coop_unlock(&s->lock);
         return;
     }
-    s->accepted_self = view && view->state == COOP_JOINED ? view->session : 0;
-    memset(s->accepted, 0, sizeof s->accepted);
-    for (int i = 0; view && s->accepted_self && i < view->n; i++) {
+    uint64_t self = view && view->state == COOP_JOINED ? view->session : 0;
+    uint64_t accepted[COOP_MAX_MEMBERS + 1] = {0};
+    for (int i = 0; view && self && i < view->n; i++) {
         const CoopPeer *p = &view->member[i];
         if (p->id >= 1 && p->id <= COOP_MAX_MEMBERS && p->id != view->self && (members & (1u << p->id)))
-            s->accepted[p->id] = p->session;
+            accepted[p->id] = p->session;
     }
+    for (int id = 1; id <= COOP_MAX_MEMBERS; id++) {
+        if (s->accepted[id] && (s->accepted_self != self || s->accepted[id] != accepted[id]) &&
+            s->accepted_epoch[id] != UINT64_MAX) s->accepted_epoch[id]++;
+        // Never reuse a receipt epoch. Exhaustion stays closed until this local session ends.
+        s->accepted[id] = s->accepted_epoch[id] == UINT64_MAX ? 0 : accepted[id];
+    }
+    s->accepted_self = self;
     for (int i = 0; i < COOP_EVENT_SLOTS; i++) {
         EventOut *e = &s->event_out[i];
         int any = 0;
@@ -541,6 +549,7 @@ static void events_reset(CoopSess *s) {
     coop_lock(&s->lock);
     s->accepted_self = s->event_id = 0;
     memset(s->accepted, 0, sizeof s->accepted);
+    memset(s->accepted_epoch, 0, sizeof s->accepted_epoch);
     for (int i = 0; i < COOP_EVENT_SLOTS; i++) {
         s->event_out[i].id = 0;
         memset(s->event_out[i].target, 0, sizeof s->event_out[i].target);
@@ -549,7 +558,7 @@ static void events_reset(CoopSess *s) {
     // No payload clearing: lengths/ids make the old storage unreachable.
     for (int id = 1; id <= COOP_MAX_MEMBERS; id++) {
         EventIn *e = &s->event_in[id];
-        e->session = e->id = e->high = e->ack_at = 0;
+        e->session = e->id = e->high = e->ack_at = e->epoch = e->consent_epoch = 0;
         e->parts = e->dirty = 0;
     }
     s->event_next_send = 0, s->event_turn = 0;
@@ -591,17 +600,40 @@ int coop_sess_send_event(CoopSess *s, int member, uint8_t kind, const void *byte
 }
 
 // The stepping thread also checks the live roster: a new roster may not have been published to callers yet.
-static int event_peer(CoopSess *s, int id, uint64_t session) {
+static int event_peer(CoopSess *s, int id, uint64_t session, uint64_t *epoch) {
     const CoopMemberInfo *m = member_of(s, id);
     coop_lock(&s->lock);
     int ok = m && m->session == session && s->accepted_self == s->session && s->accepted[id] == session;
+    if (ok) *epoch = s->accepted_epoch[id];
     coop_unlock(&s->lock);
     return ok;
 }
 
+// Every actual partial discard advances the receipt epoch, regardless of what invalidated the binding. Keep the
+// id as a monotonic floor and keep completed receipts: neither abandonment nor revocation can revive an old id.
+static void event_discard(EventIn *e) {
+    e->dirty = 0;
+    if (e->id > e->high && e->parts) {
+        e->parts = 0;
+        if (e->epoch != UINT64_MAX) e->epoch++;
+    }
+}
+
+static void event_binding(EventIn *e, uint64_t session, uint64_t consent_epoch) {
+    if (e->session != session) {
+        e->session = session, e->id = e->high = e->ack_at = e->epoch = 0;
+        e->parts = e->dirty = 0;
+    }
+    if (e->consent_epoch != consent_epoch) {
+        e->consent_epoch = consent_epoch;
+        event_discard(e);
+    }
+}
+
 static int event_receive(CoopSess *s, int from, uint64_t session, uint8_t kind, const uint8_t *bytes, size_t n, uint64_t now) {
     (void)now;
-    if (!event_peer(s, from, session)) return 0;
+    uint64_t epoch;
+    if (!event_peer(s, from, session, &epoch)) return 0;
     if (kind == COOP_K_EVENT_ACK) {
         CoopEventAck a;
         if (!coop_event_ack_parse(bytes, n, &a) || a.sender_session != s->session) return 0;
@@ -610,9 +642,14 @@ static int event_receive(CoopSess *s, int from, uint64_t session, uint8_t kind, 
             EventOut *e = &s->event_out[i];
             if (e->id != a.id || e->target[from].session != session) continue;
             uint16_t full = coop_event_parts(e->len);
-            if (a.parts & ~full) break;
-            e->target[from].acked |= a.parts;
-            if (e->target[from].acked == full) e->target[from].session = 0;
+            EventTarget *t = &e->target[from];
+            if ((a.parts & ~full) || a.epoch < t->ack_epoch) break;
+            if (a.epoch > t->ack_epoch) {
+                t->ack_epoch = a.epoch, t->acked = 0;
+                t->sent = a.parts, t->next = 0;   // the receiver discarded the earlier assembly
+            }
+            t->acked |= a.parts;
+            if (t->acked == full) t->session = 0;
             int any = 0;
             for (int id = 1; id <= COOP_MAX_MEMBERS; id++) any |= e->target[id].session != 0;
             if (!any) e->id = 0;
@@ -628,13 +665,15 @@ static int event_receive(CoopSess *s, int from, uint64_t session, uint8_t kind, 
     coop_unlock(&s->lock);
     if (!h.fn) return 0;   // No application handler: never claim delivery.
     EventIn *e = &s->event_in[from];
-    if (e->session != session) {
-        e->session = session, e->id = e->high = e->ack_at = 0;
-        e->parts = e->dirty = 0;
-    }
-    if (p.id < e->high || (p.id == e->high && p.id != e->id)) return 0;
+    event_binding(e, session, epoch);
+    if (e->epoch == UINT64_MAX) return 0;   // no receipt epoch may wrap within this session
+    if (p.id < e->id || p.id < e->high) return 0;
     if (e->id != p.id) {
-        if (e->id > e->high || p.id <= e->high) return 0;   // one unfinished event per sender
+        if (p.id <= e->high) return 0;
+        // Every fragment is the sender's oldest live event for this recipient. A higher id therefore retires any
+        // lower unfinished id: it was abandoned, not an out-of-order event still waiting to be delivered.
+        event_discard(e);
+        if (e->epoch == UINT64_MAX) return 0;
         e->id = p.id, e->len = p.total, e->kind = p.kind, e->parts = 0;
     }
     if (e->len != p.total || e->kind != p.kind) return 0;
@@ -657,12 +696,15 @@ static void events_tick(CoopSess *s, uint64_t now) {
     for (int id = 1; id <= COOP_MAX_MEMBERS; id++) {
         EventIn *e = &s->event_in[id];
         if (!e->session) continue;
-        if (!event_peer(s, id, e->session)) {
-            e->dirty = 0;
-            if (e->id > e->high) e->id = 0, e->parts = 0;   // forget incomplete data, not delivered ids
-        } else if (e->dirty && now >= e->ack_at) {
+        uint64_t epoch;
+        if (!event_peer(s, id, e->session, &epoch)) {
+            event_discard(e);
+            continue;
+        }
+        event_binding(e, e->session, epoch);
+        if (e->dirty && now >= e->ack_at) {
             uint8_t bytes[COOP_EVENT_ACK_SIZE];
-            CoopEventAck a = {.sender_session = e->session, .id = e->id, .parts = e->parts};
+            CoopEventAck a = {.sender_session = e->session, .id = e->id, .parts = e->parts, .epoch = e->epoch};
             size_t n = coop_event_ack_pack(bytes, sizeof bytes, &a);
             e->dirty = 0, e->ack_at = now + EVENT_ACK_MS;
             if (n) send_sealed(s, (uint8_t)id, COOP_K_EVENT_ACK, bytes, n);

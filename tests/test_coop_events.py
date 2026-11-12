@@ -14,7 +14,8 @@ import tempfile
 
 RUN_ALL_ARGS = ["--cc", "gcc"]
 ROOT = Path(__file__).resolve().parents[1]
-CASES = ("no-loss", "loss", "reorder", "parts", "duplicate", "queue", "acceptance", "codec", "threads")
+CASES = ("no-loss", "loss", "reorder", "parts", "duplicate", "queue", "acceptance", "codec", "threads",
+         "cancel", "cancel-accept", "reset-ack", "delayed-ack", "reaccept-step")
 
 
 def compile_fixture(cc, source, folder, tsan=False):

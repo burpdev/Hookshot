@@ -260,6 +260,97 @@ static void test_threads(void) {
     puts("PASS events: concurrent enqueue, consent publication, read and stepping");
 }
 
+// Reset regressions use the same real envelopes as the existing cases; old test bodies remain unchanged.
+static void deliver_pending(Packet *last_ack) {
+    for (unsigned i = 0; i < npending; i++) {
+        CoopHdr h;
+        const uint8_t *payload;
+        assert(coop_dgram_parse(pending[i].bytes, pending[i].n, &h, &payload));
+        if (last_ack && h.src == 2) *last_ack = pending[i];
+        deliver(pending[i].bytes, pending[i].n);
+    }
+    npending = 0;
+}
+
+static void reseal_packet(const Packet *packet) {
+    CoopHdr h;
+    const uint8_t *payload;
+    uint8_t bytes[COOP_MAX_MESSAGE], kind;
+    size_t n;
+    assert(coop_dgram_parse(packet->bytes, packet->n, &h, &payload));
+    assert(coop_open(payload, h.len, a->msg_key, h.src, h.dst, &kind, bytes, sizeof bytes, &n));
+    send_sealed(h.src == 1 ? a : b, h.dst, kind, bytes, n);
+    collect(0);
+    deliver_pending(NULL);
+}
+
+static Packet first_half(void) {
+    expect_pattern = 1, expected_n = sizeof expected;
+    for (unsigned i = 0; i < sizeof expected; i++) expected[i] = (uint8_t)(i * 11u + 3);
+    assert(coop_sess_send_event(a, 2, COOP_K_TEST, expected, sizeof expected) == COOP_EVENT_QUEUED);
+    pump(256, 0, 0);
+    assert(!received && b->event_in[1].parts == 0xff && a->event_out[0].target[2].acked == 0xff);
+    // Ask for another ACK of those same pieces, and retain its actual sealed bytes for a delayed-ACK test.
+    Packet first = {.n = saved_n}, ack = {0};
+    memcpy(first.bytes, saved, saved_n);
+    reseal_packet(&first);
+    clock_ms += EVENT_ACK_MS + 8;
+    events_tick(b, clock_ms);
+    collect(0);
+    deliver_pending(&ack);
+    assert(ack.n);
+    return ack;
+}
+
+static void test_cancel_partial(int receiver_reaccepts) {
+    first_half();
+    accept(a, 0);   // a save rebind cancels without changing this sender's session
+    assert(!queued() && a->session == 101);
+    if (receiver_reaccepts) accept(b, 0), accept(b, 1u << 1);
+    accept(a, 1u << 2);
+    for (int i = 0; i < 2; i++)
+        assert(coop_sess_send_event(a, 2, COOP_K_TEST, expected, sizeof expected) == COOP_EVENT_QUEUED);
+    pump(30000, 30, 1);
+    assert(received == 2 && last_id == 3 && !queued());
+    Packet old = {.n = saved_n};
+    memcpy(old.bytes, saved, saved_n);
+    reseal_packet(&old);
+    pump(1000, 0, 0);
+    assert(received == 2 && last_id == 3);   // abandoned id1 cannot return after ids2/3
+    puts("PASS events: cancelled partial, acceptance again, later FIFO events and no duplicate");
+}
+
+static void test_receiver_reset(int delayed_ack) {
+    Packet old_ack = first_half();
+    accept(b, 0);
+    events_tick(b, clock_ms);   // the receiver drops its first half; sender still remembers its ACK
+    accept(b, 1u << 1);
+    if (delayed_ack) {
+        pump(8, 0, 0);    // one replacement-assembly part; do not advance the sender again yet
+        clock_ms += EVENT_ACK_MS;
+        events_tick(b, clock_ms);
+        collect(0);
+        deliver_pending(NULL);   // first new-assembly ACK, after its real coalescing deadline
+        uint16_t parts = a->event_out[0].target[2].acked;
+        assert(parts && !(parts & 0xff));   // the old first-half mask is not part of this assembly
+        reseal_packet(&old_ack);           // a delayed old ACK, with a fresh envelope counter
+        assert(a->event_out[0].target[2].acked == parts);
+    }
+    pump(16000, delayed_ack ? 30 : 0, 1);
+    assert(received == 1 && last_id == 1 && !queued());
+    puts("PASS events: receiver reset cannot merge ACK masks; delayed old ACK cannot roll back assembly");
+}
+
+static void test_reaccept_between_steps(void) {
+    first_half();
+    accept(b, 0), accept(b, 1u << 1);   // no stepping call observes the revoked binding
+    pump(8, 0, 0);
+    assert(!received && !(b->event_in[1].parts & 0xff));
+    pump(16000, 30, 1);
+    assert(received == 1 && last_id == 1 && !queued());
+    puts("PASS events: revoke/reaccept between steps still discards the old assembly");
+}
+
 int main(int argc, char **argv) {
     assert(argc == 2);
     setup();
@@ -272,6 +363,11 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "acceptance")) test_acceptance();
     else if (!strcmp(argv[1], "codec")) test_codecs();
     else if (!strcmp(argv[1], "threads")) test_threads();
+    else if (!strcmp(argv[1], "cancel")) test_cancel_partial(0);
+    else if (!strcmp(argv[1], "cancel-accept")) test_cancel_partial(1);
+    else if (!strcmp(argv[1], "reset-ack")) test_receiver_reset(0);
+    else if (!strcmp(argv[1], "delayed-ack")) test_receiver_reset(1);
+    else if (!strcmp(argv[1], "reaccept-step")) test_reaccept_between_steps();
     else assert(0);
     coop_sess_free(a), coop_sess_free(b), coop_udp_close(relay);
     return 0;

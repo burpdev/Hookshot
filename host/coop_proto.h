@@ -154,16 +154,18 @@ int coop_open(const uint8_t *p, size_t n, const uint8_t key[COOP_MSG_KEY_LEN], u
 
 // ---- reliable events (session-owned kinds; layers register their inner kind with coop_on_event).
 // EVENT: u8 version=1, u8 inner kind, u64 recipient session, u64 event id, u16 total bytes, u8 part,
-// then exactly that part's bytes. EVENT_ACK: u8 version=1, u64 event sender session, u64 event id, u16 parts received.
+// then exactly that part's bytes. Its id is also the sender's lowest live id for this recipient; lower unfinished
+// ids are abandoned. EVENT_ACK: u8 version=2, u64 event sender session, u64 event id, u16 parts received, u64 epoch.
+// epoch changes whenever the receiver discards a partial assembly; ACK masks from different epochs never combine.
 // Parts are 1024 bytes except the last; an empty event has one empty part. All integers are little endian.
-enum { COOP_EVENT_MAX = 16384, COOP_EVENT_PART = 1024, COOP_EVENT_HEAD = 21, COOP_EVENT_ACK_SIZE = 19 };
+enum { COOP_EVENT_MAX = 16384, COOP_EVENT_PART = 1024, COOP_EVENT_HEAD = 21, COOP_EVENT_ACK_SIZE = 27 };
 typedef struct {
     uint64_t recipient_session, id;
     uint16_t total;
     uint8_t kind, part;
     const uint8_t *bytes;
 } CoopEventPart;
-typedef struct { uint64_t sender_session, id; uint16_t parts; } CoopEventAck;
+typedef struct { uint64_t sender_session, id; uint16_t parts; uint64_t epoch; } CoopEventAck;
 int coop_event_kind(uint8_t kind);
 uint16_t coop_event_parts(size_t total);   // full mask, 0 when too large
 size_t coop_event_part_pack(uint8_t *out, size_t cap, const CoopEventPart *p);

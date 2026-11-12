@@ -125,14 +125,15 @@ int coop_event_part_parse(const uint8_t *bytes, size_t n, CoopEventPart *out) {
 
 size_t coop_event_ack_pack(uint8_t *out, size_t cap, const CoopEventAck *a) {
     if (cap < COOP_EVENT_ACK_SIZE || !a->sender_session || !a->id || !a->parts) return 0;
-    out[0] = 1;
-    put64(out + 1, a->sender_session), put64(out + 9, a->id), put16(out + 17, a->parts);
+    out[0] = 2;
+    put64(out + 1, a->sender_session), put64(out + 9, a->id), put16(out + 17, a->parts), put64(out + 19, a->epoch);
     return COOP_EVENT_ACK_SIZE;
 }
 
 int coop_event_ack_parse(const uint8_t *bytes, size_t n, CoopEventAck *out) {
-    if (n != COOP_EVENT_ACK_SIZE || bytes[0] != 1) return 0;
-    CoopEventAck a = {.sender_session = get64(bytes + 1), .id = get64(bytes + 9), .parts = (uint16_t)get16(bytes + 17)};
+    if (n != COOP_EVENT_ACK_SIZE || bytes[0] != 2) return 0;
+    CoopEventAck a = {.sender_session = get64(bytes + 1), .id = get64(bytes + 9),
+                     .parts = (uint16_t)get16(bytes + 17), .epoch = get64(bytes + 19)};
     if (!a.sender_session || !a.id || !a.parts) return 0;
     *out = a;
     return 1;

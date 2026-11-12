@@ -244,13 +244,19 @@ wraps a layer's kind in EVENT (16), sends only to accepted current members, and 
 handler. It never dispatches an event through `coop_on_message`, nor lets an ordinary message invoke an event handler.
 
 - Each sender allocates a 64-bit event id for its session. It snapshots the recipients when queued (0 or
-  `COOP_DST_ALL` means all accepted peers then). For each recipient it finishes the oldest event before starting the
-  next: FIFO from each sender to each recipient, across event kinds. No order across senders or with state messages.
-- A recipient sends a small sealed EVENT_ACK (17) with the event id and received-part mask, at most once per 50 ms per
-  sender while something changed or a duplicate arrived. This coalesces several fragments without depending on any
-  application traffic. ACKs are their own messages rather than changing every layer's wire format. A lost ACK is
-  answered again when the sender retries. The final ACK means the whole event reached its callback, not that a hit or
-  authority claim was valid or applied.
+  `COOP_DST_ALL` means all accepted peers then). For each recipient it sends only the oldest event it still keeps.
+  Thus the id in every fragment is also that recipient's delivery floor: a higher id retires any lower unfinished
+  event, which the sender abandoned. The receiver retains this floor even when it discards partial bytes, so delayed
+  pieces cannot revive an abandoned event. Events that are not abandoned remain FIFO per sender/recipient across
+  kinds. No order across senders or with state messages. Cancellation cannot retract a callback already delivered.
+- A recipient sends a small sealed EVENT_ACK (17) with the event id, received-part mask and assembly epoch, at most
+  once per 50 ms per sender while something changed or a duplicate arrived. Discarding a partial assembly advances
+  that epoch. A newer epoch replaces the sender's old mask and makes it resend missing pieces; an older epoch is
+  ignored. Masks from two assemblies never combine. Consent revocations are recorded even if acceptance is granted
+  again before the next socket step. Completed receipts survive revocation, preventing a second callback.
+  ACKs are their own messages rather than changing every layer's wire format. A lost ACK is answered again when
+  the sender retries. The final ACK means the whole event reached its callback, not that a hit or authority claim
+  was valid or applied. ACK body version2 is 27 bytes; version1 is refused, so all peers need the updated helper.
 - Missing parts are retried after 250 ms; every retry is sealed anew, with a new envelope counter and the same event
   id. Event data is paced to one unicast fragment per 32 ms for the session, with recipients taking turns; ACKs have
   their separate bound. An event stuck at one recipient does not hold up delivery to the others or ordinary messages.
@@ -258,7 +264,9 @@ handler. It never dispatches an event through `coop_on_message`, nor lets an ord
   no accepted recipient) and `INVALID` (-2, bad kind/size/destination or exhausted ids) are distinct. Never treat a
   full queue as success. An event holds at most 16 KiB, split into 1,024-byte parts: large enough for an initial body
   description without an unbounded allocation. There is one reassembly buffer per sender, no allocation per part,
-  and no partial callback. Conflicting metadata, lengths or versions are refused.
+  and no partial callback. Cancelling or resetting an assembly creates no extra buffer or queue. Its floor and epoch
+  are fixed-size counters; they do not grow with churn and epochs never wrap. Conflicting metadata, lengths or
+  versions are refused.
 - While the same accepted sessions remain, retries have no time limit: eventual delivery requires packets and ACKs
   eventually passing and a handler registered at the receiver. Dispatch is at least once under that condition,
   without duplicates in that receiving session. The receiver remembers the highest delivered event id, not a
@@ -275,7 +283,9 @@ a gameplay authority or protection against a trusted member lying.
 
 `tests/test_coop_events.py` runs the real session sender, codecs and receiver over sealed loopback datagrams with a
 deterministic relay clock: loss, reordering, duplicated envelopes, full queues, departure, consent and fragmentation.
-Its concurrent caller case also runs under ThreadSanitizer on Linux when the compiler provides it.
+Reset cases cancel partial sends and deliver later ids in order, revoke between halves without combining ACK masks,
+replay an older assembly's ACK and revoke/reaccept between socket steps. The original loss and concurrent caller
+cases remain; the concurrent caller also runs under ThreadSanitizer on Linux when the compiler provides it.
 
 ### Accepted members
 

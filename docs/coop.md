@@ -220,6 +220,15 @@ when the relay drops it 15 s later. Two games on one PC: start a relay
 HOS_COOP_SERVER=127.0.0.1:<port>`, the first with `HOS_COOP_AUTO=create HOS_COOP_ROOM=<secret>`, the second with
 `HOS_COOP_AUTO=join` and the same secret, each with its own `--user` folder.
 
+The game and relay reserve their requested UDP addresses on Windows with `SO_EXCLUSIVEADDRUSE` before binding.
+Without it, Windows permits another program of the same user to bind a specific IPv4 address beside a wildcard
+socket, including a dual-stack socket: it can receive or inject datagrams and disrupt the room, though it cannot
+decrypt sealed player messages without the room secret. Addresses and relay-control metadata are not encrypted.
+The Linux paths set neither `SO_REUSEADDR` nor `SO_REUSEPORT`, so overlapping binds are refused there already.
+The socket tests cover wildcard/specific IPv4 coexistence in both orders, and a competing socket requesting reuse,
+on each OS; the compiled Windows-call fixture also checks option order and failure cleanup. The session modes still
+run concurrently. See [Microsoft's socket-binding rules](https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse).
+
 On Windows, the second game folder can hard-link the game's read-only data files instead of copying them; give each game its own user folder.
 A headless Windows game has no window to receive a polite close request; a scripted forced stop sends no goodbye, so an external relay drops it as `silent 15 s`.
 

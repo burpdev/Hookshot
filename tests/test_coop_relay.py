@@ -1123,6 +1123,39 @@ class RelayTest(unittest.TestCase):
 
 # ---- over real sockets
 
+class SocketOwnershipTest(unittest.TestCase):
+    def test_wildcard_excludes_specific_ipv4_in_both_orders(self):
+        for host in ('0.0.0.0', '::'):
+            with self.subTest(host=host):
+                with cr.open_socket(host, 0) as owner:
+                    port = owner.getsockname()[1]
+                    for reuse in (0, 1):
+                        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as other:
+                            other.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, reuse)
+                            with self.assertRaises(OSError):
+                                other.bind(('127.0.0.1', port))
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as owner:
+                    owner.bind(('127.0.0.1', 0))
+                    with self.assertRaises(OSError):
+                        cr.open_socket(host, owner.getsockname()[1])
+
+    def test_windows_exclusive_option_precedes_bind_and_failure_closes(self):
+        fake = mock.Mock()
+        with mock.patch.object(cr.sys, 'platform', 'win32'), \
+             mock.patch.object(cr.socket, 'SO_EXCLUSIVEADDRUSE', 0x1234, create=True), \
+             mock.patch.object(cr.socket, 'socket', return_value=fake):
+            self.assertIs(cr.open_socket('127.0.0.1', 0), fake)
+            self.assertEqual(fake.mock_calls[:2], [
+                mock.call.setsockopt(socket.SOL_SOCKET, 0x1234, 1),
+                mock.call.bind(('127.0.0.1', 0))])
+            fake.reset_mock()
+            fake.setsockopt.side_effect = OSError('exclusive bind unavailable')
+            with self.assertRaises(OSError):
+                cr.open_socket('127.0.0.1', 0)
+            fake.bind.assert_not_called()
+            fake.close.assert_called_once_with()
+
+
 class UdpTest(unittest.TestCase):
     def setUp(self):
         self.relay = cr.Relay()

@@ -324,6 +324,15 @@ CoopUdp *coop_udp_open(uint16_t port) {
     if (!net_up()) return NULL;
     Sock s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
     if (s == SOCK_NONE) return NULL;
+#ifdef _WIN32
+    /* Windows otherwise allows a same-user, specific-address socket beside this wildcard bind. It could take
+       this socket's datagrams (including a dual-stack socket's IPv4 traffic). Own the entire requested port. */
+    const int exclusive = 1;
+    if (setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&exclusive, sizeof exclusive)) {
+        sock_close(s);
+        return NULL;
+    }
+#endif
     int off = 0;   /* (IPv4 too, as ::ffff:a.b.c.d) */
     setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&off, sizeof off);
     struct sockaddr_in6 any;

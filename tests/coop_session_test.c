@@ -3,7 +3,7 @@
 //
 //   coop_session_test --unit
 //       1. coop_net.c on loopback: addresses, two sockets, IPv4 to a socket of both families, a datagram larger than the
-//          buffer dropped, a port in use, random bytes, events, a once, the clock.
+//          buffer dropped, cross-family port ownership, random bytes, events, a once, the clock.
 //       2. coop_server_parse's cases.
 //       3. A stop wakes its waiter only once the view that says "off" is published.
 //       4. The process's session switched off (HOS_COOP unset, HOS_COOP=0 over the options file's coop=1): no thread, no
@@ -27,6 +27,9 @@
 //       (--work: where its log goes), the maker removing a member who cannot come
 //       back, a room and a relay that are not there. --drop N: each session throws away N % of the datagrams it receives.
 //   coop_session_test --signal-child   (the child of --relay: joins through coop_init and waits for the signal)
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
 #include "coop_net.h"   // (first: winsock2.h before windows.h)
 
 #include <stdarg.h>
@@ -36,6 +39,8 @@
 #include <string.h>
 
 #ifndef _WIN32
+#include <arpa/inet.h>
+#include <sys/socket.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -44,6 +49,18 @@
 #include <sys/wait.h>
 #include <unistd.h>
 extern char **environ;
+#endif
+
+#ifdef _WIN32
+typedef SOCKET TestSocket;
+typedef int TestSocklen;
+#define TEST_SOCKET_NONE INVALID_SOCKET
+#define test_socket_close closesocket
+#else
+typedef int TestSocket;
+typedef socklen_t TestSocklen;
+#define TEST_SOCKET_NONE (-1)
+#define test_socket_close close
 #endif
 
 #include "coop.h"
@@ -224,6 +241,45 @@ static void once_many(void *arg) {
     for (int i = 0; i < 2000; i++) coop_once(&shared_once, once_fn, &shared_count);
 }
 
+// A specific IPv4 bind must not coexist with the session's dual-stack wildcard, in either order.
+// Windows permits this by default for the same user; Linux refuses it without reuse on the owner.
+static void check_bind_ownership(CoopUdp *owner) {
+    for (int reuse = 0; reuse < 2; reuse++) {
+        TestSocket other = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        CHECK(other != TEST_SOCKET_NONE, "open the specific IPv4 bind probe");
+        if (other == TEST_SOCKET_NONE) continue;
+        if (reuse)
+            CHECK(setsockopt(other, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof reuse) == 0,
+                  "set reuse on the competing socket");
+        struct sockaddr_in address = {0};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(coop_udp_port(owner));
+        CHECK(bind(other, (struct sockaddr *)&address, sizeof address) != 0,
+              "specific IPv4 cannot take the dual-stack port (reuse %d)", reuse);
+        test_socket_close(other);
+    }
+    TestSocket other = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    CHECK(other != TEST_SOCKET_NONE, "open the first-bound IPv4 owner");
+    if (other == TEST_SOCKET_NONE) return;
+    struct sockaddr_in address = {0};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int bound = bind(other, (struct sockaddr *)&address, sizeof address) == 0;
+    CHECK(bound, "bind the specific IPv4 owner to a free port");
+    if (bound) {
+        TestSocklen size = sizeof address;
+        int named = getsockname(other, (struct sockaddr *)&address, &size) == 0;
+        CHECK(named && address.sin_port, "read the specific IPv4 owner's port");
+        if (named) {
+            CoopUdp *overlap = coop_udp_open(ntohs(address.sin_port));
+            CHECK(!overlap, "dual-stack cannot partially bind a port already owned on IPv4");
+            coop_udp_close(overlap);
+        }
+    }
+    test_socket_close(other);
+}
+
 static void check_net(void) {
     CoopAddr a, b, c;
     char text[64];
@@ -246,6 +302,7 @@ static void check_net(void) {
     CoopUdp *taken = coop_udp_open(coop_udp_port(u1));
     CHECK(!taken, "a port in use cannot be bound again");
     coop_udp_close(taken);
+    check_bind_ownership(u1);
     uint8_t buf[2048], msg[1500];
     for (size_t i = 0; i < sizeof msg; i++) msg[i] = (uint8_t)i;
     CoopAddr to1, from, expect;

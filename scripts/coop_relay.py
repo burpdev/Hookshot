@@ -802,10 +802,16 @@ class Relay:
 def open_socket(host, port):
     family, _, _, _, sockaddr = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM, flags=socket.AI_PASSIVE)[0]
     s = socket.socket(family, socket.SOCK_DGRAM)
-    if family == socket.AF_INET6:
-        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-    s.bind(sockaddr)
-    s.setblocking(False)
+    try:
+        if sys.platform == 'win32':
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        if family == socket.AF_INET6:
+            s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        s.bind(sockaddr)
+        s.setblocking(False)
+    except OSError:
+        s.close()
+        raise
     return s
 
 

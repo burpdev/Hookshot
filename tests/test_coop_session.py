@@ -21,6 +21,9 @@ goodbye when its window closes (host/hos_relaunch.c), and links Winsock and BCry
 
 A compiled boundary fixture also checks the actual sender with the real encryption code: the last counter is sent
 once, and exhaustion leaves the room without emitting a wrapped counter.
+The actual Windows socket-opening function is also compiled against a call-recording Winsock stand-in: it must
+request exclusive ownership before binding and close the socket if that request fails. Real cross-family bind
+checks run in unit mode on Windows and Linux; no parallel mode or existing assertion is removed.
 
     python -I -B tests/test_coop_session.py [--cc gcc] [--only unit|mock|relay]   (COOP_TEST_VERBOSE=1: every log line)
 """
@@ -49,7 +52,7 @@ def compile_fixture(cc, folder, thread_sanitizer=False):
     run = lambda cmd: subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     exe = folder / ("coop_session_test" + ("_tsan" if thread_sanitizer else "") + (".exe" if os.name == "nt" else ""))
     if os.name == "nt":   # (mingw's printf takes %zu with its own stdio; Winsock and BCryptGenRandom)
-        tries, libs = [["-D__USE_MINGW_ANSI_STDIO=1"]], ["-lws2_32", "-lbcrypt", "-liphlpapi"]
+        tries, libs = [["-D__USE_MINGW_ANSI_STDIO=1", "-D_CRT_SECURE_NO_WARNINGS"]], ["-lws2_32", "-lbcrypt", "-liphlpapi"]
     elif thread_sanitizer:
         tries, libs = [["-fsanitize=thread"]], ["-pthread"]
     else:
@@ -116,6 +119,9 @@ def check_wiring():
 
 
 COUNTER_FIXTURE = r'''
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -171,6 +177,97 @@ def check_counter(cc, folder, flags, source):
     subprocess.run([cc, "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
                     "-I" + str(ROOT / "host"), str(src), str(ROOT / "host/coop_proto.c"),
                     str(folder / "monocypher.o"), "-o", str(exe)] + flags, check=True, timeout=300)
+    subprocess.run([str(exe)], check=True, timeout=30)
+
+
+BIND_FIXTURE = r'''
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifndef _WIN32
+#define _WIN32 1
+#endif
+#define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL bind: %s\n", #x); exit(1); } } while (0)
+typedef int Sock;
+typedef int socklen_t;
+typedef int BOOL;
+typedef unsigned long DWORD;
+typedef unsigned long u_long;
+enum { SOCK_NONE = -1, AF_INET6 = 10, SOCK_DGRAM = 2, IPPROTO_UDP = 17, IPPROTO_IPV6 = 41,
+       IPV6_V6ONLY = 27, SOL_SOCKET = 1, SO_EXCLUSIVEADDRUSE = 100, FIONBIO = 200, IOC_VENDOR = 300, FALSE = 0 };
+#define _WSAIOW(a, b) ((a) + (b))
+struct in6_addr { unsigned char bytes[16]; };
+static const struct in6_addr in6addr_any = {{0}};
+struct sockaddr { unsigned short family; };
+struct sockaddr_in6 { unsigned short sin6_family; uint16_t sin6_port; struct in6_addr sin6_addr; };
+typedef struct { Sock s; uint16_t port; } CoopUdp;
+static int exclusive, bound, closed, fail_exclusive, fail_bind;
+static int net_up(void) { return 1; }
+static Sock socket(int family, int kind, int protocol) {
+    CHECK(family == AF_INET6 && kind == SOCK_DGRAM && protocol == IPPROTO_UDP);
+    exclusive = bound = closed = 0;
+    return 7;
+}
+static int setsockopt(Sock s, int level, int option, const char *value, int size) {
+    CHECK(s == 7 && !bound && size == sizeof(int));
+    if (option == SO_EXCLUSIVEADDRUSE) {
+        CHECK(level == SOL_SOCKET && *(const int *)value == 1);
+        if (fail_exclusive) return -1;
+        exclusive = 1;
+    } else CHECK(level == IPPROTO_IPV6 && option == IPV6_V6ONLY && *(const int *)value == 0);
+    return 0;
+}
+static int bind(Sock s, const struct sockaddr *address, int size) {
+    CHECK(s == 7 && exclusive && !closed && address && size == sizeof(struct sockaddr_in6));
+    bound++;
+    return fail_bind ? -1 : 0;
+}
+static int getsockname(Sock s, struct sockaddr *address, socklen_t *size) {
+    CHECK(s == 7 && bound && *size == sizeof(struct sockaddr_in6));
+    ((struct sockaddr_in6 *)address)->sin6_port = 32123;
+    return 0;
+}
+static void sock_close(Sock s) { CHECK(s == 7 && !closed); closed++; }
+static uint16_t htons(uint16_t n) { return n; }
+static uint16_t ntohs(uint16_t n) { return n; }
+static int WSAIoctl(Sock s, int code, BOOL *input, int input_size, void *output, int output_size,
+                    DWORD *got, void *overlapped, void *completion) {
+    CHECK(s == 7 && bound && code && input && input_size && got);
+    (void)output; (void)output_size; (void)overlapped; (void)completion;
+    return 0;
+}
+static int ioctlsocket(Sock s, int command, u_long *on) {
+    CHECK(s == 7 && bound && command == FIONBIO && *on == 1);
+    return 0;
+}
+@@OPEN@@
+int main(void) {
+    CoopUdp *u = coop_udp_open(0);
+    CHECK(u && exclusive && bound == 1 && !closed && u->port == 32123);
+    sock_close(u->s);
+    free(u);
+    fail_exclusive = 1;
+    CHECK(!coop_udp_open(0) && !bound && closed == 1);
+    fail_exclusive = 0, fail_bind = 1;
+    CHECK(!coop_udp_open(0) && bound == 1 && closed == 1);
+    puts("PASS: Windows UDP ownership precedes bind; failed exclusivity and bind close the socket");
+    return 0;
+}
+'''
+
+
+def check_bind(cc, folder, flags, source):
+    src, exe = folder / "bind.c", folder / "bind.exe"
+    # The two platform branches each open an if, with one shared closer: raw brace counting cannot extract it.
+    start = source.index("CoopUdp *coop_udp_open(")
+    opened = source[start:source.index("\nuint16_t coop_udp_port(", start)]
+    src.write_text(BIND_FIXTURE.replace("@@OPEN@@", opened), encoding="utf-8")
+    subprocess.run([cc, "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", str(src), "-o", str(exe)] + flags,
+                   check=True, timeout=300)
     subprocess.run([str(exe)], check=True, timeout=30)
 
 
@@ -268,6 +365,7 @@ def main():
         temp = Path(temp)
         exe, flags = compile_fixture(a.cc, temp)
         check_counter(a.cc, temp, flags, (ROOT / "host/coop.c").read_text(encoding="utf-8"))
+        check_bind(a.cc, temp, flags, (ROOT / "host" / "coop_net.c").read_text(encoding="utf-8"))
         runs = [("unit", exe, ["--unit"], None), ("unit, menu", exe, ["--unit-menu"], None),
                 ("mock, 0 % lost", exe, ["--mock", "--drop", "0"], None), ("mock, 30 % lost", exe, ["--mock", "--drop", "30"], None),
                 ("relay, 0 % lost", exe, None, 0), ("relay, 30 % lost", exe, None, 30)]

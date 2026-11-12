@@ -2200,9 +2200,9 @@ void save() {
             const std::string key(line, (size_t)(eq - line));
             // (memory_budget and auto_for too: save() writes them, and the file's old line, kept after it, won at the next start)
             bool mine = key == "microphone_device" || key == "options_version" || key == "memory_budget" || key == "auto_for" ||
-                        key == "auto_tuned" || key == "auto_output" || key == "auto_steps" ||
-                        // (hookshot: the Co-op tab's name and relay, which host/coop.c reads at the start)
-                        key == "coop_name" || (key == "coop_server" && coop_relay_whole);
+                        key == "auto_tuned" || key == "auto_output" || key == "auto_steps";
+            // (hookshot: the Co-op tab's name and relay, which host/coop.c reads at the start)
+            if (key == "coop_name" || (key == "coop_server" && coop_relay_whole)) mine = true;
             // (and the Mesh shaders row's line, no longer read (gpu/vk/mesh_mode.h): dropped, not kept for nothing)
             mine |= key == "mesh_shaders";
             for (const Row& r : rows)

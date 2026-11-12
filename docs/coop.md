@@ -339,8 +339,10 @@ when it runs.
 Design to 1,146 payload bytes per message (1,200 bytes including the sealed datagram), about 30 state datagrams/s per
 player, and one batch for **all** enemies that game leads at 10–15 Hz. Keep POS small; a richer body description uses
 another registered kind, not a larger POS. Pace progress, events and state within the same relay ceilings, not as
-separate bandwidth allowances. State should heal itself (for damage, total damage so far with highest-wins, not a
-lost subtraction); don't turn every animation frame into a reliable event.
+separate bandwidth allowances. State should heal itself: for damage, keep a running total per player and enemy, merge
+each player's total by taking the highest value seen, then add the players' totals together (one shared total merged
+by "highest wins" loses a hit when two players strike at once: totals of 2 and 2 would stay 2, not 4; and a
+subtraction sent once can be lost). Don't turn every animation frame into a reliable event.
 
 Before received bytes count: check accepted current member/session, exact version and length, finite numbers and
 bounded text/counts; signed rule **present and on** (absent is off); matching area/encounter and object generation;

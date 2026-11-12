@@ -37,7 +37,8 @@ static void receive_raw(int from, const uint8_t *bytes, size_t n, void *user) {
     raw_received++;
 }
 
-static void accept(CoopSess *s, uint32_t members) {
+/* (grant, not "accept": winsock2.h declares accept(), and the host's network header brings it in on Windows) */
+static void grant(CoopSess *s, uint32_t members) {
     CoopView v;
     coop_sess_view(s, &v);
     coop_sess_accept_members(s, &v, members);
@@ -61,7 +62,7 @@ static void setup(void) {
         s->roster = roster;
         set_state(s, COOP_JOINED);
         publish(s);
-        accept(s, 1u << (i ? 1 : 2));
+        grant(s, 1u << (i ? 1 : 2));
     }
     assert(coop_sess_on_event(b, COOP_K_TEST, receive_event, NULL));
     assert(coop_sess_on_message(b, COOP_K_TEST, receive_raw, NULL));
@@ -180,7 +181,7 @@ static void test_queue_and_departure(void) {
     changed.n = 2, changed.m[1].session = 303;
     apply_roster(a, &changed), publish(a);
     assert(!coop_sess_member_accepted(a, 2));
-    accept(a, 1u << 2);
+    grant(a, 1u << 2);
     assert(coop_sess_member_accepted(a, 2));
     assert(coop_sess_send_event(a, 2, COOP_K_TEST, NULL, 0) == COOP_EVENT_QUEUED);
     go_left(a, "test", 0), publish(a);
@@ -191,12 +192,12 @@ static void test_queue_and_departure(void) {
 static void test_acceptance(void) {
     CoopView stale;
     coop_sess_view(b, &stale);
-    accept(b, 0);
+    grant(b, 0);
     assert(!coop_sess_member_accepted(b, 1));
     assert(coop_sess_send_event(a, 2, COOP_K_TEST, NULL, 0) == COOP_EVENT_QUEUED);
     pump(1000, 0, 0);
     assert(!received && queued() == 1);
-    accept(b, 1u << 1);
+    grant(b, 1u << 1);
     pump(1000, 0, 0);
     assert(received == 1 && !queued());
     CoopRoster changed = b->roster;
@@ -209,7 +210,7 @@ static void test_acceptance(void) {
     events_reset(b);
     b->session = b->room_session = 505;
     changed.m[0].session = 101, changed.m[1].session = 505;
-    apply_roster(b, &changed), publish(b), accept(b, 1u << 1);
+    apply_roster(b, &changed), publish(b), grant(b, 1u << 1);
     memset(b->rw, 0, sizeof b->rw);
     deliver(saved, saved_n);
     assert(received == 1);
@@ -252,7 +253,7 @@ static void test_threads(void) {
     assert(coop_thread_start(&t, race_sender, NULL));
     while (!__atomic_load_n(&race_done, __ATOMIC_ACQUIRE)) {
         pump(8, 0, 0);
-        accept(a, 1u << 2);
+        grant(a, 1u << 2);
     }
     assert(coop_thread_join(&t, 5000));
     pump(10000, 0, 0);
@@ -304,10 +305,10 @@ static Packet first_half(void) {
 
 static void test_cancel_partial(int receiver_reaccepts) {
     first_half();
-    accept(a, 0);   // a save rebind cancels without changing this sender's session
+    grant(a, 0);   // a save rebind cancels without changing this sender's session
     assert(!queued() && a->session == 101);
-    if (receiver_reaccepts) accept(b, 0), accept(b, 1u << 1);
-    accept(a, 1u << 2);
+    if (receiver_reaccepts) grant(b, 0), grant(b, 1u << 1);
+    grant(a, 1u << 2);
     for (int i = 0; i < 2; i++)
         assert(coop_sess_send_event(a, 2, COOP_K_TEST, expected, sizeof expected) == COOP_EVENT_QUEUED);
     pump(30000, 30, 1);
@@ -322,9 +323,9 @@ static void test_cancel_partial(int receiver_reaccepts) {
 
 static void test_receiver_reset(int delayed_ack) {
     Packet old_ack = first_half();
-    accept(b, 0);
+    grant(b, 0);
     events_tick(b, clock_ms);   // the receiver drops its first half; sender still remembers its ACK
-    accept(b, 1u << 1);
+    grant(b, 1u << 1);
     if (delayed_ack) {
         pump(8, 0, 0);    // one replacement-assembly part; do not advance the sender again yet
         clock_ms += EVENT_ACK_MS;
@@ -343,7 +344,7 @@ static void test_receiver_reset(int delayed_ack) {
 
 static void test_reaccept_between_steps(void) {
     first_half();
-    accept(b, 0), accept(b, 1u << 1);   // no stepping call observes the revoked binding
+    grant(b, 0), grant(b, 1u << 1);   // no stepping call observes the revoked binding
     pump(8, 0, 0);
     assert(!received && !(b->event_in[1].parts & 0xff));
     pump(16000, 30, 1);

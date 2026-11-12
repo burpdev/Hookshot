@@ -7,7 +7,8 @@ and a second time with ThreadSanitizer, when the compiler has them). Eight runs 
               left) when the game closes
   unit, menu  co-op off at start, switched on and off by coop_configure (the menu's Co-op tab) while the game runs:
               off, on, off cycles with a socket open, each off leaving no thread (counted in /proc/self/task) and no
-              socket (/proc/self/fd), and stops the thread is too slow for
+              socket (/proc/self/fd), and stops the thread is too slow for. Before taking a baseline, each joined
+              fixture helper's specific Linux TID must disappear within a bounded wait; no count range is allowed.
   the same two under ThreadSanitizer (Linux): the co-op thread started, ended and started again beside its callers
   mock 0/30   two sessions through the test's own relay, which also acts as a hostile one (changed, forged and replayed
               datagrams, garbage, forged rosters, lies), with 0 % and 30 % of the received datagrams thrown away

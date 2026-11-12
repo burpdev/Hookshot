@@ -154,7 +154,9 @@ The relay's own log has the other side: `room <id> created`, `room <id>: <name> 
 `tests/coop_session_test.c` (AddressSanitizer and UBSan on Linux) and runs, at once: the sockets on loopback (IPv4 and
 IPv6, a datagram too large dropped), `coop_server_parse`'s cases, and co-op off (no thread, no socket); co-op switched
 off, on and off again as the Co-op tab does, each off leaving no thread and no socket behind (counted in `/proc/self/task`
-and `/proc/self/fd`), these two also under ThreadSanitizer; two sessions in
+and `/proc/self/fd`), these two also under ThreadSanitizer. Before taking the baseline, the fixture waits for each joined
+helper's specific Linux thread ID to leave `/proc/self/task`: a userspace join alone can precede that removal. The
+wait is bounded and the exact thread/socket-count checks remain. It also runs two sessions in
 one process through a relay of the test's own that also acts as a hostile one (changed, forged and replayed messages,
 garbage, forged rosters, lies to a player who connects), with no loss and with 30 % of the datagrams thrown away; and
 the same two through `scripts/coop_relay.py` on 127.0.0.1, restarted midway, with the game's own session started from

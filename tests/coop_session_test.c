@@ -37,6 +37,7 @@
 
 #ifndef _WIN32
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <spawn.h>
@@ -79,9 +80,15 @@ static void set_env(const char *name, const char *value) {
 #endif
 }
 
-// ---- threads that can be waited for (coop_net.h's are detached)
+// ---- fixture threads whose userspace and kernel exits can both be waited for
 
-typedef struct { void (*fn)(void *); void *arg; } Start;
+typedef struct {
+    void (*fn)(void *);
+    void *arg;
+#ifdef __linux__
+    pid_t tid;
+#endif
+} Start;
 #ifdef _WIN32
 typedef HANDLE Thread;
 static DWORD WINAPI thread_main(void *p) {
@@ -100,21 +107,34 @@ static void thread_join(Thread t) {
     CloseHandle(t);
 }
 #else
-typedef pthread_t Thread;
+typedef struct { pthread_t h; Start *start; } Thread;
 static void *thread_main(void *p) {
-    Start s = *(Start *)p;
-    free(p);
-    s.fn(s.arg);
+    Start *s = p;
+#ifdef __linux__
+    s->tid = gettid();
+#endif
+    s->fn(s->arg);
     return NULL;
 }
 static Thread thread_new(void (*fn)(void *), void *arg) {
     Start *s = malloc(sizeof *s);
     s->fn = fn, s->arg = arg;
-    pthread_t t;
-    if (pthread_create(&t, NULL, thread_main, s)) abort();
+    Thread t = {.start = s};
+    if (pthread_create(&t.h, NULL, thread_main, s)) abort();
     return t;
 }
-static void thread_join(Thread t) { pthread_join(t, NULL); }
+static void thread_join(Thread t) {
+    if (pthread_join(t.h, NULL)) abort();
+#ifdef __linux__
+    // pthread_join (notably under TSan) can return while this task still appears in /proc.
+    // Wait for this TID, not for a total that another exiting thread could also satisfy.
+    char path[64];
+    snprintf(path, sizeof path, "/proc/self/task/%ld", (long)t.start->tid);
+    CHECK(WAIT_FOR(access(path, F_OK) < 0 && errno == ENOENT, 5000),
+          "joined fixture thread %ld left /proc/self/task before the baseline count", (long)t.start->tid);
+#endif
+    free(t.start);
+}
 #endif
 
 // ---- what host/coop.c calls of the game: the log and hookshot_options.ini
@@ -1513,8 +1533,8 @@ int main(int argc, char **argv) {
     coop_lock_init(&log_lock);
     log_echo = getenv("COOP_TEST_VERBOSE") != NULL;
     setvbuf(stdout, NULL, _IOLBF, 0);
-    // (a process's first thread can bring a helper thread of the runtime with it, ThreadSanitizer's for one: one thread
-    // started and ended here, so that the checks that count threads begin from a settled number)
+    // The first thread starts the runtime's helpers (TSan's among them). thread_join also waits for this
+    // warm-up thread's own kernel task to disappear, so it cannot inflate the later baseline count.
     thread_join(thread_new(no_work, NULL));
     const char *relay = NULL, *work = NULL;
     unsigned drop = 0;

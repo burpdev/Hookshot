@@ -129,7 +129,7 @@ static int in_list(const uint32_t *list, size_t n, uint32_t h) {
         if (list[i] == h) return 1;
     return 0;
 }
-#define IN(list, h) in_list(list, sizeof list / sizeof list[0], h)
+#define COOP_FLAG_IN(list, h) in_list(list, sizeof list / sizeof list[0], h)
 
 typedef struct {
     uint32_t hash;
@@ -311,16 +311,16 @@ typedef struct { int cat; uint8_t inv; uint32_t max, cap_member; } Class;
 static Class classify(int is_int, uint32_t h, uint32_t reset, int32_t file, int default_true, const Sets *s) {
     Class k = {-1, 0, 0, 0};
     if (!is_int) {
-        if (file != 0 || reset & RESET_TEMPORARY || !(reset & RESET_NEW_GAME) || IN(heart_reward_flags, h)) return k;
-        k.cat = IN(song_flags, h) ? COOP_CAT_SONGS : hset_has(&s->first_get, h) ? COOP_CAT_ITEMS : COOP_CAT_PROGRESS;
+        if (file != 0 || reset & RESET_TEMPORARY || !(reset & RESET_NEW_GAME) || COOP_FLAG_IN(heart_reward_flags, h)) return k;
+        k.cat = COOP_FLAG_IN(song_flags, h) ? COOP_CAT_SONGS : hset_has(&s->first_get, h) ? COOP_CAT_ITEMS : COOP_CAT_PROGRESS;
         k.inv = default_true != 0;
     } else if (h == F_RUPEES) {
         k.cat = COOP_CAT_RUPEES, k.cap_member = CAP_RUPEES;
     } else if (hset_has(&s->keys, h)) {
         k.cat = COOP_CAT_KEYS;
     } else if (hset_has(&s->pouch, h)) {
-        if (IN(own_counts, h)) return k;
-        k.cat = IN(quest_counts, h) ? COOP_CAT_QUEST : COOP_CAT_ITEMS;
+        if (COOP_FLAG_IN(own_counts, h)) return k;
+        k.cat = COOP_FLAG_IN(quest_counts, h) ? COOP_CAT_QUEST : COOP_CAT_ITEMS;
         for (size_t i = 0; i < sizeof ammo / sizeof ammo[0]; i++)
             if (ammo[i].count == h) k.cat = COOP_CAT_AMMO, k.cap_member = ammo[i].cap_member;
     } else if (hset_has(&s->capacity, h) || h == F_MAGIC_SIZE) {
@@ -1058,7 +1058,7 @@ static void say_counts(const char *what) {
             G.count[COOP_CAT_KEYS], G.count[COOP_CAT_RUPEES], G.count[COOP_CAT_AMMO]);
 }
 
-static void bind(Ctx *c, uint64_t mgr) {
+static void bind_tables(Ctx *c, uint64_t mgr) {
     const uint64_t be = recomp_load64(c, mgr + C_BOOL + CN_ENTRIES), ie = recomp_load64(c, mgr + C_INT + CN_ENTRIES);
     if (!TryAcquireSRWLockExclusive(&G.lock)) return;   /* the co-op thread has the engine: the next frame */
     if (mgr != G.mgr || be != G.bool_entries || ie != G.int_entries || !G.nflags) {
@@ -1370,7 +1370,7 @@ void hos_oot_coop_present(Ctx *c) {
                     recomp_load64(c, mgr + C_INT + CN_ENTRIES) != G.int_entries))
         unbind("the game made its flags anew");
     if (!gate(c, mgr)) return;
-    if (!G.bound) bind(c, mgr);
+    if (!G.bound) bind_tables(c, mgr);
     if (!G.bound) return;
     if (G.probe && !G.probed) G.probed = 1, probe(c, mgr);
     G.frames++;

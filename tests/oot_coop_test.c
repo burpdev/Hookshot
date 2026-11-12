@@ -394,16 +394,16 @@ int main(void) {
     {
         G.mgr = 0, G.nflags = 0, G.bound = 0, G.checked = 0, G.refused = 0;
         lie = 1;
-        bind(&c, mgr);
+        bind_tables(&c, mgr);
         CHECK(!G.bound && G.refused && strstr(logbuf, "progress sync shares nothing"));
         lie = 0;
-        bind(&c, mgr);
+        bind_tables(&c, mgr);
         CHECK(!G.bound && G.refused);                             /* the same table: still refused */
         G.mgr = 0;                                                /* the game made its flags anew: checked again */
-        bind(&c, mgr);
+        bind_tables(&c, mgr);
         CHECK(G.bound && !G.refused && G.nflags == 55 && strstr(logbuf, "the flag table reads as the game's getter does"));
         G.bound = 0, lock_held = 1;
-        bind(&c, mgr);
+        bind_tables(&c, mgr);
         CHECK(!G.bound);                                          /* the co-op thread holds the engine: the next frame */
         lock_held = 0;
     }

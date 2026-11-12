@@ -164,6 +164,9 @@ when the relay drops it 15 s later. Two games on one PC: start a relay
 HOS_COOP_SERVER=127.0.0.1:<port>`, the first with `HOS_COOP_AUTO=create HOS_COOP_ROOM=<secret>`, the second with
 `HOS_COOP_AUTO=join` and the same secret, each with its own `--user` folder.
 
+On Windows, the second game folder can hard-link the game's read-only data files instead of copying them; give each game its own user folder.
+A headless Windows game has no window to receive a polite close request; a scripted forced stop sends no goodbye, so an external relay drops it as `silent 15 s`.
+
 `tests/test_coop_env_file.py` checks that `hookshot_env.txt` sets no variable whose name begins `HOS_COOP` (every such
 name the host's sources hold, and one made up), and that the environment and `HOS_ENV_FILE`'s file still do.
 `tests/test_coop_options_text.py` checks that a `coop_server=` line of 159 bytes (the longest relay text the game

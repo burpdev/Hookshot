@@ -45,7 +45,7 @@ PIECES = [
     "#define S_CAPACITY", "#define F_RUPEES", "#define F_MAGIC_SIZE", "#define F_PLAY_CLOCK", "#define F_LOADING", "#define CAP_RUPEES",
     "static const uint32_t transition_flags[]", "static const uint32_t song_flags[]", "static const uint32_t heart_reward_flags[]",
     "static const uint32_t quest_counts[]", "static const uint32_t own_counts[]", "static const struct { uint32_t count, cap_member; } ammo[]",
-    "static int in_list(", "#define IN(", "typedef struct {\n    uint32_t hash;", "typedef struct { uint32_t *h; unsigned cap; } HSet;",
+    "static int in_list(", "#define COOP_FLAG_IN(", "typedef struct {\n    uint32_t hash;", "typedef struct { uint32_t *h; unsigned cap; } HSet;",
     "static void hset_add(", "static int hset_has(", "typedef struct { HSet first_get", "typedef struct { uint32_t hash; int32_t value; uint32_t frame;",
     "enum { PUB_CONTRIBUTORS", "enum { ST_UNSEEN", "static struct {\n    int state;", "#define TRACE_ON",
     "static int rd_ok(", "static uint64_t entry_of(", "static uint64_t struct_of(", "static void members(",
@@ -56,7 +56,7 @@ PIECES = [
     "static uint32_t reg_of(", "static GFlag *flag_by_hash(", "static int int_pending(", "static int apply_value(",
     "static int game_get_bool(", "static int set_flag(", "static int check_table(", "static uint32_t limit_fn(",
     "static void sync_on(", "static void on_view(",
-    "static void unbind(", "static void say_counts(", "static void bind(", "static int player_in_world(",
+    "static void unbind(", "static void say_counts(", "static void bind_tables(", "static int player_in_world(",
     "static volatile int title_starts;", "void hos_oot_coop_rom_open(", "static int gate(",
     "static int start(", "void hos_oot_coop_present(",
 ]

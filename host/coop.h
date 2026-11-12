@@ -1,10 +1,12 @@
-// Co-op session layer: one host thread owns a UDP socket to a relay (scripts/coop_relay.py), keeps the player in a room
-// of up to 8 and carries the messages the players send each other (coop_proto.h: the wire format). It never touches game
-// state: progress sync and the other players' puppets are layers above this one, which send with coop_send and receive
-// with coop_on_message. The game's own nn::socket stays offline.
+// Co-op session layer: one host thread keeps the link to the players this game plays with, keeps the player in a room
+// of up to 8 and carries the messages the players send each other (coop_proto.h: the wire format). There is one way to
+// reach them and it is the other players' games: one player hosts, its game listens on a TCP port, the others connect
+// to that address and the host passes every message on to the rest (host/coop_net.c has the link). It never touches
+// game state: progress sync and the other players' puppets are layers above this one, which send with coop_send and
+// receive with coop_on_message. The game's own nn::socket stays offline.
 //
 // Threads. Everything below the "process" heading may be called from any thread; the callbacks run on the coop thread
-// (keep them short, they hold up the socket) and must not call coop_command, coop_configure or coop_shutdown. coop_send
+// (keep them short, they hold up the links) and must not call coop_command, coop_configure or coop_shutdown. coop_send
 // copies the message into an outbox the coop thread flushes within about 8 ms; coop_view_get and coop_command take a
 // lock the coop thread holds only to copy. The coop thread exists only while co-op is switched on.
 //
@@ -17,23 +19,23 @@
 #include "coop_proto.h"
 
 typedef enum {
-    COOP_OFF,           // co-op is off: no socket, no thread work
+    COOP_OFF,           // co-op is off: no link, no thread work
     COOP_LEFT,          // on, in no room (the status says why after a failure)
-    COOP_CONNECTING,    // reaching the relay to create or join a room
-    COOP_JOINED,        // in a room
-    COOP_RECONNECTING,  // the relay went silent; joining the same room again as the same member
+    COOP_CONNECTING,    // reaching the host's port, or waiting for the first player on this game's own port
+    COOP_JOINED,        // in a room: this game's own (hosting) or the host's
+    COOP_RECONNECTING,  // the host went silent; joining the same room again as the same member
 } CoopState;
 
-typedef enum { COOP_CMD_CREATE = 1, COOP_CMD_JOIN, COOP_CMD_LEAVE } CoopCmd;
+typedef enum { COOP_CMD_HOST = 1, COOP_CMD_JOIN, COOP_CMD_LEAVE } CoopCmd;
 
 typedef struct {
     uint8_t id;                 // member id 1..8
-    uint8_t away;               // the relay has not heard from the member for a while
-    uint8_t maker;              // made the room (the relay says so); the rules are the ones its key signs (coop_state.h)
+    uint8_t away;               // the host has heard nothing from the member for a while
+    uint8_t maker;              // the game that hosts the room; its settings are the room's rules (coop_state.h)
     char name[COOP_NAME_MAX + 1];
-    uint64_t session;           // its session in the room, as the relay lists it (progress sync binds its identity to it)
-    uint32_t heard_ms;          // milliseconds since the last message of this member that opened with the room's key;
-                                // UINT32_MAX never (a member the relay lists but that has not shown it knows the secret)
+    uint64_t session;           // its session in the room, as the host lists it (progress sync binds its identity to it)
+    uint32_t heard_ms;          // milliseconds since the last frame of this member the host accepted;
+                                // UINT32_MAX never
 } CoopPeer;
 
 typedef struct {
@@ -43,67 +45,68 @@ typedef struct {
     char label[8];              // its first characters, for logs ("XXX…")
     int self;                   // this player's member id; 0 outside a room
     int maker;                  // the member id of the room's maker, 0 when the maker is not in the room
-    int made;                   // this player's session made the room (its own CREATE, not the relay's mark: its
-                                // settings are the room's rules, coop_state.h)
+    int made;                   // this game hosts the room (its own HOST command: its settings are the room's rules,
+                                // coop_state.h)
     uint64_t session;           // this player's session in the room, the one it joined with (0 outside a room); a roster
                                 // may list another for it, which progress sync does not sign for
-    char name[COOP_NAME_MAX + 1];   // this player's own name (COOP_NAME, cleaned), whatever the relay's roster says
+    char name[COOP_NAME_MAX + 1];   // this player's own name (COOP_NAME, cleaned), whatever the host's roster says
     int n;                      // members of the room, this player included, by id
     CoopPeer member[COOP_MAX_MEMBERS];
-    uint32_t ping_ms;           // round trip to the relay; 0 until measured
+    uint32_t ping_ms;           // round trip to the host; 0 until measured
     char status[96];            // what is going on or what went wrong, in words
-    uint32_t tx, rx, lost;      // datagrams sent, accepted, and received but not accepted (bad tag, wrong sender, replay)
+    uint32_t tx, rx, lost;      // frames sent, accepted, and received but not accepted (bad tag, wrong sender, replay)
 } CoopView;
 
 // ---- the process's session (the one the settings drive)
 
 // Starts the coop thread when HOS_COOP (or, without it, hookshot_options.ini's coop=) is on: once, with the settings as
-// they are then (host/hos_main.c, beside the Discord status). Off, nothing runs: no socket, no thread.
+// they are then (host/hos_main.c, beside the Discord status). Off, nothing runs: no link, no thread.
 void coop_init(void);
-// Switches the process's session on or off and sets the player's name and the relay ("host[:port]") now, from any
-// thread (the menu's Co-op tab). On starts the coop thread when none runs (co-op was off at start, or was switched off;
-// the first time the local port and the test switches are read as coop_init reads them); a new relay ends the room; a
-// new name joins the room again under it a second after the last change. Off leaves the room (BYE and LEAVE), closes
-// the socket and ends the coop thread: it waits for that, at most 0.4 s, and when it returns the view says off unless
-// the thread was held up (a name lookup), in which case the thread ends by itself a moment later. The hooks stay
-// registered; tick hooks do not run while co-op is off. An empty name is "Player-" and four random hex digits. It
-// changes this run only: the caller keeps hookshot_options.ini's coop=, coop_name= and coop_server=, which coop_init
-// reads at the next start; this layer never writes the file. 1 when applied, 0 when the system's random source failed
-// or the thread could not start.
+// Switches the process's session on or off and sets the player's name and the host address ("host[:port]") now, from
+// any thread (the menu's Co-op tab): the address to join, or empty for this game to host on its own port. On starts the
+// coop thread when none runs (co-op was off at start, or was switched off; the first time the port and the test
+// switches are read as coop_init reads them); a new host address ends the room; a new name joins the room again under
+// it a second after the last change. Off leaves the room (BYE and LEAVE), closes the links and ends the coop thread: it
+// waits for that, at most 0.4 s, and when it returns the view says off unless the thread was held up (a name lookup),
+// in which case the thread ends by itself a moment later. The hooks stay registered; tick hooks do not run while co-op
+// is off. An empty name is "Player-" and four random hex digits. It changes this run only: the caller keeps
+// hookshot_options.ini's coop=, coop_name=, coop_server= and coop_port=, which coop_init reads at the next start; this
+// layer never writes the file. 1 when applied, 0 when the system's random source failed or the thread could not start.
 int coop_configure(int on, const char *name, const char *server);
 // The game is closing (host/hos_relaunch.c, the window's close): leaves the room with BYE to the others and LEAVE to
-// the relay, closes the socket and ends the coop thread, waiting at most 0.4 s for it; then returns whatever happened
-// (the process ends next). A game that ends any other way (killed, crashed) says nothing: the relay drops a member it
+// the host, closes the links and ends the coop thread, waiting at most 0.4 s for it; then returns whatever happened
+// (the process ends next). A game that ends any other way (killed, crashed) says nothing: the host drops a member it
 // has not heard from for 15 s (docs/coop.md).
 void coop_shutdown(void);
-// Create, join or leave a room. secret (as typed: any case, '-' and spaces allowed) is required by JOIN; CREATE makes a
-// room of that secret, or of a new random one when it is NULL or empty (the view shows it: the player passes it on to
-// the others out of band). 1 when queued (also right after coop_configure switched co-op on, before the thread has
-// applied it), 0 when the secret is not one or co-op is off. The outcome shows in coop_view_get; the view's name is the
-// cleaned name in use.
+// Host a room, join one, or leave it. HOST makes this game the room on its own port, of the secret given (as typed: any
+// case, '-' and spaces allowed) or of a new random one when it is NULL or empty; the view shows the secret, and every
+// player that connects is told it on the link. JOIN goes to the host address the settings name; its secret is optional
+// because the host says it, and typing one says this player was told it some other way. 1 when queued (also right after
+// coop_configure switched co-op on, before the thread has applied it), 0 when the secret is not one or co-op is off.
+// The outcome shows in coop_view_get; the view's name is the cleaned name in use.
 int coop_command(CoopCmd cmd, const char *secret);
 // The room's maker removes a member (its id): every game drops its identity (progress sync signs the removal with the
-// maker's key, coop_state.h), and when the relay names this player the maker, the relay drops the member and refuses
-// it again under that identity. 1 when either was done.
+// maker's key, coop_state.h), and when this game hosts the room its link to that member ends and the member is refused
+// again under that identity. 1 when either was done.
 int coop_remove_member(int member);
-// fn(member, user) when coop_remove_member is called, on the caller's thread, before the relay is asked: the layer that
+// fn(member, user) when coop_remove_member is called, on the caller's thread, before the link is ended: the layer that
 // signs removals (progress sync) registers here; 1 when it removed the member. One hook.
 typedef int (*CoopRemoveFn)(int member, void *user);
 int coop_on_remove(CoopRemoveFn fn, void *user);
 void coop_view_get(CoopView *out);
-// This player's id towards the relay: random for each start of the game, never sent to the other players.
+// This player's id towards the host: random for each start of the game, never sent to the other players.
 uint64_t coop_client_id(void);
 
-// Peer messages. kind is COOP_K_*; bytes follow it in the datagram. coop_send goes to every other member, coop_send_to to
+// Peer messages. kind is COOP_K_*; bytes follow it in the frame. coop_send goes to every other member, coop_send_to to
 // one (a member id). 1 when queued, 0 when not in a room, the message is too long (COOP_MAX_MESSAGE bytes) or the
-// outbox is full: a message is a datagram and may be lost anyway. Every message is sealed with the room's message key.
+// outbox is full: a message may be lost anyway. Every message is sealed with the room's message key.
 int coop_send(uint8_t kind, const void *bytes, size_t n);
 int coop_send_to(int member, uint8_t kind, const void *bytes, size_t n);
 // fn(from member id, the message bytes after the kind, their count, user) for every message of that kind that opened
 // with the room's key and came from the session the roster names for its sender. One handler per kind; register before
 // the message can arrive (at start-up). Not once only: the window refuses a repeat within the last 64 it took, but
-// four older messages in a row start it again, after which a recorded message of that session can arrive again (a
-// relay without the secret can do that), and anyone with the secret can seal one again under a new counter. A handler
+// four older messages in a row start it again, after which a recorded message of that session can arrive again (what
+// anyone who kept the bytes can do), and anyone with the secret can seal one again under a new counter. A handler
 // for which a repeat or an old message matters keeps a counter of its own per sender and session inside its messages
 // and takes only one above the last it took (a position message, say, so that an old pose does not move a player
 // back); progress sync signs its counter, which only the sender can then move.
@@ -136,8 +139,8 @@ int coop_member_accepted(int member);
 // cannot grant acceptance, and a different member session never inherits a binding. No game code is called here.
 void coop_accept_members(const CoopView *view, uint32_t members);
 
-// "host", "host:port", "[v6]:port" or a bare IPv6 address into host (cap bytes) and port (default 24680). 0 when text is
-// empty or does not fit.
+// "host", "host:port", "[v6]:port" or a bare IPv6 address into host (cap bytes) and port (default 43400). 0 when text
+// is empty or does not fit.
 int coop_server_parse(const char *text, char *host, size_t cap, uint16_t *port);
 
 // ---- a session of its own (tests run two in one process; the process's session is one of these driven by the settings)
@@ -148,16 +151,17 @@ typedef struct {
     const char *name;           // the player's name
     uint64_t client_id;         // the same one on every reconnect keeps the member id for a minute (with the rejoin token)
     int on;                     // 0: off (COOP_OFF); 1: on, in no room until a command says
-    uint16_t local_port;        // 0: any
-    unsigned drop_pct;          // percent of received datagrams thrown away, for tests
-    int retry;                  // a room the relay lost (a restart) is made or waited for again instead of ending the session
+    uint16_t port;              // the port this game hosts on (0: 43400)
+    unsigned drop_pct;          // percent of received frames thrown away, for tests
+    int retry;                  // a host that went away (a restart) is waited for and joined again instead of ending the session
     // timings in ms, 0 for the defaults (2000, 8000, 250, 1000, 15000); tests shorten them
     uint32_t ping_ms, silence_ms, burst_gap_ms, backoff_first_ms, backoff_max_ms;
 } CoopParams;
 CoopSess *coop_sess_new(const CoopParams *p);   // p's strings are copied
 void coop_sess_free(CoopSess *s);               // the stepping thread must be gone
-// The stepping thread calls this in a loop: handles commands, the outbox, one batch of datagrams and the timers, waiting at
-// most 8 ms (in a room), 50 ms (reaching the relay) or 250 ms (idle) for the next datagram.
+// The stepping thread calls this in a loop: handles commands, the outbox, one batch of frames and the timers, waiting at
+// most 8 ms (in a room), 50 ms (reaching the host) or 250 ms (idle) for the next frame, and taking whoever knocks on
+// this game's port when it hosts.
 void coop_sess_step(CoopSess *s);
 int coop_sess_command(CoopSess *s, CoopCmd cmd, const char *secret);   // as coop_command, for this session
 int coop_sess_remove(CoopSess *s, int member);                        // as coop_remove_member
@@ -171,10 +175,11 @@ int coop_sess_member_accepted(CoopSess *s, int member);
 void coop_sess_accept_members(CoopSess *s, const CoopView *view, uint32_t members);
 void coop_sess_view(CoopSess *s, CoopView *out);
 // Replaces the settings the session reads with those of p (the timings stay as they were made); the stepping thread
-// applies them, on or off included. A new server ends the room; a new name, once the room is joined, joins it again under the new name a
-// second after the last change, so typing a name does not rejoin at every letter.
+// applies them, on or off included. A new host address ends the room; a new port re-opens this game's own; a new name,
+// once the room is joined, joins it again under the new name a second after the last change, so typing a name does not
+// rejoin at every letter.
 void coop_sess_configure(CoopSess *s, const CoopParams *p);
-// Ends the session as coop_sess_configure with on = 0 would: LEAVE and BYE, socket closed, state COOP_OFF.
+// Ends the session as coop_sess_configure with on = 0 would: LEAVE and BYE, the links closed, state COOP_OFF.
 void coop_sess_stop(CoopSess *s);
 // Waits at most ms for the stepping thread to have carried out a stop (or a configure with on = 0); 1 when it did.
 int coop_sess_wait_off(CoopSess *s, uint32_t ms);

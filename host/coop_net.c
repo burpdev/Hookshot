@@ -369,6 +369,15 @@ CoopTcpListen *coop_tcp_listen(uint16_t port) {
 #endif
     int off = 0;   /* (IPv4 too, as ::ffff:a.b.c.d) */
     setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&off, sizeof off);
+#ifndef _WIN32
+    /* Whoever hosted on this port before may have links still counted against it: without this, hosting again on the
+       same port right after a game closed fails. It does not let a second socket share a port another one is listening on. */
+    const int reuse = 1;
+    if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse)) {
+        sock_close(s);
+        return NULL;
+    }
+#endif
     struct sockaddr_in6 any;
     memset(&any, 0, sizeof any);
     any.sin6_family = AF_INET6;
@@ -598,7 +607,7 @@ int coop_tcp_next(CoopTcpSet *set, void *buf, size_t cap, int *slot, uint32_t ms
             if (!t || t->dead) continue;
             if (!t->tx_n) tcp_flush(t);
             if (!coop_tcp_alive(t)) continue;
-            int n = t->rx_n >= COOP_HDR_LEN ? tcp_read_frame(t) : 0;
+            const int n = tcp_read_frame(t);   /* (never waits: the socket is a nonblocking one) */
             if (n == -1) {
                 t->dead = 1;
                 continue;

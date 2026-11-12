@@ -228,6 +228,8 @@ The Linux paths set neither `SO_REUSEADDR` nor `SO_REUSEPORT`, so overlapping bi
 The socket tests cover wildcard/specific IPv4 coexistence in both orders, and a competing socket requesting reuse,
 on each OS; the compiled Windows-call fixture also checks option order and failure cleanup. The session modes still
 run concurrently. See [Microsoft's socket-binding rules](https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse).
+The Windows fixture drivers declare `_CRT_SECURE_NO_WARNINGS` before any header, including forced headers and each
+separately compiled runtime source; their existing warning-as-error settings and assertions remain enabled.
 
 On Windows, the second game folder can hard-link the game's read-only data files instead of copying them; give each game its own user folder.
 A headless Windows game has no window to receive a polite close request; a scripted forced stop sends no goodbye, so an external relay drops it as `silent 15 s`.

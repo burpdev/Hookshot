@@ -28,7 +28,7 @@ def compile_fixture(cc, folder, source=ROOT):
     run = lambda cmd: subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     exe = folder / "coop_sync_test.exe"
     # (mingw's printf takes %zu and %llu with its own stdio)
-    tries = [["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"], []] if os.name != "nt" else [["-D__USE_MINGW_ANSI_STDIO=1"]]
+    tries = [["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"], []] if os.name != "nt" else [["-D__USE_MINGW_ANSI_STDIO=1", "-D_CRT_SECURE_NO_WARNINGS"]]
     for i, extra in enumerate(tries):
         mono = folder / "monocypher.o"
         r = run([cc, "-std=c99", "-O2", "-w", "-c", str(source / "third_party/monocypher/monocypher.c"), "-o", str(mono)] + extra)

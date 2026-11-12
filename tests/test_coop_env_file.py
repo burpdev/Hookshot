@@ -55,7 +55,8 @@ def main():
         (game / "hookshot_env.txt").write_text("HOS_T_BESIDE=1\n" + lines + "HOS_T_COOPERATIVE=1\n", encoding="utf-8")
         (tmp / "test_env.txt").write_text("# a test run's own switches\n" + lines, encoding="utf-8")
         exe = str(game / "hookshot").replace("\\", "\\\\")
-        fixture = r'''#include <stdio.h>
+        fixture = r'''#define _CRT_SECURE_NO_WARNINGS
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32   /* (the test's own setenv/unsetenv: Windows has _putenv, which the game itself uses there) */

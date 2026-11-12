@@ -21,7 +21,7 @@ CASES = ("no-loss", "loss", "reorder", "parts", "duplicate", "queue", "acceptanc
 def compile_fixture(cc, source, folder, tsan=False):
     exe = folder / ("events-tsan.exe" if tsan else "events.exe")
     if os.name == "nt":
-        flags, libs = ["-D__USE_MINGW_ANSI_STDIO=1"], ["-lws2_32", "-lbcrypt", "-liphlpapi"]
+        flags, libs = ["-D__USE_MINGW_ANSI_STDIO=1", "-D_CRT_SECURE_NO_WARNINGS"], ["-lws2_32", "-lbcrypt", "-liphlpapi"]
     else:
         flags = ["-fsanitize=thread"] if tsan else ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"]
         libs = ["-pthread"]

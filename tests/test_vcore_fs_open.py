@@ -185,8 +185,8 @@ def main():
         folder = Path(temporary)
         (folder / "fixture.cpp").write_text(fixture, encoding="utf-8")
         exe = folder / ("fixture.exe" if os.name == "nt" else "fixture")
-        subprocess.run([compiler, "-std=c++17", "-include", ENV_ON_H, "-O1", "-w", str(folder / "fixture.cpp"), "-o", str(exe)], check=True,
-                       timeout=120)
+        subprocess.run([compiler, "-std=c++17", "-D_CRT_SECURE_NO_WARNINGS", "-include", ENV_ON_H, "-O1", "-w",
+                        str(folder / "fixture.cpp"), "-o", str(exe)], check=True, timeout=120)
         result = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
         print(result.stdout, end="")
         if result.returncode or "ok" not in result.stdout:

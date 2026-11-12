@@ -480,16 +480,17 @@ def main():
     with tempfile.TemporaryDirectory(prefix="menu-coop-") as tmp:
         tmp = Path(tmp)
         (tmp / "menu.cpp").write_text(source, encoding="utf-8")
-        run([a.cxx, "-std=c++20", "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers", str(tmp / "menu.cpp"),
-             "-o", str(tmp / "menu")])
+        run([a.cxx, "-std=c++20", "-D_CRT_SECURE_NO_WARNINGS", "-Wall", "-Wextra", "-Werror",
+             "-Wno-missing-field-initializers", str(tmp / "menu.cpp"), "-o", str(tmp / "menu")])
         run([str(tmp / "menu")])
         (tmp / "host").mkdir()
         (tmp / "host" / "fixture.c").write_text(HOST_FIXTURE, encoding="utf-8")
         mono = ROOT / "third_party" / "monocypher"
         run([a.cc, "-std=c99", "-O1", "-w", "-c", str(mono / "monocypher.c"), "-o", str(tmp / "monocypher.o")])
-        run([a.cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-I" + str(ROOT / "host"), "-I" + str(mono),
-             str(tmp / "host" / "fixture.c"), str(ROOT / "host" / "coop_menu.c"), str(ROOT / "host" / "coop_proto.c"),
-             str(tmp / "monocypher.o"), "-o", str(tmp / "host_test")])
+        run([a.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-Wall", "-Wextra", "-Werror",
+             "-I" + str(ROOT / "host"), "-I" + str(mono), str(tmp / "host" / "fixture.c"),
+             str(ROOT / "host" / "coop_menu.c"), str(ROOT / "host" / "coop_proto.c"), str(tmp / "monocypher.o"),
+             "-o", str(tmp / "host_test")])
         env = {k: v for k, v in os.environ.items() if not k.startswith("HOS_COOP")}
         run([str(tmp / "host_test")], env=env)
         run([str(tmp / "host_test"), "demo"], env=dict(env, HOS_COOP_DEMO="1"))
@@ -506,8 +507,9 @@ def main():
                 raise SystemExit("FAIL: the Room rules page has no row or default for " + field)
             table.append('    {"%s", %s, %s, %s, %s},' % (key, *r.groups(), default.group(1)))
         (tmp / "rules.c").write_text(RULES_FIXTURE.replace("@@TABLE@@", "\n".join(table)), encoding="utf-8")
-        run([a.cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-I" + str(ROOT / "host"), "-I" + str(mono), str(tmp / "rules.c"),
-             str(ROOT / "host" / "coop_state.c"), str(ROOT / "host" / "coop_proto.c"), str(tmp / "monocypher.o"), "-o", str(tmp / "rules")])
+        run([a.cc, "-std=c11", "-D_CRT_SECURE_NO_WARNINGS", "-Wall", "-Wextra", "-Werror",
+             "-I" + str(ROOT / "host"), "-I" + str(mono), str(tmp / "rules.c"), str(ROOT / "host" / "coop_state.c"),
+             str(ROOT / "host" / "coop_proto.c"), str(tmp / "monocypher.o"), "-o", str(tmp / "rules")])
         run([str(tmp / "rules")])
 
     # ---- the wiring ----

@@ -137,7 +137,7 @@ def main():
         base = [a.cc, "-std=gnu11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-I" + str(host),
                 '-DOOT_COOP_PIECES="%s"' % pieces.as_posix(), str(ROOT / "tests" / "oot_coop_test.c"), str(host / "coop_state.c"),
                 str(host / "coop_proto.c"), str(ROOT / "third_party" / "monocypher" / "monocypher.c"), "-lm", "-o", str(exe)]
-        tries = [["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"], []] if os.name != "nt" else [[]]
+        tries = [["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"], []] if os.name != "nt" else [["-D_CRT_SECURE_NO_WARNINGS"]]
         for i, extra in enumerate(tries):
             r = subprocess.run(base + extra, capture_output=True, text=True, timeout=300)
             if r.returncode == 0:

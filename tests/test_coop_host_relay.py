@@ -315,7 +315,7 @@ def compile_fixture(cc, folder, source, tsan=False, relay_text=None, coop_text=N
     if os.name == "nt":
         if tsan:
             return None
-        flags, libs = ["-D__USE_MINGW_ANSI_STDIO=1"], ["-lws2_32", "-lbcrypt", "-liphlpapi"]
+        flags, libs = ["-D__USE_MINGW_ANSI_STDIO=1", "-D_CRT_SECURE_NO_WARNINGS"], ["-lws2_32", "-lbcrypt", "-liphlpapi"]
     exe = folder / ("host_relay_tsan.exe" if tsan else "host_relay.exe")
     mono = folder / ("mono_tsan.o" if tsan else "mono.o")
     relay = source / "host/coop_relay.c"

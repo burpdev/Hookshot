@@ -1,6 +1,8 @@
 /* Real UDP carrier for the Python relay's fake-clock cases, plus the production thread's lifetime and the
    process's Host setting. Reuse the session fixture's existing assertions rather than a second session model. */
+#ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
+#endif
 #define main session_fixture_main
 #include "coop_session_test.c"
 #undef main

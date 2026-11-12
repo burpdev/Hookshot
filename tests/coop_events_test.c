@@ -1,6 +1,8 @@
 // Game-free session event tests. The real session sender, envelope and receiver run over loopback;
 // only the relay's scheduling is simulated, so loss and reordering are deterministic.
+#ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
+#endif
 #include "coop.c"
 #include <assert.h>
 

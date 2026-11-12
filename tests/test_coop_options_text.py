@@ -42,7 +42,8 @@ def main():
         (tmp / "hookshot_options.ini").write_bytes(("resolution=3\ncoop=1\ncoop_name=first\ncoop_server=%s\ncoop_name=Link\r\n"
                                                     "coop_port=4000" % relay).encode())
         exe = str(tmp / "hookshot").replace("\\", "\\\\")
-        fixture = r'''#include <stdio.h>
+        fixture = r'''#define _CRT_SECURE_NO_WARNINGS
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #define MAX_PATH 260

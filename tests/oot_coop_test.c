@@ -1,7 +1,9 @@
 /* The game side of co-op's progress sync without the game: host/oot_coop.c's reader, classification, apply rules,
    table check, guest calls, gate and switch, cut out of the source by tests/test_oot_coop.py (OOT_COOP_PIECES) and run
    on a made-up flag database in a fake guest memory, with a fake getter and fake setters in place of the game's. */
+#ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
+#endif
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>

@@ -118,6 +118,18 @@ screen. It costs some GPU time on cards that cull quickly, so it is off unless s
 | `HOS_GPU_ALLOC_RETRY=0` | A model's material-block allocations from a full heap (the OptimizeChangeBank thread's two CPU buffers and two GPU-memory calls in f_804566e0) not tried in the heap's parents, as shipped (`host/oot_heap_retry.c`, issue 1697) |
 | `HOS_GPU_ALLOC_TEST_FAIL=<n>` or `<gpu>,<cpu>` | A test: the first n of those allocations of each kind (or that many of the GPU memory and of the CPU buffers) refused by the heap they name, as a full heap would, so the retry runs |
 
+### Co-op
+
+Co-op (`host/oot_coop.c`, [coop.md](coop.md)) is turned on by the Network tab's Connection row, not by a switch.
+These change parts of it or stand in for the tab in test runs:
+
+| Switch | What it does |
+|---|---|
+| `HOS_COOP_ENEMY_PLACE=0` | Enemies are not kept in one place for all players: each game moves its own copies (their life is still shared) |
+| `HOS_COOP_BOSS=0` | Bosses are left to each game: no leader, no hand-over (their life is still shared) |
+| `HOS_COOP_AUTO=host` or `join`, `HOS_COOP_PORT=<port>` | Test runs: connected from the start without the Connection row; the port, over the Port row |
+| `HOS_COOP_TEST=1` | Test runs: the link also takes the test lines (`G` travel or stand at a place, `A` an animation on the bodies, `Z` an actor beside Link, `E` and `S` equipment on the bodies); `HOS_COOP_FOLLOW=1` or `2` with it: this game never leads an enemy, or only a boss it took over by its own hit |
+
 ### Input for scripted runs
 
 | Switch | What it does |
@@ -402,6 +414,7 @@ number is not the obvious one:
 | `microphone` | 0 Off, 1 Default, 2 and up a microphone (the name in `microphone_device` decides which) |
 | `mouse_camera` | 0 As the stick, 1 Native |
 | `layout_preset` | 0 Nintendo, 1 Xbox / PC, 2 Swap Face, 3 Custom |
+| `play_as`, `port`, `pvp` | The Network tab's rows (co-op): 0 Host, 1 Join; the port, 43400; PvP 0 Off, 1 On. The name and the host's address are in `coop.txt`, written by `host/oot_coop.c` |
 
 The other rows are 0 Off and 1 On. Some are read at the start, before the menu exists, by the code that needs them:
 `handheld_profile` and `output_res` (`host/nn_applet.c`), `ultrawide` (`host/hos_main.c`), `robust_buffers`

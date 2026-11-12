@@ -295,7 +295,7 @@ The same keys close it; with every Menu shortcut, <kbd>Esc</kbd> goes back a pag
 <kbd>F1</kbd> always works. **Controls → Menu shortcut** can leave <kbd>Insert</kbd> free for another overlay (F1 only).
 With Insert or F1, or with F1 only, <kbd>Esc</kbd> does not open the menu: it only lets the mouse go. Options saved by
 an older version on Insert or F1, the default then, move to Insert, F1 or Esc; F1 only stays.
-The menu has five tabs, Graphics, Audio, Gameplay, Controls and Debug:
+The menu has six tabs, Graphics, Audio, Gameplay, Controls, Debug and Network:
 <kbd>Q</kbd> and <kbd>E</kbd> (or <kbd>Tab</kbd> and <kbd>Shift</kbd>+<kbd>Tab</kbd>) switch between them, LB and RB on
 a controller (or the triggers). <kbd>Up</kbd> and <kbd>Down</kbd> choose a row, <kbd>Left</kbd> and <kbd>Right</kbd>
 change it (<kbd>Enter</kbd> changes it too); beside the rows, the help says what the row is and, on a line of its own,
@@ -388,7 +388,18 @@ HDR, Detail, and GPU and memory (last: the rows to change when something is wron
 | | Developer: Sampler cache | Off, On (after a restart) | Off |
 | | Developer: Robust buffers | Auto, Off, On (after a restart) | Auto |
 | | Developer: ASTC as RGBA8 | Off, On (after a restart) | Off |
+| Network | Play as | Host, Join | Host |
+| | Host address | Typed: Enter, the address, Enter again (kept off the screen) | 127.0.0.1 |
+| | Port | 1024 to 65535 | 43400 |
+| | Your name | Typed: Enter, the name, Enter again | Player |
+| | Connection | Connect, Disconnect | Not connected at every start |
+| | Status | What the link is doing, and who is there | |
+| | Go to player | A row for each other player while connected: travels to them | |
+| | PvP | Off, On | Off |
 
+- **Network** is co-op: two to four players, each in their own game, share one adventure (items, progress, enemies).
+  It is experimental and Windows-only for now, and does nothing until you connect: see [Co-op](docs/coop.md) for what
+  it needs, what is shared and what is not tested yet.
 - **Quality preset** sets Render resolution, Window scaling filter, Sharpness, Frame pacing, Game speed, Profile
   and the video memory limits for a card with that much memory. It leaves the Upscaler and Frame generation as
   you chose them: with DLSS, FSR 3.1 or FSR 4, the preset's resolution becomes their nearest mode. Changing most other

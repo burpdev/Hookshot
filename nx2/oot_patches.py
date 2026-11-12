@@ -23,6 +23,10 @@ Each is a runtime switch where it can be, so the game's own path stays reachable
   calls of f_80522050, its GPU memory (GPU_ALLOC_SITES), and its two tryAllocs of CPU buffers (HEAP_ALLOC_SITES). They went on
   with a null pointer and crashed writing through it (issue 1697). The supported build only.
 - Ocarina note controls: the note-wait action's start (f_828a9190) and tick (f_828a9280) report the wait to the host (hos_oc_wait, hos_oc_beat), which swaps the five notes for its own controls (host/nn_hid.c); a tick whose gates refuse reports no wait, so a dialogue keeps its buttons.
+- Co-op (host/oot_coop.c, the F1 menu's Network tab; the supported build only): the pouch's add by name (f_8112d570) calls
+  oot_coop_pouch_add first, so a pickup can be told to the other players, and the Life component's update (f_804bd8c0, the
+  function the heart protection guards) calls oot_coop_life_seen at its head and oot_coop_life_write where it takes life away,
+  so an enemy's life is one for all. Each returns at once while no link is up.
 """
 import collections
 import glob
@@ -352,6 +356,41 @@ TEXT_ADD = ("    if (hos_text_scale != 1.0f) { float _t; uint32_t _u; memcpy(&_t
             "memcpy(&_u,&_t,4); a64_vset64(c->vreg[0],_u); }   /* (nx2/oot_patches.py: text speed) */\n"
             "    hos_oot_text_pane(c, c->x[19]);   /* (nx2/oot_patches.py: text size; x19 the LetterAnimControl) */\n")
 TEXT_NEW = TEXT_OLD + TEXT_ADD
+
+
+# Co-op (host/oot_coop.c). f_8112d570 adds an item to the pouch by name (x1 points at the name, w3 is how many): every pickup
+# comes through it. f_804bd8c0 is the Life component's update (x0 the component at its head); at its two writes of the life
+# (LIFE_CAS) x19 is the component, x11 the life before and x12 the life after.
+POUCH_ADD_HEAD = "void f_8112d570(Ctx *__restrict A64_NOESC c) {\n"
+COOP_LIFE_SEEN = "    oot_coop_life_seen(c, c->x[0]);   /* (nx2/oot_patches.py: co-op, one enemy for everyone) */\n"
+COOP_LIFE_WRITE = "oot_coop_life_write(c, c->x[19], (uint32_t)c->x[11], (uint32_t)c->x[12]); "
+
+
+def patch_coop_pickup(source):
+    """f_8112d570, the pouch's add by name, calls oot_coop_pouch_add first: a pickup told to the other players (host/oot_coop.c)"""
+    return _hook_head(source, POUCH_ADD_HEAD, "    oot_coop_pouch_add(c);   /* (nx2/oot_patches.py: co-op, a pickup for all) */\n",
+                      "extern void oot_coop_pouch_add(Ctx *c);\n")
+
+
+def patch_coop_life(source):
+    """f_804bd8c0, the Life component's update, calls oot_coop_life_seen first and oot_coop_life_write before each of its two
+    writes of the life (after the heart protection's guard, when that is there: the life it leaves is the life told). None
+    without the function or when its writes are not the two known; a file patched before is given back as it is"""
+    start = source.find(LIFE_HEAD)
+    if start < 0:
+        return None
+    end = source.find("\n}", start)
+    if end < 0:
+        return None
+    body = source[start:end]
+    if "oot_coop_life_seen(" in body:   # (made before: a lift patched again)
+        return source
+    if body.count(LIFE_CAS) != 2:
+        return None
+    body = body.replace(LIFE_HEAD, LIFE_HEAD + COOP_LIFE_SEEN, 1).replace(LIFE_CAS, COOP_LIFE_WRITE + LIFE_CAS)
+    return (source[:start] + body + source[end:]).replace(
+        '#include "a64.h"\n', '#include "a64.h"\nextern void oot_coop_life_seen(Ctx *c, uint64_t life);\n'
+        'extern void oot_coop_life_write(Ctx *c, uint64_t life, uint32_t was, uint32_t now);\n', 1)
 
 
 def patch_dynres(s):
@@ -861,6 +900,16 @@ def patch_file(s, name, protect_hearts=False):
         out = life
         counts["player heart protection"] += 1
         lines.append("oot_patches: player heart protection in " + name)
+    pickup = patch_coop_pickup(out) if protect_hearts else None
+    if pickup is not None:
+        out = pickup
+        counts["co-op pickup hook"] += 1
+        lines.append("oot_patches: co-op's pickup hook in " + name)
+    shared = patch_coop_life(out) if protect_hearts else None   # (after the heart protection: its guard comes first)
+    if shared is not None:
+        out = shared
+        counts["co-op life hooks"] += 1
+        lines.append("oot_patches: co-op's enemy life hooks in " + name)
     move = patch_movement(out) if protect_hearts else None
     if move is not None:
         out = move
@@ -957,6 +1006,8 @@ def report(paths, counts, protect_hearts=False):
         done["disable camera centering"] = 0
         done["scene format"] = 0
         done["zstd stream hook"] = 0
+        done["co-op pickup hook"] = 0
+        done["co-op life hooks"] = 0
     total = collections.Counter()
     for c in counts:
         total.update(c)

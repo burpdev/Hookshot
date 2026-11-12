@@ -1035,6 +1035,17 @@ static int oot_teleport(Ctx *c, uint64_t actor, unsigned index) {
     return ok;   /* (sent; the request's own result is only logged) */
 }
 
+/* Co-op's "go to a player" who is on another map (host/oot_coop.c): the teleport above, by the map's own name.
+   1 asked, 0 not now, -1 no way in is listed for that map. */
+int hos_oot_travel(Ctx *c, uint64_t actor, const char *banc) {
+    for (unsigned i = 0; i < sizeof oot_destinations / sizeof oot_destinations[0]; i++) {
+        const OotDestination *d = &oot_destinations[i];
+        if ((d->child_banc && !strcmp(d->child_banc, banc)) || (d->adult_banc && !strcmp(d->adult_banc, banc)))
+            return oot_teleport(c, actor, i);
+    }
+    return -1;
+}
+
 /* Writes a GameData bool directly: GameDataMgr+32 is the (hash, index) table (+44 its size), the bools are 24-byte
    entries at GameDataMgr+24 (+16 their count) with the value at +22, as f_8022d9c0 reads them. 1 when found. */
 static int oot_gamedata_set_bool(Ctx *c, uint32_t hash, int value) {
@@ -1550,6 +1561,7 @@ void hos_oot_lift_player(Ctx *c, uint64_t actor) {
     if (movement < HOS_HEAP_BASE + 0x1d50 || recomp_load64(c, movement + 24) != actor ||
         !hos_oot_is_player(c, movement - 0x1d50)) return;
     if (!oot_event_playing(c)) hos_oot_opening(c, 3);   /* the opening has let Link go: later events keep their own skip */
+    { void oot_coop_player(Ctx *c, uint64_t actor); oot_coop_player(c, actor); }   /* host/oot_coop.c: where Link stands, for the others */
 
     // Link can be updated by different guest workers on successive frames.
     static SRWLOCK cheats_lock = SRWLOCK_INIT;

@@ -758,6 +758,14 @@ static Seen *screen_seen(uint64_t screen, int64_t now) {
     return free_one;
 }
 
+/* One of the game's own menus is in front (the pause menu, the map, a dialog): a screen held the mouse within the last
+   quarter second. Co-op asks (host/oot_coop.c), to keep its corner and the players' names off them. */
+static volatile LONG64 front_ns;
+int hos_oot_menu_in_front(void) {
+    const int64_t at = (int64_t)InterlockedCompareExchange64(&front_ns, 0, 0);
+    return at && hos_now_ns() - at < 250000000LL;
+}
+
 void hos_oot_menu_tick(Ctx *c, uint64_t screen) {
     if (!screen) return;
     if (trace < 0) trace = env_on("HOS_MENU_TRACE");
@@ -803,6 +811,7 @@ void hos_oot_menu_tick(Ctx *c, uint64_t screen) {
     static uint64_t front_was;
     if (trace && front && front->screen != front_was) hos_log("menu: the mouse is for screen %#llx", (unsigned long long)front->screen);
     front_was = front ? front->screen : 0;
+    if (front) InterlockedExchange64(&front_ns, now);
     const int mine = front == me;
     /* (no screen has held the mouse for 50 ms of frames, the HUD's among them in play: the game's menus have closed,
        and the window gives the camera its mouse back now, not after display.c's 300 ms) */
@@ -817,4 +826,5 @@ void hos_oot_menu_tick(Ctx *c, uint64_t screen) {
 #else
 void hos_oot_menu_focus(Ctx *c, uint64_t screen, uint64_t pane, uint64_t lr) { (void)c, (void)screen, (void)pane, (void)lr; }
 void hos_oot_menu_tick(Ctx *c, uint64_t screen) { (void)c, (void)screen; }
+int hos_oot_menu_in_front(void) { return 0; }
 #endif

@@ -85,7 +85,8 @@ enum MenuTab {
     TAB_GAMEPLAY = 2,
     TAB_CONTROLS = 3,
     TAB_DEBUG = 4,   // (the OoT debug tools of #785, a tab of their own)
-    TAB_COUNT = 5,
+    TAB_NETWORK = 5,   // (hookshot: co-op, host/oot_coop.c)
+    TAB_COUNT = 6,
     TAB_MOTION = TAB_COUNT,   // (hookshot: not a tab of the strip, the Motion page that the Controls tab's Motion row
                               // opens: one past the strip's tabs, so a tab added before TAB_COUNT moves it along)
     TAB_PAGE = TAB_MOTION + 1   // (hookshot: the Controls page's rows, above its grid; no tab shows them)
@@ -965,6 +966,44 @@ void apply_auto(bool keep_own) {
     auto_for = auto_fp;          // (chosen for this PC, whether at a start or on the menu's row)
 }
 
+/* (hookshot) The Network tab: co-op (host/oot_coop.c reads the mode, the port and PvP: HOS_OPT_COOP_MODE, _PORT, _PVP,
+   oot_coop_opts.h). The name, the address row's text and the status line are the host's, sent a letter at a time
+   (menu_option_set). Enter on the name or the address row starts typing there (coop_edit: the keyboard's letters and
+   digits, Backspace, Ctrl+V pastes, Enter keeps it, Esc leaves it as it was); what was typed goes to the host the same way
+   back (HOS_OPT_COOP_ACTION, _OUT). The notes are what just happened ("Ryan found Hookshot"), shown with the status in the
+   screen's top left corner for a few seconds: draw_coop. Play as, Port and PvP are kept in hookshot_options.ini as the other
+   rows are (by their names: play_as, port, pvp); the name and the address are the host's to keep (coop.txt), and a game
+   starts not connected. */
+int coop_role = 0, coop_port = 43400, coop_pvp = 0;   // (role: 0 host, 1 join)
+bool coop_connect = false;   // (the Connection row's button: pressed each time the game is started, not kept)
+/// What the host is asked for (HOS_OPT_COOP_MODE): 0 not connected, 1 host, 2 join
+int coop_mode_now() {
+    // (test runs, HOS_COOP_AUTO=host|join: connected from the start, without the menu's Connection row)
+    static const int forced = [] { const char* e = getenv("HOS_COOP_AUTO"); return !e ? 0 : !strcmp(e, "host") ? 1 : !strcmp(e, "join") ? 2 : 0; }();
+    return forced ? forced : !coop_connect ? 0 : coop_role ? 2 : 1;
+}
+std::atomic<int> coop_action{0};
+int coop_edit = 0;                   // (the row being typed in: 1 Your name, 2 Host address; 0 none)
+std::string coop_edit_text;          // (what has been typed so far)
+std::string coop_out;                // (a typed text on its way to the host, a letter at a time: menu_coop_option)
+size_t coop_out_at = 0;
+std::mutex coop_mu;   // (the texts below: the host's threads write them)
+std::string coop_pending, coop_status, coop_name = "Player", coop_addr = "Set (kept off the screen)";
+struct CoopNote { std::string text; int64_t until; };
+std::vector<CoopNote> coop_notes;
+std::vector<std::string> coop_players;   // (the others, "Name: where" each, in the host's order: the corner's list and the Go to player rows)
+std::atomic<int> coop_player_n{0};
+std::atomic<int> coop_note_n{0};         // (the notes there are: whether the corner has anything to show with co-op off)
+std::atomic<int> coop_hidden{0};         // (host -> menu, HOS_OPT_COOP_HIDE: one of the game's own menus is open)
+// (the name over each of the others: where the host says it goes, HOS_OPT_COOP_LABEL, and when it last said so)
+std::atomic<int> coop_label[8];
+std::atomic<int64_t> coop_label_at[8];
+const char* tx_coop(int v) { return v ? "Join" : "Host"; }
+const char* tx_port(int v) {
+    static char text[16];
+    snprintf(text, sizeof text, "%d", v);
+    return text;
+}
 MENU_HINTS(hn_preset, 0, "Each row as you set it. Changing most rows yourself comes back to Custom; the VRAM budget row keeps its value.",
            "Resolution 50% (with DLSS its nearest mode), Lanczos, Sharpness 30%, the Handheld Profile.",
            "Resolution 75% (with DLSS its nearest mode), Lanczos, Sharpness 30%, the Handheld Profile.",
@@ -1399,6 +1438,50 @@ Row rows[] = {
     {TAB_DEBUG, "ASTC as RGBA8", &opts.astc_rgba8, 0, 1, 1, tx_onoff,
      "Big ASTC textures kept as decoded RGBA8 instead of re-encoded to BC3: a workaround for texture artifacts seen on some AMD "
      "cards (issues 57 and 1006). Takes far more video memory. Applies after restart.", hn_astc_rgba8, true, true},
+    // (hookshot: the Network tab's rows, for co-op. Your name, Host address, Connection, Status and Go to player have no value
+    // of their own: coop_row_kind. A Go to player row for each of the seven others there can be; row_shown shows those there are)
+    {TAB_NETWORK, "Play as", &coop_role, 0, 1, 1, tx_coop,
+     "Co-op: one adventure with friends, each in their own game, items and progress shared. One player is the Host, the "
+     "others Join with the host's address. Everyone needs the same version of Hookshot.", nullptr, false, true},
+    {TAB_NETWORK, "Host address", nullptr, 0, 0, 0, nullptr,
+     "For Join: press Enter, type the host's address (or paste it with Ctrl+V), then Enter again. It is kept off the "
+     "screen: each letter shows only while it is the last one typed."},
+    {TAB_NETWORK, "Port", &coop_port, 1024, 65535, 1, tx_port,
+     "The port the host listens on and the others connect to. The same number for everyone. Across the internet the host "
+     "forwards it, or everyone joins one virtual network (Tailscale, ZeroTier, Radmin).", nullptr, false, true},
+    {TAB_NETWORK, "Your name", nullptr, 0, 0, 0, nullptr,
+     "What the others see. Press Enter, type a name on the keyboard (letters and digits, up to 16), then Enter again to "
+     "keep it. Esc leaves it as it was."},
+    {TAB_NETWORK, "Connection", nullptr, 0, 0, 0, nullptr,
+     "Press Enter to connect: a Host starts waiting for the others, a Join looks for the host. Press Enter again to "
+     "disconnect. The Status row says how it went."},
+    {TAB_NETWORK, "Status", nullptr, 0, 0, 0, nullptr,
+     "Connecting, Connected (who, and where they are), or Not connected and why. It also shows in the top left corner "
+     "of the screen while connecting or connected, with a longer note when something is wrong."},
+    {TAB_NETWORK, "Go to player", nullptr, 0, 0, 0, nullptr,
+     "Press Enter to travel to this player. In the same map you are stood beside them at once; in another map the game "
+     "loads theirs first. It waits for a cutscene or a conversation to end."},
+    {TAB_NETWORK, "Go to player", nullptr, 0, 0, 0, nullptr,
+     "Press Enter to travel to this player. In the same map you are stood beside them at once; in another map the game "
+     "loads theirs first. It waits for a cutscene or a conversation to end."},
+    {TAB_NETWORK, "Go to player", nullptr, 0, 0, 0, nullptr,
+     "Press Enter to travel to this player. In the same map you are stood beside them at once; in another map the game "
+     "loads theirs first. It waits for a cutscene or a conversation to end."},
+    {TAB_NETWORK, "Go to player", nullptr, 0, 0, 0, nullptr,
+     "Press Enter to travel to this player. In the same map you are stood beside them at once; in another map the game "
+     "loads theirs first. It waits for a cutscene or a conversation to end."},
+    {TAB_NETWORK, "Go to player", nullptr, 0, 0, 0, nullptr,
+     "Press Enter to travel to this player. In the same map you are stood beside them at once; in another map the game "
+     "loads theirs first. It waits for a cutscene or a conversation to end."},
+    {TAB_NETWORK, "Go to player", nullptr, 0, 0, 0, nullptr,
+     "Press Enter to travel to this player. In the same map you are stood beside them at once; in another map the game "
+     "loads theirs first. It waits for a cutscene or a conversation to end."},
+    {TAB_NETWORK, "Go to player", nullptr, 0, 0, 0, nullptr,
+     "Press Enter to travel to this player. In the same map you are stood beside them at once; in another map the game "
+     "loads theirs first. It waits for a cutscene or a conversation to end."},
+    {TAB_NETWORK, "PvP", &coop_pvp, 0, 1, 1, tx_onoff,
+     "Players can hurt each other: a hit that reaches another player takes hearts from them. Only between players who "
+     "both have it on.", nullptr, false, true},
     // (hookshot) the Gameplay tab's Bug report (vk_bug_report.h): A or Enter writes the report's folder; the help says what is in it
     {TAB_GAMEPLAY, "Bug report", nullptr, 0, 0, 0, nullptr,
      "Saves what an issue needs in a new folder, bug-reports in the game folder: report.txt with the issue form's answers (this "
@@ -1606,6 +1689,33 @@ void outputs_sync() {
 
 int cur_tab = TAB_GRAPHICS;
 int tab_selected[TAB_COUNT + 1] = {};   // (and the Motion page's)
+/// (hookshot) the Network tab's rows that show a text of the host's: 1 Your name, 2 Host address, 3 Status, 4 Connection,
+/// 5 and up a Go to player row (the first such row is the first player listed); 0 any other row
+int coop_row_kind(const Row& r) {
+    if (r.tab != TAB_NETWORK || r.value) return 0;
+    if (!strcmp(r.name, "Go to player")) {
+        int n = 0;
+        for (const Row* x = &r; x > rows && !strcmp((x - 1)->name, "Go to player"); x--) n++;
+        return 5 + n;
+    }
+    return !strcmp(r.name, "Your name") ? 1 : !strcmp(r.name, "Host address") ? 2 : !strcmp(r.name, "Connection") ? 4 : 3;
+}
+/// What such a row shows in its value cell
+std::string coop_row_text(int kind) {
+    if (coop_edit == kind) {   // (being typed: the name as it is, the address with only its last letter showing)
+        std::string shown = coop_edit_text;
+        if (kind == 2 && shown.size() > 1) shown = std::string(shown.size() - 1, '*') + shown.back();
+        return shown + "_";
+    }
+    std::lock_guard lk(coop_mu);
+    if (kind >= 5) return (size_t)(kind - 5) < coop_players.size() ? coop_players[(size_t)(kind - 5)] + "     Go  >" : std::string();
+    if (kind == 1) return coop_name;
+    if (kind == 2) return coop_addr;
+    if (kind == 4) return coop_connect ? "Disconnect  >" : "Connect  >";
+    return !coop_connect ? "Not connected" : coop_status.empty() ? "Connecting..." : coop_status;
+}
+/// What Enter or A does on such a row, for the prompts
+const char* coop_row_confirm(int kind) { return kind >= 5 ? "Go" : kind == 4 ? (coop_connect ? "Disconnect" : "Connect") : kind == 3 ? "Status" : "Type"; }
 bool is_motion_row(const Row& r) { return r.tab == TAB_CONTROLS && !r.value && !strcmp(r.name, "Motion"); }
 
 // ---- the rows that take a restart: their values at the start (menu_init, the GPU's at menu_set_gpu_count) ----
@@ -1662,6 +1772,7 @@ int ask_sel = 0;   // (the restart question's choice: 0 Later, 1 Restart now)
 /// selection is a place on its tab (tab_selected), so a row hidden after the selected one leaves the selection where it is,
 /// and menu_tick brings back one past the end
 bool row_shown(int i) {
+    if (const int kind = coop_row_kind(rows[i]); kind >= 5) return kind - 5 < coop_player_n.load(std::memory_order_relaxed);   // (hookshot: a Go to player row for each player there is)
     const int* v = rows[i].value;
     return (rows[i].cheat < 0 || cheats_on()) && (v != &opts.reflex || reflex_available()) &&
            (v != &opts.antilag || antilag_available()) &&
@@ -2535,7 +2646,7 @@ float scroll_at[TAB_MOTION + 2];   // (the first row shown, eased toward the sel
                                    // the Controls page: kControlsSlot)
 constexpr int kControlsSlot = TAB_MOTION + 1;
 int wheel_rows[TAB_MOTION + 2];   // (the mouse wheel's notches since the last drawing, a slot each: scroll_rows scrolls by them)
-int scrolled_to[TAB_MOTION + 2] = {-1, -1, -1, -1, -1, -1};   // (the selection scroll_rows last brought into view)
+int scrolled_to[TAB_MOTION + 2] = {-1, -1, -1, -1, -1, -1, -1};   // (the selection scroll_rows last brought into view)
 float scroll_want[TAB_MOTION + 2];   // (where scroll_at is going: the wheel moves it, a new selection too)
 float ease_step = 0;     // (this drawing's share of the way: the time since the last one)
 
@@ -2987,7 +3098,7 @@ const char* bug_report_hint() {
     return text.c_str();
 }
 
-const char* const tab_titles[TAB_COUNT] = {"Graphics", "Audio", "Gameplay", "Controls", "Debug"};
+const char* const tab_titles[TAB_COUNT] = {"Graphics", "Audio", "Gameplay", "Controls", "Debug", "Network"};
 inline const char* tab_title(int t) { return t >= 0 && t < TAB_COUNT ? tab_titles[t] : "Settings"; }
 inline bool cheat_is_toggle(int c) { return c == 0 || c == 1 || c == 7; }
 
@@ -3003,6 +3114,8 @@ void row_value_cell(ui::Ctx& c, const Row& r, ImVec2 va, ImVec2 vb, bool selecte
         choice_cell(c, va, vb, tool, selected, cheat_chooses(r.cheat), cheat_chooses(r.cheat));
     } else if (r.cheat >= 0 && *cheat_button_text(r.cheat)) {
         choice_cell(c, va, vb, cheat_button_text(r.cheat), selected, false, false, r.cheat == 9);
+    } else if (const int kind = coop_row_kind(r)) {   // (hookshot: the Network tab's name, address, status, Connect, Go)
+        choice_cell(c, va, vb, coop_row_text(kind), selected, false, false);
     } else if (!r.value) {
         if (pending == &r) choice_cell(c, va, vb, "Press again to confirm", selected, false, false);
         else if (is_share_row(r)) choice_cell(c, va, vb, share_value.empty() ? "Save" : share_value, selected, false, false);   // (an action, not a page)
@@ -3035,7 +3148,14 @@ void draw_options(ui::Ctx& c) {
     // the tabs in the banner: dark ink on the tan, the shown one light on a dark inset; the tab keys at their ends (a click there
     // is the previous or the next tab)
     float tw[TAB_COUNT], total = 0;
-    for (int i = 0; i < TAB_COUNT; i++) tw[i] = ui::size_of(c.f.heading, 23 * s, tab_titles[i]).x + 56 * s, total += tw[i];
+    float tab_px = 23 * s, tab_pad = 56 * s;   // (six tabs since Network: each step smaller while they do not fit between the tab keys)
+    for (int tries = 0; tries < 12; tries++) {
+        total = 0;
+        for (int i = 0; i < TAB_COUNT; i++) tw[i] = ui::size_of(c.f.heading, tab_px, tab_titles[i]).x + tab_pad, total += tw[i];
+        if (total <= c.w - 2 * (58 * s + c.safe)) break;
+        tab_pad = std::max(14 * s, tab_pad - 8 * s);
+        if (tries >= 4) tab_px = std::max(14 * s, tab_px - s);
+    }
     float x = (c.w - total) * 0.5f;
     const float ty = hh * 0.5f + s;
     const char* const keys[2] = {c.pad ? "L" : "Q", c.pad ? "R" : "E"};
@@ -3055,7 +3175,7 @@ void draw_options(ui::Ctx& c) {
                 c.d->AddLine(ImVec2(x + tw[i] - 1, 0), ImVec2(x + tw[i] - 1, hh - 3 * s), ui::rgba(52, 34, 16), std::max(1.0f, s));
             }
         }
-        ui::text_mid(c, c.f.heading, 23 * s, x + 28 * s, ty, shown ? ui::kInkBright : ui::kBannerInk, tab_titles[i]);
+        ui::text_mid(c, c.f.heading, tab_px, x + tab_pad * 0.5f, ty, shown ? ui::kInkBright : ui::kBannerInk, tab_titles[i]);
         hits.add(x, 0, x + tw[i], hh, menu_hit::kTab, i);
         x += tw[i];
     }
@@ -3100,6 +3220,7 @@ void draw_options(ui::Ctx& c) {
         prompt_list[prompts_n++] = {ui::kCompact, "Compact", compact_key_name};
     } else {
         prompt_list[prompts_n++] = {ui::kConfirm, confirms ? (pending == &selr ? "Confirm" : selr.name) : &selr == &rows[kBugReportRow] || is_share_row(selr) ? "Save" : "Open"};
+        if (const int kind = coop_row_kind(selr)) prompt_list[prompts_n - 1].what = coop_row_confirm(kind);   // (hookshot: the Network tab: Type, Connect, Go)
     }
     if (cur_tab == TAB_MOTION) prompt_list[prompts_n++] = {ui::kBack, "Back"};   // (Esc: to Controls)
     else {
@@ -3212,6 +3333,7 @@ void draw_tune_bar(ui::Ctx& c) {
         tune_prompts[1] = {ui::kConfirm, cheat_confirm(r.cheat)};
     } else if (!r.value && r.cheat < 0) {
         tune_prompts[1] = {ui::kConfirm, confirms ? (pending == &r ? "Confirm" : r.name) : &r == &rows[kBugReportRow] || is_share_row(r) ? "Save" : "Open"};
+        if (const int kind = coop_row_kind(r)) tune_prompts[1].what = coop_row_confirm(kind);   // (hookshot: the Network tab)
     }
     const float pw = ui::prompts(c, ImVec2(0, 0), tune_prompts, 4, false);
     const float px0 = bx0 + (bw - pw) * 0.5f;
@@ -3936,6 +4058,77 @@ void draw_fps(ui::Ctx& c, bool under_banner) {
     line(0, "Draws left out (4 s)", fps_left_text, strcmp(fps_left_text, "0") ? red : dim);
 }
 
+/// (hookshot) whether co-op has anything on the screen: it is on, or a note is still showing; not over the game's own menus
+bool coop_on_screen() {
+    return !coop_hidden.load(std::memory_order_relaxed) && (coop_mode_now() != 0 || coop_note_n.load(std::memory_order_relaxed) > 0);
+}
+void outlined_left(ui::Ctx& c, ImFont* font, float px, float x, float top, ImU32 col, const char* t) {
+    const float o = std::max(1.0f, c.s);
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+            if (dx || dy) c.d->AddText(font, px, ImVec2(x + dx * o, top + dy * o), ui::rgba(0, 0, 0, 230), t);
+    c.d->AddText(font, px, ImVec2(x, top), col, t);
+}
+/// (hookshot) co-op's corner, the top left: the status line in the counter's green, the players' names small under it, and
+/// what just happened (the notes, a few seconds each) lower down, below the hearts and the item buttons
+void draw_coop(ui::Ctx& c) {
+    const float s = c.s, big = 15 * s, small = 12 * s, x = 12 * s;
+    const int64_t now = prof_now();
+    const int mode = coop_mode_now();
+    std::string status;
+    std::vector<std::string> names, notes;
+    {
+        std::lock_guard lk(coop_mu);
+        for (size_t i = 0; i < coop_notes.size();) {
+            if (coop_notes[i].until <= now) coop_notes.erase(coop_notes.begin() + (long)i);
+            else i++;
+        }
+        coop_note_n.store((int)coop_notes.size(), std::memory_order_relaxed);
+        if (mode && !coop_status.empty()) {   // (alone: the status as it is. With others: the names in rows under the line)
+            if (coop_players.empty()) status = "CO-OP   " + coop_status;
+            else {
+                status = mode == 1 ? "CO-OP   Connected (hosting)" : "CO-OP   Connected";
+                std::string row;
+                for (const std::string& p : coop_players) {
+                    if (!row.empty() && row.size() + p.size() > 84) names.push_back(row), row.clear();
+                    row += (row.empty() ? "" : "     ") + p;
+                }
+                if (!row.empty()) names.push_back(row);
+            }
+        }
+        for (const CoopNote& n : coop_notes) notes.push_back(n.text);
+    }
+    float y = 8 * s;
+    if (!status.empty()) outlined_left(c, c.f.strong, big, x, y, ui::rgba(72, 255, 110), status.c_str()), y += 20 * s;
+    for (const std::string& n : names) outlined_left(c, c.f.strong, small, x, y, ui::rgba(240, 244, 240), n.c_str()), y += 15 * s;
+    y = std::max(y, 208 * s);
+    for (const std::string& n : notes) outlined_left(c, c.f.strong, big, x, y, ui::rgba(240, 244, 240), n.c_str()), y += 20 * s;
+}
+/// (hookshot) the names over the other players: a small bubble each, its tail at the bottom middle, where the host last said
+/// that player is on the screen (HOS_OPT_COOP_LABEL: the list's place << 28, shown << 26, x << 13, y; x and y of 8191)
+void draw_coop_labels(ui::Ctx& c) {
+    if (!coop_mode_now()) return;
+    const float s = c.s, px = 15 * s;
+    const int64_t now = prof_now();
+    std::string names[8];
+    {
+        std::lock_guard lk(coop_mu);
+        for (size_t i = 0; i < 8 && i < coop_players.size(); i++) names[i] = coop_players[i].substr(0, coop_players[i].find(':'));
+    }
+    for (int i = 0; i < 8; i++) {
+        const int at = coop_label[i].load(std::memory_order_relaxed);
+        if (names[i].empty() || !(at >> 26 & 1) || now - coop_label_at[i].load(std::memory_order_relaxed) > 400000000LL) continue;
+        const float tw = ui::size_of(c.f.strong, px, names[i].c_str()).x, bw = tw + 22 * s, bh = 24 * s, tail = 7 * s;
+        const float mid = (float)(at >> 13 & 8191) * c.w / 8191.0f, bottom = (float)(at & 8191) * c.h / 8191.0f;
+        const ImVec2 a(mid - bw * 0.5f, bottom - tail - bh), b(mid + bw * 0.5f, bottom - tail);
+        const ImU32 body = ui::rgba(20, 26, 22, 235), edge = ui::rgba(72, 255, 110);
+        c.d->AddTriangleFilled(ImVec2(mid - 6 * s, b.y - s), ImVec2(mid + 6 * s, b.y - s), ImVec2(mid, bottom), edge);
+        c.d->AddRectFilled(a, b, body, 8 * s);
+        c.d->AddRect(a, b, edge, 8 * s, 0, std::max(1.0f, s));
+        c.d->AddText(c.f.strong, px, ImVec2(mid - tw * 0.5f, a.y + (bh - px) * 0.5f - s), ui::rgba(240, 244, 240), names[i].c_str());
+    }
+}
+
 /// The start-up screen: the logo, the wordmark, what the start is doing, a bar, on a warm dark. A little below the middle; what
 /// is under the logo at 0.86 of the logo's scale. startup_fade, 0 to 1, darkens it all to black as it ends
 void draw_startup(ui::Ctx& c) {
@@ -4218,6 +4411,17 @@ int menu_player_flight() { return cheats_on() ? player_flight.load(std::memory_o
 int menu_free_camera() { return cheats_on() ? free_camera.load(std::memory_order_relaxed) : 0; }
 int menu_link_speed() { return cheats_on() ? link_speeds[std::clamp(link_speed.load(std::memory_order_relaxed), 0, kLinkSpeeds - 1)] : 100; }
 int menu_take_cheat_action() { return cheat_action.exchange(0, std::memory_order_relaxed); }
+/// What the host asks of the Network tab (HOS_OPT_COOP_*): the mode, the port, what was done there (taken once), the next
+/// letter of what was typed, PvP. 0 for the ids that are the host's to set
+int menu_coop_option(int id) {
+    if (id == HOS_OPT_COOP_OUT) {   // (the next letter of what was typed; 0: no more)
+        std::lock_guard lk(coop_mu);
+        return coop_out_at < coop_out.size() ? (unsigned char)coop_out[coop_out_at++] : 0;
+    }
+    static const int test_port = getenv("HOS_COOP_PORT") ? atoi(getenv("HOS_COOP_PORT")) : 0;   // (test runs)
+    return id == HOS_OPT_COOP_MODE ? coop_mode_now() : id == HOS_OPT_COOP_PORT ? (test_port ? test_port : coop_port)
+         : id == HOS_OPT_COOP_ACTION ? coop_action.exchange(0, std::memory_order_relaxed) : id == HOS_OPT_COOP_PVP ? coop_pvp : 0;
+}
 
 void menu_note_present_sizes(uint32_t picture_w, uint32_t picture_h, uint32_t window_w, uint32_t window_h) {
     const auto c = [](uint32_t v) { return (uint64_t)std::min(v, 0xffffu); };
@@ -4309,6 +4513,47 @@ void menu_option_set(int id, int value) {
         }
         return;
     }
+    if (id == HOS_OPT_COOP_HIDE) {   // (hookshot: co-op, host/oot_coop.c; these are the host's threads, as the counts above)
+        coop_hidden.store(value != 0, std::memory_order_relaxed);
+        return;
+    }
+    if (id == HOS_OPT_COOP_LABEL) {   // (where a player's name goes: the list's place << 28, shown << 26, x << 13, y)
+        const int n = (value >> 28) & 7;
+        coop_label[n].store(value, std::memory_order_relaxed);
+        coop_label_at[n].store(prof_now(), std::memory_order_relaxed);
+        return;
+    }
+    if (id == HOS_OPT_COOP_CHAR) {   // (a text of co-op's, a letter at a time; 0 starts one)
+        std::lock_guard lk(coop_mu);
+        if (!value) coop_pending.clear();
+        else if (coop_pending.size() < 700) coop_pending.push_back((char)value);
+        return;
+    }
+    if (id == HOS_OPT_COOP_TEXT) {   // (the text is whole: 0 the status line, 1 a note, 2 the name, 3 the address row's, 4 the others)
+        {
+            std::lock_guard lk(coop_mu);
+            if (value == 0) coop_status = coop_pending;
+            else if (value == 1) {
+                if (coop_notes.size() >= 5) coop_notes.erase(coop_notes.begin());
+                coop_notes.push_back({coop_pending, prof_now() + 7000000000LL});
+                coop_note_n.store((int)coop_notes.size(), std::memory_order_relaxed);
+            } else if (value == 2) coop_name = coop_pending;
+            else if (value == 3) coop_addr = coop_pending;
+            else if (value == 4) {   // (the others: a line each)
+                coop_players.clear();
+                for (size_t at = 0; at < coop_pending.size();) {
+                    size_t end = coop_pending.find('\n', at);
+                    if (end == std::string::npos) end = coop_pending.size();
+                    if (end > at) coop_players.push_back(coop_pending.substr(at, end - at));
+                    at = end + 1;
+                }
+                coop_player_n.store((int)coop_players.size(), std::memory_order_relaxed);
+            }
+            coop_pending.clear();
+        }
+        if (cur_tab == TAB_NETWORK) menu_refresh = true;
+        return;
+    }
     if (id != 7) return;
     std::lock_guard lk(menu_mu);   // (the counts above are atomics: the game's thread waits for no menu frame for them)
     opts.mouse_sens = std::min(std::max(value, 10), 500);   // (the keys work while the menu is closed: it shows it when opened)
@@ -4321,7 +4566,7 @@ void menu_option_set(int id, int value) {
 // its own thread: menu_mu keeps them apart from menu_tick (the present's thread) and from menu_option_set (the game's)
 bool bridge_row(int i) { return rows[i].value && !rows[i].heading && rows[i].cheat < 0 && row_shown(i); }
 void bridge_fill(int i, MkwVkSetting* out) {
-    static const char* const tabs[] = {"graphics", "audio", "gameplay", "controls", "debug", "motion", "controls"};
+    static const char* const tabs[] = {"graphics", "audio", "gameplay", "controls", "debug", "network", "motion", "controls"};
     static_assert(sizeof tabs / sizeof tabs[0] == TAB_PAGE + 1, "a name for each MenuTab");
     const Row& r = rows[i];
     *out = MkwVkSetting{};
@@ -4743,8 +4988,58 @@ void menu_tick() {
             next = next[n] == ',' ? next + n + 1 : nullptr;
         }
     }
-    bool tab_left = press[10] || pad(HOS_PAD_LSHOULDER) || pad(HOS_PAD_LTRIGGER);
-    bool tab_right = press[11] || press[12] || pad(HOS_PAD_RSHOULDER) || pad(HOS_PAD_RTRIGGER);
+    if (coop_edit && !open_now.load()) coop_edit = 0;
+    const bool typing = coop_edit != 0;
+    if (typing) {   // (hookshot) typing in the Network tab's name or address row: the keyboard is the text's
+        static bool key_held[256];
+        const bool shift = mine && (GetAsyncKeyState(VK_SHIFT) & 0x8000), ctrl = mine && (GetAsyncKeyState(VK_CONTROL) & 0x8000);
+        const size_t most = coop_edit == 1 ? 16 : 120;
+        auto typed = [&](char ch) {
+            const bool letter = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-';
+            if ((letter || (coop_edit == 2 && (ch == '.' || ch == ':'))) && coop_edit_text.size() < most) coop_edit_text.push_back(ch);
+        };
+        for (int vk = 0x08; vk < 0xc0; vk++) {
+            const bool text_key = (vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z') || (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) ||
+                                  vk == VK_OEM_MINUS || vk == VK_OEM_PERIOD || vk == VK_DECIMAL || vk == VK_OEM_1 || vk == VK_SUBTRACT;
+            if (!text_key) continue;
+            const bool down = mine && (GetAsyncKeyState(vk) & 0x8000) != 0, hit = down && !key_held[vk];
+            key_held[vk] = down;
+            if (!hit) continue;
+            if (ctrl && vk == 'V') {   // (the clipboard's text, what of it a name or an address can hold)
+#ifdef _WIN32
+                if (OpenClipboard(nullptr)) {
+                    if (HANDLE h = GetClipboardData(CF_TEXT)) {
+                        if (const char* text = (const char*)GlobalLock(h)) {
+                            for (const char* ch = text; *ch && *ch != 13 && *ch != 10; ch++) typed(*ch);
+                            GlobalUnlock(h);
+                        }
+                    }
+                    CloseClipboard();
+                }
+#endif
+            } else if (ctrl) {
+            } else if (vk >= 'A' && vk <= 'Z') typed((char)(shift ? vk : vk + 32));
+            else if (vk >= '0' && vk <= '9') typed((char)vk);
+            else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) typed((char)('0' + vk - VK_NUMPAD0));
+            else if (vk == VK_OEM_MINUS || vk == VK_SUBTRACT) typed(shift && vk == VK_OEM_MINUS ? '_' : '-');
+            else if (vk == VK_OEM_PERIOD || vk == VK_DECIMAL) typed('.');
+            else if (vk == VK_OEM_1 && shift) typed(':');
+            menu_refresh = true;
+        }
+        if (press[9] && !coop_edit_text.empty()) coop_edit_text.pop_back(), menu_refresh = true;   // (Backspace)
+        if (press[7]) {   // (Enter keeps it: on its way to the host)
+            {
+                std::lock_guard lk(coop_mu);
+                coop_out = coop_edit_text, coop_out_at = 0;
+                if (coop_edit == 1 && !coop_edit_text.empty()) coop_name = coop_edit_text;   // (shown at once: the host says the same a moment later)
+            }
+            coop_action.store(coop_edit + 2);
+            coop_edit = 0, menu_refresh = true;
+        } else if (press[5] || press[0] || press[6]) coop_edit = 0, menu_refresh = true;   // (Esc: as it was)
+        for (bool& p : press) p = false;   // (nothing typed moves the menu: Q and E are letters here)
+    }
+    bool tab_left = !typing && (press[10] || pad(HOS_PAD_LSHOULDER) || pad(HOS_PAD_LTRIGGER));
+    bool tab_right = !typing && (press[11] || press[12] || pad(HOS_PAD_RSHOULDER) || pad(HOS_PAD_RTRIGGER));
     if (press[12] && (GetAsyncKeyState(VK_SHIFT) & 0x8000)) tab_left = true, tab_right = false;
     bool changed = menu_refresh;
     menu_refresh = false;
@@ -4764,6 +5059,7 @@ void menu_tick() {
         last_x = mx, last_y = my, mouse_read = true;                     // menu as it opens leaves the selection alone)
         if (moved) pad_last = false;
         if (!mouse) ptr.pressed = 0, ptr.wheel = 0;
+        if (typing) mouse = false, ptr.pressed = 0, ptr.wheel = 0;   // (hookshot: a name or an address being typed has the menu)
     }
     // (closing with a setting that takes a restart changed: the restart question first, Later already chosen on it)
     auto later = [&] {
@@ -5052,6 +5348,19 @@ void menu_tick() {
                 }
             }
         } else if (r.cheat >= 0) cheat_press(r.cheat, press, changed);   // (a debug tool: on the Debug tab itself)
+        else if (press[7] && coop_row_kind(r)) {   // (hookshot: the Network tab's rows without a value)
+            const int kind = coop_row_kind(r);
+            if (kind < 3) {   // (typing starts in the name's or the address's row)
+                coop_edit = kind;
+                std::lock_guard lk(coop_mu);
+                coop_edit_text = kind == 1 ? coop_name : "";
+            } else if (kind == 4) {   // (the Connect button)
+                coop_connect = !coop_connect;
+                std::lock_guard lk(coop_mu);
+                coop_status.clear();
+            } else if (kind >= 5) coop_action.store(10 + kind - 5);   // (Go to player)
+            press[7] = false, changed = true;
+        }
         else if (press[7] && is_motion_row(r)) cur_tab = TAB_MOTION, tab_selected[TAB_MOTION] = 0, press[7] = false, changed = true;
         else if (press[7] && is_share_row(r)) share_pipeline_list(), press[7] = false, changed = true;
         else if (press[7] && &r == &rows[kBugReportRow]) bug_report_save(), press[7] = false, changed = true;
@@ -5110,7 +5419,8 @@ void menu_record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h) {
     const bool start = startup_on.load(std::memory_order_acquire);
     const bool fps = opts.show_fps && !start;   // (no game frames yet: not "0 FPS" over the start-up screen)
     const bool open = open_now.load(std::memory_order_relaxed);
-    if (!start && !fps && !open) {   // (nothing shows: no ImGui frame, no render pass)
+    const bool coop = !start && coop_on_screen();   // (hookshot: co-op's corner and the names over the other players)
+    if (!start && !fps && !open && !coop) {   // (nothing shows: no ImGui frame, no render pass)
         // (but a new window size or Menu size since the last bake: one frame with nothing drawn that bakes the menu's glyphs
         // and measures its page for the new size, so the next open has no hitch whatever was resized while nothing showed)
         if (prebake_needed(w, h) && ui::begin(w, h)) {
@@ -5133,6 +5443,7 @@ void menu_record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h) {
     ui::Ctx c = ui_ctx(w, h);
     prebake(c);   // (the menu's glyphs at this size, before it opens: no hitch then)
     if (start) draw_startup(c);   // (under the menu)
+    if (coop) draw_coop_labels(c), draw_coop(c);   // (under the menu too)
     if (open) draw_menu(c);
     if (fps) draw_fps(c, open);
     ::mkwvk::rec::boundary(::mkwvk::rec::B_DIRECT);   // (Dear ImGui records into cmd directly, its backend through its own pointers: what this thread recorded through vk_work.h reaches cmd first)
@@ -5142,9 +5453,11 @@ void menu_record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h) {
 void menu_record_image(VkCommandBuffer cmd, VkImage image, VkImageView view, uint32_t w, uint32_t h) {
     const bool open = open_now.load(std::memory_order_relaxed);
     const bool fps = opts.show_fps && !startup_on.load(std::memory_order_acquire);
-    if (!open && !fps) return;
+    const bool coop = !startup_on.load(std::memory_order_acquire) && coop_on_screen();
+    if (!open && !fps && !coop) return;
     if (!ui::begin(w, h)) return;
     ui::Ctx c = ui_ctx(w, h);
+    if (coop) draw_coop_labels(c), draw_coop(c);
     if (open) draw_menu(c);
     if (fps) draw_fps(c, open);
     ::mkwvk::rec::boundary(::mkwvk::rec::B_DIRECT);   // (Dear ImGui records into cmd directly, its backend through its own pointers: what this thread recorded through vk_work.h reaches cmd first)

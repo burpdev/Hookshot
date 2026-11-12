@@ -3,6 +3,7 @@
 #include "auto_settings.h"
 
 #include "vk_internal.h"
+#include "oot_coop_opts.h"   // (HOS_OPT_COOP_*: the Network tab and host/oot_coop.c)
 
 namespace mkwvk {
 
@@ -130,6 +131,7 @@ int menu_player_flight();
 int menu_free_camera();
 int menu_link_speed();   // (Movement speed in percent, 100 while the tools are off)
 int menu_take_cheat_action();
+int menu_coop_option(int id);   // (hookshot: the Network tab, for co-op: what the host asks by a HOS_OPT_COOP_* id, oot_coop_opts.h)
 void menu_note_frame(bool game_frame, int shown = 1);   // (the frame rates the FPS counter shows)
 /// The game's picture's size (the Output resolution, its crop) and the window's, at each present: the Window scaling filter
 /// row says when it is not needed

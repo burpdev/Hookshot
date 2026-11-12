@@ -120,7 +120,8 @@ screen. It costs some GPU time on cards that cull quickly, so it is off unless s
 
 ### Co-op
 
-Co-op (`host/oot_coop.c`, [coop.md](coop.md)) is turned on by the Network tab's Connection row, not by a switch.
+Co-op's direct link (`host/oot_coop.c`, [coop-network.md](coop-network.md)) is turned on by the Co-op tab's
+Connection row, not by a switch.
 These change parts of it or stand in for the tab in test runs:
 
 | Switch | What it does |
@@ -138,8 +139,9 @@ These change parts of it or stand in for the tab in test runs:
 | `HOS_INPUT_LIVE=<file>` | A file the test appends lines of presses to, read every 30 ms; each line's times count from when it is read. A line `!cheat <n>` sends a Cheats page action, `!synclog` logs the NVN syncs (`!dump`, `!shots`, `!rdoc` and `!flasharm` are the WebGPU renderer's) |
 | `HOS_INPUT_FRAME_CLOCK=1` | The script's time runs at 60 game frames a second instead of the wall clock |
 | `HOS_INPUT_EXCLUSIVE`, `HOS_INPUT_BACKGROUND`, `HOS_INPUT_SCRIPT_BACKGROUND` (set) | As above; the last lets every device count while the window is behind another one |
-| `RX_VK_MENU_SCRIPT=<seconds>:<key>,...` | Timed Insert menu keys: `INS`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `ESC`, `ENTER`, `TABL`, `TABR` |
+| `RX_VK_MENU_SCRIPT=<seconds>:<key>,...` | Timed Insert menu keys: `INS`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `ESC`, `ENTER`, `TABL`, `TABR`, the pad's face buttons `PADS`, `PADE`, `PADW`, `PADN`; and for a text field, `TYPE:<text>` (typed as the keyboard would, up to the next comma) and, while it has the keyboard, `HOME`, `END`, `BACK`, `DEL` besides `LEFT`, `RIGHT`, `ENTER`, `ESC`; `ROW:<name>` selects the shown tab's row of that name if it shows (rows come and go with the GPU and the Co-op tab's room, so a script need not count them) |
 | `RX_VK_UI_PROMPTS=pad` or `keys` | The menu's button prompts for a controller or the keys, whatever was used last (screenshots) |
+| `HOS_COOP_DEMO=1` | The Insert menu's Co-op tab on a made-up room (`host/coop_menu.c`), for screenshots and trying the tab without a relay: Make a room connects in a second; two other players come in, one not identified for three seconds; the room is offered for acceptance and one player is away for a while; Join a room (any valid secret) puts you third in another room; Accept and Leave work. The co-op session never starts and nothing is sent |
 | `RX_VK_UI_GAME_FONT=0` | The menu, the counter and the start-up screen in the included Libertinus, not the game's own font |
 
 The presses are `<seconds>:<button>[+<button>...][/<ms>]`, separated by commas, for example `2:A,5.5:LUP/1500,9:ZL+R`.
@@ -394,7 +396,9 @@ menu's order, with its choices and default: `tests/test_readme_menu_rows.py` fai
 case with `_` for spaces (`frame_generation=2`, `invert_camera_x=1`), except Output resolution, which is `output_res`.
 `gpu/vk/vk_menu.cpp` writes the whole file at every change (`save`), with `options_version=5`,
 `microphone_device=<name>` when a microphone is chosen by name, and the controls (`pad_<button>` and `key_<button>`:
-the README's [Controls](../readme.md#controls)). A value outside a row's range is clamped when it is read. Where the
+the README's [Controls](../readme.md#controls)). A value outside a row's range is clamped when it is read. A text field
+(Custom output size, typed: printable ASCII only, while the menu's glyphs are baked for it) is saved as its setting is:
+Custom output size as `output_res`. Where the
 number is not the obvious one:
 
 | Key | Values |
@@ -414,11 +418,17 @@ number is not the obvious one:
 | `microphone` | 0 Off, 1 Default, 2 and up a microphone (the name in `microphone_device` decides which) |
 | `mouse_camera` | 0 As the stick, 1 Native |
 | `layout_preset` | 0 Nintendo, 1 Xbox / PC, 2 Swap Face, 3 Custom |
-| `play_as`, `port`, `pvp` | The Network tab's rows (co-op): 0 Host, 1 Join; the port, 43400; PvP 0 Off, 1 On. The name and the host's address are in `coop.txt`, written by `host/oot_coop.c` |
+| `play_as`, `port`, `pvp` | The Co-op tab's rows (co-op): 0 Host, 1 Join; the port, 43400; PvP 0 Off, 1 On. The name and the host's address are in `coop.txt`, written by `host/oot_coop.c` |
 
 The other rows are 0 Off and 1 On. Some are read at the start, before the menu exists, by the code that needs them:
 `handheld_profile` and `output_res` (`host/nn_applet.c`), `ultrawide` (`host/hos_main.c`), `robust_buffers`
-(`gpu/vk/vk_main.cpp`) and the controls (`host/nn_hid.c`).
+(`gpu/vk/vk_main.cpp`) and the controls (`host/nn_hid.c`). Co-op's `coop`, `coop_name`, `coop_server` and `coop_port`
+are read at the start by `host/coop.c`; `coop_name` and `coop_server` are the Co-op tab's Your name and Relay, which the
+menu writes (an empty field, no line; a `coop_server` longer than the field's 63 characters is kept as it is), `coop` is
+its Room rules page's Co-op at start, and the menu keeps `coop_port` as it keeps every line it does not write
+([coop.md](coop.md)). The page's other rows are a room's rules, `coop_progress`, `coop_items`, `coop_songs`,
+`coop_quest` (0 Per player, 1 Shared) and `coop_keys`, `coop_rupees`, `coop_ammo` (0 Per player, 2 One pool), which
+`host/oot_coop.c` reads from the file when the room's maker signs its rules.
 
 `HOS_CONTROL=<socket path>` turns on the control bridge: a local socket a tool or coding agent drives the running game
 through (inputs timed in frames, screenshots, waits for the game's state, the Insert menu's settings, quit), with
@@ -434,9 +444,9 @@ through (inputs timed in frames, screenshots, waits for the game's state, the In
 | `gpu/vk/` | the Vulkan back end (`hookshot_vk.dll`, `hookshot_vk.so`), with Eden's shader recompiler and sirit |
 | `gpu/render/`, `gpu/third_party/` | the WebGPU renderer the Windows exe falls back to when it was built with wgpu-native, its op stream (`rx_nvn.h`), suyu's decoders |
 | `builder/` | Hookshot Builder: the Windows app (.NET 8 WPF), its setup and MSI, and the Linux builder and launcher scripts |
-| `scripts/` | test runs, the profile and log readers, the save copier (`oot_saves.py`), release tooling, `scripts/linux` (dependencies, AppImage) |
+| `scripts/` | test runs, the profile and log readers, the save copier (`oot_saves.py`), co-op's relay (`coop_relay.py`, [coop.md](coop.md)), release tooling, `scripts/linux` (dependencies, AppImage) |
 | `tests/` | the game-free checks, all run by `tests/run_all.py` |
-| `third_party/` | a64-kit (Hookshot's few changes marked `(hookshot)`), libopus, zbic (Atmosphere's zstd with ZBIC, for unpacking only), SDL2's licence, Dear ImGui and its Vulkan backend, zstd's decoder, the Libertinus fonts |
+| `third_party/` | a64-kit (Hookshot's few changes marked `(hookshot)`), libopus, zbic (Atmosphere's zstd with ZBIC, for unpacking only), SDL2's licence, Dear ImGui and its Vulkan backend, zstd's decoder, Monocypher (co-op's cryptography), the Libertinus fonts |
 
 License: GPL-3.0-or-later, as mkw-recomp: a64-kit's translator is suyu's (GPL-2.0-or-later) and Eden's code is
 GPL-3.0.

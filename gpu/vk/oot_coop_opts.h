@@ -1,4 +1,4 @@
-/* (hookshot) The F1 menu's Network tab and co-op (host/oot_coop.c), by option id: what the menu's rows say to the host
+/* (hookshot) The F1 menu's Co-op tab and co-op (host/oot_coop.c), by option id: what the menu's rows say to the host
    (rx_option) and what the host says back (rx_option_set). Its own header, read by both sides, so the numbers cannot
    part. 72 on: well clear of vk_api.h's rows.
      MODE    0 off, 1 host, 2 join                      PORT    the port hosted on or joined (43400)

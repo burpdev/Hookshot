@@ -23,7 +23,7 @@ Each is a runtime switch where it can be, so the game's own path stays reachable
   calls of f_80522050, its GPU memory (GPU_ALLOC_SITES), and its two tryAllocs of CPU buffers (HEAP_ALLOC_SITES). They went on
   with a null pointer and crashed writing through it (issue 1697). The supported build only.
 - Ocarina note controls: the note-wait action's start (f_828a9190) and tick (f_828a9280) report the wait to the host (hos_oc_wait, hos_oc_beat), which swaps the five notes for its own controls (host/nn_hid.c); a tick whose gates refuse reports no wait, so a dialogue keeps its buttons.
-- Co-op (host/oot_coop.c, the F1 menu's Network tab; the supported build only): the pouch's add by name (f_8112d570) calls
+- Co-op (host/oot_coop.c, the F1 menu's Co-op tab; the supported build only): the pouch's add by name (f_8112d570) calls
   oot_coop_pouch_add first, so a pickup can be told to the other players, and the Life component's update (f_804bd8c0, the
   function the heart protection guards) calls oot_coop_life_seen at its head and oot_coop_life_write where it takes life away,
   so an enemy's life is one for all. Each returns at once while no link is up.

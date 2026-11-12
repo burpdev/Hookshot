@@ -328,6 +328,7 @@ HDR, Detail, and GPU and memory (last: the rows to change when something is wron
 | Graphics | Quality preset | Custom, Minimum (4GB), Low (6GB), Balanced (8GB), High (12GB), Ultra (16GB+), Auto (this PC) | Auto (this PC) on a first start; Custom in an options file from before it |
 | | Aspect ratio | The shapes your screen's resolutions have, narrowest first (5:4, 4:3, 16:10, 16:9, 21:9, 32:9, ...), your monitor's own marked "(monitor's)" (after a restart) | Your monitor's |
 | | Output resolution | The Aspect ratio's sizes: your screen's resolutions and the common ones (1440p, 4K, 5K at 16:9; 1920x1200, 2560x1600 at 16:10; 3440x1440 at 21:9; ...), and 2048x1152 (the game's own) at 16:9 (after a restart) | 2048x1152 |
+| | Custom output size | A size of your own, typed as `<width>x<height>` (after a restart) | None |
 | | Profile | Docked, Handheld (after a restart) | Docked |
 | | Upscaler | Game's own, NVIDIA DLSS, NVIDIA DLAA (only in builds with NVIDIA's DLSS SDK, below; DLSS and DLAA on RTX GPUs), AMD FSR 3.1 (every build, on GPUs it runs on, below), AMD FSR 4, AMD FSR 4 Native AA (only in builds with FSR 4, below), Off (no upscaling) | Game's own |
 | | DLSS model | Transformer (K), Transformer 2 (M), Transformer 2 (L), NVIDIA default (shown where DLSS runs; used by DLSS and DLAA) | Transformer (K) |
@@ -388,18 +389,26 @@ HDR, Detail, and GPU and memory (last: the rows to change when something is wron
 | | Developer: Sampler cache | Off, On (after a restart) | Off |
 | | Developer: Robust buffers | Auto, Off, On (after a restart) | Auto |
 | | Developer: ASTC as RGBA8 | Off, On (after a restart) | Off |
-| Network | Play as | Host, Join | Host |
+| Co-op | Your name | The name the others in the room see, up to 24 characters | `Player-` and four random digits |
+| | Relay | The relay's address, `host` or `host:port` (port 24680 when none is given): see [co-op](docs/coop.md) | None |
+| | Make a room | Makes a room on the relay and shows its secret, to give to the others | |
+| | Join a room | The secret the room's maker gave you, typed or pasted; Enter joins | |
+| | Room secret, Leave the room | In a room: its secret, hidden until Enter shows it; leaving it (press twice) | |
+| | Accept the room | While the room is offered: share progress with the players listed, after your save is copied (press twice; compare the key fingerprints first) | |
+| | Remove a player, Reset the pools | The room's maker only, once the room is accepted: drop the player chosen with Left and Right, or start the shared keys, rupees and ammunition again (press twice) | |
+| | Room rules | Outside a room, and in a room you made: opens the Room rules page, the rules of a room you make: Progress, Items, Songs, Quest items (Shared, Per player; Shared), Small keys (One pool, Per player; One pool), Rupees, Ammunition (One pool, Per player; Per player), and Co-op at start (Off, On; Off): see [co-op](docs/coop.md) | |
+| | Play as | Host, Join | Host |
 | | Host address | Typed: Enter, the address, Enter again (kept off the screen) | 127.0.0.1 |
 | | Port | 1024 to 65535 | 43400 |
-| | Your name | Typed: Enter, the name, Enter again | Player |
+| | Player name | Typed: Enter, the name, Enter again | Player |
 | | Connection | Connect, Disconnect | Not connected at every start |
 | | Status | What the link is doing, and who is there | |
 | | Go to player | A row for each other player while connected: travels to them | |
 | | PvP | Off, On | Off |
-
-- **Network** is co-op: two to four players, each in their own game, share one adventure (items, progress, enemies).
-  It is experimental and Windows-only for now, and does nothing until you connect: see [Co-op](docs/coop.md) for what
-  it needs, what is shared and what is not tested yet.
+- **Co-op** holds both co-ops, and neither does anything until you connect: the room, where each player keeps
+  their own save and the games share progress through a relay ([co-op](docs/coop.md)), and the direct link, where
+  two to eight players in their own games share one adventure (items, progress, enemies) host to join
+  ([the direct link](docs/coop-network.md)). Both are experimental and Windows-only for now.
 - **Quality preset** sets Render resolution, Window scaling filter, Sharpness, Frame pacing, Game speed, Profile
   and the video memory limits for a card with that much memory. It leaves the Upscaler and Frame generation as
   you chose them: with DLSS, FSR 3.1 or FSR 4, the preset's resolution becomes their nearest mode. Changing most other
@@ -471,10 +480,15 @@ HDR, Detail, and GPU and memory (last: the rows to change when something is wron
   where 16:9 only adds bars above and below; an ultrawide keeps its 16:9. The output's rows below show the sizes for the
   output you chose. At your screen's own size the HUD and text map pixel for pixel. Above 2560x1440 the game's render
   targets get a bigger GPU pool, so a full-size 3D fits. Where the screen's modes are not known (Linux), the menu offers
-  1920x1080, 2560x1440, 3840x2160, 5120x1440 and 5120x2880. For a size the menu does not offer, set
-  `output_res=<width>x<height>` in `hookshot_options.ini`: each side a multiple of 8, at least 640x360, at most 5120x2880's
-  pixels, and between 5:4 and 48:9 in shape; anything else uses the game's 2048x1152. The menu then offers it as its own
-  choice. A picture wider or narrower than 16:9 is kept to 5120x2160's pixels, so above that a size of another shape is
+  1920x1080, 2560x1440, 3840x2160, 5120x1440 and 5120x2880. For a size the menu does not offer, type it in
+  **Custom output size** (Enter or A to edit it, Enter or A again to set it, Esc or B to leave it as it was; Ctrl+V
+  pastes), or set `output_res=<width>x<height>` in `hookshot_options.ini`: each side a multiple of 8, at least 640x360,
+  at most 5120x2880's pixels, and between 5:4 and 48:9 in shape. The menu says why it refuses a size; in the file,
+  anything else uses the game's 2048x1152. The Output resolution row chooses the typed size from its list when it is
+  already there, including sizes found after a monitor change, or offers it as your own choice and selects its shape.
+  The size this run started with stays available until the next start, so returning to the starting shape still
+  restores that size even after a custom-size edit.
+  A picture wider or narrower than 16:9 is kept to 5120x2160's pixels, so above that a size of another shape is
   not a native frame. A size's own shape sets the camera's, even when the OS reports a single 16:9 primary monitor. For
   three 16:9 monitors, use `5760x1080` or `7680x1440` and a window or logical display
   that spans all three. Both render at full size: 7680x1440 has 5120x2160's pixels, the most a wide picture takes.
@@ -1058,8 +1072,8 @@ Hookshot exists thanks to the work of many people:
 
 Hookshot is free software under the [GNU General Public License, version 3 or later](LICENSE) (GPL-3.0-or-later).
 It includes code from Eden and suyu, which are under the GPL too. Third-party parts under other licenses that
-work with the GPL (Sirit, the Vulkan Memory Allocator, SDL, Opus, Dear ImGui, zstd, the Libertinus fonts, zbic and the
-a64-kit tools) keep their own notices in their folders.
+work with the GPL (Sirit, the Vulkan Memory Allocator, SDL, Opus, Dear ImGui, zstd, Monocypher, the Libertinus fonts,
+zbic and the a64-kit tools) keep their own notices in their folders.
 
 Hookshot is an unofficial fan project, not affiliated with or endorsed by Nintendo. The Legend of Zelda and Ocarina of
 Time are trademarks of Nintendo.

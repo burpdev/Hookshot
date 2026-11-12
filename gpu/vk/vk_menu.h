@@ -3,7 +3,7 @@
 #include "auto_settings.h"
 
 #include "vk_internal.h"
-#include "oot_coop_opts.h"   // (HOS_OPT_COOP_*: the Network tab and host/oot_coop.c)
+#include "oot_coop_opts.h"   // (HOS_OPT_COOP_*: the Co-op tab's direct link and host/oot_coop.c)
 
 namespace mkwvk {
 
@@ -101,6 +101,12 @@ struct Options {
     int menu_lang = 0;    // this menu's language: 0 Auto (the game's own, language.txt), else menu_i18n::kLangs[menu_lang - 1]
                           // (vk_menu_i18n.cpp). Saved as menu_language
     int mic = 1;          // (hookshot) the ocarina's microphone: 0 Off, 1 the system's default, 2.. a device as host->mic_name lists it (host/nn_audio_in.c)
+    // (hookshot) the Co-op tab's Room rules page, saved under the coop_* keys: co-op on at the start
+    // (host/coop.c), and the rules of a room this game makes (host/coop_oot.c read_rules; host/coop_state.h's defaults):
+    // 0 per player, 1 shared, 2 one pool
+    int coop = 0;
+    int coop_progress = 1, coop_items = 1, coop_songs = 1, coop_quest = 1;   // (shared or per player)
+    int coop_keys = 2, coop_rupees = 0, coop_ammo = 0;                       // (one pool or per player)
 };
 extern Options opts;
 constexpr int kAutoPreset = 6;   // (the Quality preset Auto (this PC): menu_auto_for_gpu, auto_settings.h)
@@ -131,7 +137,7 @@ int menu_player_flight();
 int menu_free_camera();
 int menu_link_speed();   // (Movement speed in percent, 100 while the tools are off)
 int menu_take_cheat_action();
-int menu_coop_option(int id);   // (hookshot: the Network tab, for co-op: what the host asks by a HOS_OPT_COOP_* id, oot_coop_opts.h)
+int menu_coop_option(int id);   // (hookshot: the Co-op tab, for co-op: what the host asks by a HOS_OPT_COOP_* id, oot_coop_opts.h)
 void menu_note_frame(bool game_frame, int shown = 1);   // (the frame rates the FPS counter shows)
 /// The game's picture's size (the Output resolution, its crop) and the window's, at each present: the Window scaling filter
 /// row says when it is not needed

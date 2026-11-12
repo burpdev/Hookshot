@@ -1,4 +1,4 @@
-"""Co-op (host/oot_coop.c, the F1 menu's Network tab): what holds it together, without a game.
+"""Co-op (host/oot_coop.c, the F1 menu's Co-op tab): what holds it together, without a game.
 
 The lifted game reaches co-op through three calls nx2/oot_patches.py puts in: oot_coop_pouch_add first in the pouch's add by
 name (f_8112d570), and in the Life component's update (f_804bd8c0) oot_coop_life_seen first and oot_coop_life_write before each
@@ -174,18 +174,17 @@ def check_ids():
 
 def check_rows():
     menu = read("gpu", "vk", "vk_menu.cpp")
-    rows = re.findall(r'\{TAB_NETWORK, "([^"]+)", (&?\w+),', menu)
-    names = [name for name, _ in rows]
-    check(names[:6] == ["Play as", "Host address", "Port", "Your name", "Connection", "Status"] and names[-1] == "PvP",
-          "the Network tab's rows are not the ones expected: %s" % names)
-    check(names.count("Go to player") == 7 and names[6:13] == ["Go to player"] * 7,
-          "a Go to player row for each of the seven others, in a run (coop_row_kind counts back along it)")
+    rows = re.findall(r'\{TAB_COOP, "([^"]+)", (&?\w+),', menu)
+    # (the Co-op tab holds the room's rows too: only the direct link's are checked here, in the order they are in the table)
+    direct = ["Play as", "Host address", "Port", "Player name", "Connection", "Status"] + ["Go to player"] * 7 + ["PvP"]
+    names = [name for name, _ in rows if name in direct]
+    check(names == direct, "the Co-op tab's direct-link rows are not the ones expected: %s" % names)
     # (a row with a value is saved by its name, as every row: play_as, port, pvp. No preset sets them: preset_exempt)
     for name, value in (("Play as", "&coop_role"), ("Port", "&coop_port"), ("PvP", "&coop_pvp")):
-        check((name, value) in rows, "the Network tab's %s row is not %s" % (name, value))
-        at = menu.index('{TAB_NETWORK, "%s", %s,' % (name, value))
-        check(menu[at:menu.index("},\n", at)].endswith("nullptr, false, true"), "the Network tab's %s row would turn the preset to Custom" % name)
-    check(re.search(r'tab_titles\[TAB_COUNT\] = \{[^}]*"Network"\}', menu), "the tab strip has no Network title")
+        check((name, value) in rows, "the Co-op tab's %s row is not %s" % (name, value))
+        at = menu.index('{TAB_COOP, "%s", %s,' % (name, value))
+        check(menu[at:menu.index("},\n", at)].endswith("nullptr, false, true"), "the Co-op tab's %s row would turn the preset to Custom" % name)
+    check(re.search(r'tab_titles\[TAB_COUNT\] = \{[^}]*"Co-op"\}', menu), "the tab strip has no Co-op title")
 
 
 def check_builders():

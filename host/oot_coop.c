@@ -1,7 +1,7 @@
 /* Co-op for Ocarina of Time.
  *
  * Two to four players, each in their own copy of the game, sharing one adventure: what one
- * finds, all hold; what one has done, is done for all. The F1 menu's NETWORK tab turns it on.
+ * finds, all hold; what one has done, is done for all. The F1 menu's Co-op tab turns it on.
  * docs/coop.md is the players' page.
  *
  * ONE PLAYER HOSTS, THE OTHERS JOIN. The host's game listens on a port (43400 unless the tab
@@ -69,7 +69,7 @@
  * link line is as it was.
  *
  * Windows only for now: the sockets are Winsock's. Elsewhere the entry points at the end of the
- * file do nothing, and the Network tab's Connect finds no link.
+ * file do nothing, and the Co-op tab's Connect finds no link.
  */
 #include "hos.h"
 #if defined(_WIN32)
@@ -84,7 +84,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include "../gpu/vk/oot_cheat_items.h"
-#include "../gpu/vk/oot_coop_opts.h"   /* (HOS_OPT_COOP_*: the Network tab's rows) */
+#include "../gpu/vk/oot_coop_opts.h"   /* (HOS_OPT_COOP_*: the Co-op tab's rows) */
 
 #define CO_VERSION 1
 #define CO_PEERS 8
@@ -349,7 +349,7 @@ static void co_config_save(void) {
     co_config_path(path, sizeof path);
     FILE *f = fopen(path, "wb");
     if (!f) return;
-    fprintf(f, "# Co-op (the F1 menu's NETWORK tab). Change these there: press Enter on the row, type, Enter again.\r\n"
+    fprintf(f, "# Co-op (the F1 menu's Co-op tab). Change these there: press Enter on the row, type, Enter again.\r\n"
                "# Or change them here while the game is closed.\r\n"
                "name=%s\r\n"
                "# Join: the host's address. Not used when hosting.\r\n"
@@ -909,7 +909,7 @@ static void co_join_step(void) {
         memset(&hint, 0, sizeof hint);
         hint.ai_family = AF_INET, hint.ai_socktype = SOCK_STREAM;
         if (ws.getaddr_(addr, port, &hint, &found) || !found) {
-            co_fail("that address was not found", "The host address could not be found: check it was typed right (NETWORK tab, Host address)");
+            co_fail("that address was not found", "The host address could not be found: check it was typed right (Co-op tab, Host address)");
             return;
         }
         SOCKET s = ws.socket_(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -1552,7 +1552,7 @@ void oot_coop_player(Ctx *c, uint64_t actor) {
     co_tick(c, actor);
 }
 
-/* A name or an address typed in the menu's Network tab (which: 1 the name, 2 the address): its letters, then kept. */
+/* A name or an address typed in the menu's Co-op tab (which: 1 the name, 2 the address): its letters, then kept. */
 static void co_typed(int which) {
     char text[160];
     size_t n = 0;
@@ -1732,7 +1732,7 @@ static void co_status(Ctx *c, int64_t now, const char *map, int playing) {
 }
 
 /* ---- go to a player ----
-   The NETWORK tab has a "Go to player" row for each of the others. In the same map it is a step: Link is stood
+   The Co-op tab has a "Go to player" row for each of the others. In the same map it is a step: Link is stood
    beside them, by the call the debug tools' "return to the mark" makes (the controller's change-position, hos_main.c
    oot_update_player_cheats). In another map it is the debug tools' teleport to that map first (hos_oot_travel),
    then the step once the map is in. Not during an event or a load, as everything else here. */
@@ -2087,7 +2087,7 @@ static void co_anim_put(Ctx *c, uint64_t actor, int peer) {
 }
 
 /* ---- PvP ----
-   On when both players have the NETWORK tab's PvP row on. The one who swings decides the hit: when Link starts an
+   On when both players have the Co-op tab's PvP row on. The one who swings decides the hit: when Link starts an
    attack (slot 0 goes to a command named Cut..., but not the ones after a swing, or ChargeAttack) every other player
    in reach in front of him, a moment into the swing, is told "D <their number> <quarter hearts>". The one who is told
    takes it off their own hearts (Link's life: a count of quarter hearts at [[player+7184]+8], the value the heart

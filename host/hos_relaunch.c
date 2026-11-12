@@ -105,6 +105,8 @@ static void relaunch(void) {
 void hos_window_closed_exit(void) {
     const int again = relaunch_asked != 0;
     hos_log(again ? "display: window closed for a restart (the Insert menu's Restart now)" : "display: window closed, exiting");
+    void coop_shutdown(void);
+    coop_shutdown();   /* (a co-op room's BYE and LEAVE, at most 0.4 s: host/coop.c) */
     hos_log_flush();
     if (again) relaunch();
     ExitProcess(0);

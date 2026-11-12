@@ -137,6 +137,18 @@ static int detect_pad_layout() { return 0; }
 static void dlss_probe() {}
 static void fsr4_probe() {}
 static void refresh_mics() {}
+// (the Co-op tab's parts of the Esc block and of the options file's reading: what they reach, stubbed)
+static bool coop_secret_shown;                            // (masked again at each opening; read by nothing here)
+static void coop_refresh(bool*) { (void)coop_secret_shown; }
+static bool coop_option_line(const char*, const char*) { return false; }
+struct TextField { char text[64]; int len = 0, max = 63; };
+static TextField coop_name_field, coop_relay_field;
+static bool coop_relay_whole = true;
+static void text_set(TextField& f, const char* t) {
+    f.len = (int)std::min(std::strlen(t), sizeof f.text - 1);
+    std::memcpy(f.text, t, (size_t)f.len);
+    f.text[f.len] = 0;
+}
 // TX_MENU_SHORTCUT
 
 // One tick with key pressed (0: none) and the options o, the menu open before it or not: whether it is open after. *back:
@@ -252,7 +264,8 @@ def main():
     tick = menu[menu.index("void menu_tick() {"):]
     key_poll = tick[tick.index("    enum { K_N ="):tick.index("    // (hookshot) the gamepads")]
     esc_at = tick.index("    const bool esc_opens")
-    esc_block = tick[esc_at:tick.index("    if (open_now.load() && page == 5) {", esc_at)]
+    # (the Esc block ends where the keys' branches begin: the text field's first, as the Insert menu's text fields have it)
+    esc_block = tick[esc_at:tick.index("    if (open_now.load() && editing) {", esc_at)]
     tx_at = menu.index("const char* tx_menu_shortcut(int v) {")
     tx = menu[tx_at:menu.index("\n}\n", tx_at) + 3]
     header = (ROOT / "gpu/vk/vk_menu.h").read_text(encoding="utf-8")

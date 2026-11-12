@@ -206,6 +206,11 @@ static GFlag *must(uint32_t hash) {
     return f;
 }
 
+static int discard_message(int member, uint8_t kind, const uint8_t *bytes, size_t size, void *user) {
+    (void)member, (void)kind, (void)bytes, (void)size, (void)user;
+    return 1;
+}
+
 int main(void) {
     for (int i = 0; i < 2; i++) regions[i].mem = calloc(1, regions[i].size);
     Ctx c;
@@ -462,6 +467,92 @@ int main(void) {
         CHECK(title_starts == 2);
     }
 
+    /* ---- independent area/total clocks and the real engine's acceptance/copy generation ----
+       Do not derive both fake entries from F_PLAY_CLOCK: the wrong binding must really observe the area reset. */
+    {
+        uint64_t total = entry_lookup(mgr, C_UINT, INT_SIZE, 0xe573f564u);
+        uint64_t area = entry_lookup(mgr, C_UINT, INT_SIZE, 0xe53eb6d1u);
+        if (!total) total = add(2, 0xe573f564u, 8, 0, 0, 0);
+        if (!area) area = add(2, 0xe53eb6d1u, 8, 0, 0, 0);
+        CHECK(total != area);
+        G.clock_entry = 0, G.clock = 0, G.clock_at = 0, G.loaded = 0, G.bound = 0;
+        G.titles = title_starts, G.looked = 1;
+        G.eng = coop_sync_new(1234, G.schema);
+        CHECK(G.eng != NULL);
+        if (!G.eng) return 1;
+        uint8_t seed[32] = {42};
+        const int ids[] = {1};
+        const uint64_t sessions[] = {1234};
+        CoopRules rules;
+        coop_rules_default(&rules);
+        coop_sync_seed(G.eng, seed);
+        coop_sync_name(G.eng, "Clock test");
+        coop_sync_room(G.eng, "23456789BCDFGHJKMN", 1, ids, sessions, 1, 1, now_ms);
+        coop_sync_settings(G.eng, &rules, 1);
+        coop_sync_limits(G.eng, limit_fn, NULL);
+        st(total + I_CURRENT, 10000, 4), st(area + I_CURRENT, 416, 4);
+        CHECK(!gate(&c, mgr));
+        now_ms += 1000;
+        st(total + I_CURRENT, 10001, 4), st(area + I_CURRENT, 417, 4);
+        CHECK(gate(&c, mgr));
+        bind_tables(&c, mgr);
+        CHECK(G.bound);
+        coop_sync_tick(G.eng, now_ms, discard_message, NULL);
+        CoopOffer before, after;
+        CHECK(coop_sync_offer(G.eng, &before, now_ms) && !before.accepted);
+        CHECK(coop_sync_accept(G.eng, before.token) && coop_sync_copy_wanted(G.eng) && !coop_sync_open(G.eng));
+        int copies = 1;
+        coop_sync_copied(G.eng, 1);
+        CHECK(coop_sync_offer(G.eng, &before, now_ms) && before.accepted && before.copy == 1 && coop_sync_open(G.eng));
+
+        /* The common area change, under each existing transition flag: total time keeps advancing, area time resets.
+           Warp, debug teleport, doors and loading zones all keep the same accepted save and its already-made copy. */
+        for (int route = 0; route < 4; route++) {
+            const uint64_t transition = entry_lookup(mgr, C_BOOL, BOOL_SIZE, transition_flags[route]);
+            st(transition + B_CURRENT, 1, 1);
+            now_ms += 1000;
+            st(total + I_CURRENT, ld(total + I_CURRENT, 4) + 1, 4), st(area + I_CURRENT, 0, 4);
+            CHECK(!gate(&c, mgr) && G.bound);
+            st(transition + B_CURRENT, 0, 1);
+            now_ms += 1000;
+            st(total + I_CURRENT, ld(total + I_CURRENT, 4) + 1, 4), st(area + I_CURRENT, 1, 4);
+            CHECK(gate(&c, mgr));
+            if (!G.bound) bind_tables(&c, mgr);   /* the real present path: a false unbind would re-offer and recopy */
+            CHECK(coop_sync_offer(G.eng, &after, now_ms) && after.accepted && after.token == before.token &&
+                  after.copy == 1 && !coop_sync_copy_wanted(G.eng) && coop_sync_open(G.eng) && copies == 1);
+        }
+
+        /* Another slot; the same slot loaded again from the file menu (even with unchanged total time); a new game.
+           Every one is a new offer, and the real engine blocks applying values until that offer is accepted/copied. */
+        const uint64_t loading = entry_lookup(mgr, C_BOOL, BOOL_SIZE, F_LOADING);
+        for (int load = 0; load < 3; load++) {
+            CHECK(coop_sync_offer(G.eng, &before, now_ms) && before.accepted);
+            if (load < 2) {
+                st(loading + B_CURRENT, 1, 1);
+                CHECK(!gate(&c, mgr) && !G.bound);
+                st(loading + B_CURRENT, 0, 1);
+                if (load == 0) st(total + I_CURRENT, 600, 4), st(area + I_CURRENT, 73, 4);
+            } else {
+                hos_oot_coop_rom_open("rom:/Event/EventFlow/TitleEvent.bfevfl");
+                CHECK(!gate(&c, mgr) && !G.bound && !G.loaded);
+                st(total + I_CURRENT, 0, 4), st(area + I_CURRENT, 0, 4);
+            }
+            if (gate(&c, mgr) && !G.bound) bind_tables(&c, mgr);
+            now_ms += 1000;
+            st(total + I_CURRENT, ld(total + I_CURRENT, 4) + 1, 4);
+            st(area + I_CURRENT, ld(area + I_CURRENT, 4) + 1, 4);
+            CHECK(gate(&c, mgr));
+            if (!G.bound) bind_tables(&c, mgr);
+            CHECK(coop_sync_offer(G.eng, &after, now_ms) && !after.accepted && after.new_save &&
+                  after.token != before.token && after.copy == 0 && !coop_sync_open(G.eng));
+            CHECK(!coop_sync_accept(G.eng, before.token));
+            CHECK(coop_sync_accept(G.eng, after.token) && coop_sync_copy_wanted(G.eng) && !coop_sync_open(G.eng));
+            coop_sync_copied(G.eng, 1), copies++;
+            CHECK(coop_sync_open(G.eng) && !coop_sync_copy_wanted(G.eng) && copies == load + 2);
+        }
+        coop_sync_free(G.eng), G.eng = NULL, G.bound = 0;
+    }
+
     /* ---- the switch: progress sync on at the game's start (HOS_COOP, or coop= in the options file), or later, when the
        session calls back for the first time (co-op switched on in the Co-op tab); the session's hooks registered always */
     {
@@ -536,7 +627,7 @@ int main(void) {
         return 1;
     }
     printf("PASS: the classification of a made-up flag table (%d flags, %d pools), the apply rules, the Int ring, the game's "
-           "routines called with the registers kept, the check against the getter, the gate, and the switch (the start, the "
-           "options file, the session's first callback)\n", G.nflags, G.npools);
+           "routines called with the registers kept, the check against the getter, the gate, independent area/total clocks, "
+           "renewed acceptance and copies for real loads, and the switch (the start, options, session callback)\n", G.nflags, G.npools);
     return 0;
 }

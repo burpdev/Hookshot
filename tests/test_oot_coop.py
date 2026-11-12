@@ -15,6 +15,8 @@ flag database in a fake guest memory (a getter and setters stand in for the game
 - the table checked against the game's getter before anything is shared (a table that reads otherwise is refused);
 - the gate: nothing read while no save is played, on the title screen (its event flow opened), while a save loads, a
   scene changes or the play clock stands, or while Link is not in the world;
+- independent area and total clocks: an area reset keeps the real engine's acceptance/copy; another slot, the same
+  slot loaded again with unchanged time, and a new game each need a new offer and a copy before application;
 - the switch: progress sync on at the game's start by HOS_COOP or by coop= in the options file (the environment wins),
   or later, when the session first calls back (co-op switched on in the Co-op tab: its thread runs only then); the
   session's hooks registered at the first present whether co-op is on or not; switched on after the title screen came
@@ -113,8 +115,9 @@ def wiring(fs, nvn, coop):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--cc", default=os.environ.get("CC") or shutil.which("gcc") or shutil.which("clang") or "gcc")
+    p.add_argument("--source-root", type=Path, default=ROOT, help="production sources for a failing-before check; this checkout's fixture is retained")
     a = p.parse_args()
-    host = ROOT / "host"
+    host = a.source_root.resolve() / "host"
     coop = (host / "oot_coop.c").read_text(encoding="utf-8")
     try:
         wiring((host / "nn_fs.c").read_text(encoding="utf-8"), (host / "nvn_native.c").read_text(encoding="utf-8"), coop)

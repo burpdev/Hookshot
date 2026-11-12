@@ -101,7 +101,9 @@ enum {
 #define S_CAPACITY 0xf80f8077u   /* wallet, bomb bag, quiver, seed bag, stick and nut capacities */
 #define F_RUPEES 0xa77921d7u
 #define F_MAGIC_SIZE 0x12d63a97u
-#define F_PLAY_CLOCK 0xe53eb6d1u /* UInt: seconds played, advanced while the game runs (on the title screen too) */
+/* The save's total play time, never reset by an area change. The former counter (0xe53eb6d1) was seconds in the
+   current area: every area change reset it and was mistaken for loading another save. */
+#define F_PLAY_CLOCK 0xe573f564u
 #define F_LOADING 0xf5deef0au    /* Bool: a save is being loaded */
 #define CAP_RUPEES 0x3b58ca14u   /* the capacity member of the wallet */
 

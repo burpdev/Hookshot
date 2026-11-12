@@ -327,6 +327,8 @@ an item shows in the menu the next time it opens. With co-op off the per-frame c
 What one room merged belongs to that room and that save: leaving the room, joining another or loading another save
 forgets it. A save loaded while in a room is a new offer, and the save is copied again first. Games merge only with
 the same schema (this layer's version, the game's build and the whole table of what is shared and up to which value).
+An area change within the same save (including an ordinary door or loading zone) keeps the accepted room and its
+existing backup. The gate uses total play time, not the counter that restarts in each area.
 
 ### What is shared
 

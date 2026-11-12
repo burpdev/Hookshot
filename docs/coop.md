@@ -28,7 +28,7 @@ where each network's joins went.
   in it), and a player the relay has not heard from for 15 s is dropped (the member id is kept for a minute so that the
   same game, with its rejoin token, joins again as the same member).
 - The roster (who is in the room, each one's session, which one made it) goes out at a change, again 0.25 s and 0.75 s
-  later, and every 5 s: a datagram is lost now and then, and nothing is acknowledged.
+  later, and every 5 s: a datagram is lost now and then, and roster updates are not acknowledged.
 - Limits: a source address answers a cookie challenge before the relay sends it anything larger than it sent; each
   member is limited to 480 forwarded copies and 256 KiB per second, a datagram forwarded to seven counted seven times
   in both budgets (bursts 960 copies and 512 KiB). `--member-copies` and `--member-bytes` change the rates; each burst
@@ -110,7 +110,7 @@ for a game without a window, as `HOS_HEADLESS` test runs are), crashes, or loses
 relay goes by silence:
 
 - **0 to 8 s:** nothing changes for the others. The player is still in their roster; what they send still goes to its
-  address and is lost there. Nothing of their own is held up: no message waits for an answer.
+  address and is lost there. State messages continue; reliable events for that member wait for an acknowledgement.
 - **after 8 s** without a datagram from the member, the relay's roster marks it away: the others' logs say
   `<name> (member <n>) is away`, and the Co-op tab shows the member as away. A game whose network
   only stalled sends again, and is `is back`.
@@ -192,6 +192,47 @@ Besides what they compile and run, the protocol, session, progress and menu test
 are wired in (the build, the game's start and its ways out, the present, the save mount, the menu's interface and the
 host's table). The menu tests use scripted input and a simulated session; they do not cover a real window's events,
 keyboards or controllers.
+
+## Reliable events
+
+`coop_send_event(member, kind, bytes, n)` and `coop_on_event(kind, callback, user)` are the one session helper for
+one-off events and large initial state. Ordinary `coop_send` messages are still replaceable datagrams. The helper
+wraps a layer's kind in EVENT (16), sends only to accepted current members, and dispatches only to that kind's event
+handler. It never dispatches an event through `coop_on_message`, nor lets an ordinary message invoke an event handler.
+
+- Each sender allocates a 64-bit event id for its session. It snapshots the recipients when queued (0 or
+  `COOP_DST_ALL` means all accepted peers then). For each recipient it finishes the oldest event before starting the
+  next: FIFO from each sender to each recipient, across event kinds. No order across senders or with state messages.
+- A recipient sends a small sealed EVENT_ACK (17) with the event id and received-part mask, at most once per 50 ms per
+  sender while something changed or a duplicate arrived. This coalesces several fragments without depending on any
+  application traffic. ACKs are their own messages rather than changing every layer's wire format. A lost ACK is
+  answered again when the sender retries. The final ACK means the whole event reached its callback, not that a hit or
+  authority claim was valid or applied.
+- Missing parts are retried after 250 ms; every retry is sealed anew, with a new envelope counter and the same event
+  id. Event data is paced to one unicast fragment per 32 ms for the session, with recipients taking turns; ACKs have
+  their separate bound. An event stuck at one recipient does not hold up delivery to the others or ordinary messages.
+- Eight outgoing events fit; `COOP_EVENT_FULL` (-1) means none was queued. `COOP_EVENT_QUEUED` (1), `UNAVAILABLE` (0,
+  no accepted recipient) and `INVALID` (-2, bad kind/size/destination or exhausted ids) are distinct. Never treat a
+  full queue as success. An event holds at most 16 KiB, split into 1,024-byte parts: large enough for an initial body
+  description without an unbounded allocation. There is one reassembly buffer per sender, no allocation per part,
+  and no partial callback. Conflicting metadata, lengths or versions are refused.
+- While the same accepted sessions remain, retries have no time limit: eventual delivery requires packets and ACKs
+  eventually passing and a handler registered at the receiver. Dispatch is at least once under that condition,
+  without duplicates in that receiving session. The receiver remembers the highest delivered event id, not a
+  time-limited replay window. Leaving, a new local session (including reconnect), or a recipient's departure,
+  changed session or revoked acceptance cancels outstanding delivery. There is no durable delivery across restarts.
+  Parts also name the recipient's session, so a new occupant of its member id cannot inherit an old event.
+
+Callbacks run on the co-op thread and borrow the bytes only until they return. They must validate and copy bounded
+work for the game's own update, never write game state there. Check area/encounter generations, authority, the signed
+present-and-on rule, plausibility and age; a delayed hit must not become valid just because transport delivered it.
+Send an application result when the other side needs to know whether the effect was accepted. The room key is shared:
+a malicious holder can forge an event or ACK in another member's name. This helper is not an individual signature,
+a gameplay authority or protection against a trusted member lying.
+
+`tests/test_coop_events.py` runs the real session sender, codecs and receiver over sealed loopback datagrams with a
+deterministic relay clock: loss, reordering, duplicated envelopes, full queues, departure, consent and fragmentation.
+Its concurrent caller case also runs under ThreadSanitizer on Linux when the compiler provides it.
 
 ## The room's secret and the wire
 

@@ -53,7 +53,7 @@ enum { COOP_FLAG_AWAY = 1, COOP_FLAG_MAKER = 2 };   // roster flags: not heard f
 // The kinds of player messages (the first byte of a sealed message). The session only carries them; HELLO, POS, DIGEST,
 // SECTION, SYNC_NEED and NOTICE belong to the layers that send them. A kind of 0xF0 and above is free for tests.
 enum { COOP_K_HELLO = 1, COOP_K_POS = 2, COOP_K_DIGEST = 3, COOP_K_SECTION = 4, COOP_K_SYNC_NEED = 5, COOP_K_NOTICE = 6,
-       COOP_K_BYE = 7, COOP_K_TEST = 0xF0 };
+       COOP_K_BYE = 7, COOP_K_EVENT = 16, COOP_K_EVENT_ACK = 17, COOP_K_TEST = 0xF0 };
 
 typedef struct {
     uint8_t ver, type;
@@ -151,6 +151,25 @@ int coop_envelope_peek(const uint8_t *p, size_t n, uint64_t *session, uint32_t *
 // Open: 1 and the kind and bytes (into out, cap at least n) when the tag is right for this key, src and dst.
 int coop_open(const uint8_t *p, size_t n, const uint8_t key[COOP_MSG_KEY_LEN], uint8_t src, uint8_t dst, uint8_t *kind,
               uint8_t *out, size_t cap, size_t *nout);
+
+// ---- reliable events (session-owned kinds; layers register their inner kind with coop_on_event).
+// EVENT: u8 version=1, u8 inner kind, u64 recipient session, u64 event id, u16 total bytes, u8 part,
+// then exactly that part's bytes. EVENT_ACK: u8 version=1, u64 event sender session, u64 event id, u16 parts received.
+// Parts are 1024 bytes except the last; an empty event has one empty part. All integers are little endian.
+enum { COOP_EVENT_MAX = 16384, COOP_EVENT_PART = 1024, COOP_EVENT_HEAD = 21, COOP_EVENT_ACK_SIZE = 19 };
+typedef struct {
+    uint64_t recipient_session, id;
+    uint16_t total;
+    uint8_t kind, part;
+    const uint8_t *bytes;
+} CoopEventPart;
+typedef struct { uint64_t sender_session, id; uint16_t parts; } CoopEventAck;
+int coop_event_kind(uint8_t kind);
+uint16_t coop_event_parts(size_t total);   // full mask, 0 when too large
+size_t coop_event_part_pack(uint8_t *out, size_t cap, const CoopEventPart *p);
+int coop_event_part_parse(const uint8_t *bytes, size_t n, CoopEventPart *out);
+size_t coop_event_ack_pack(uint8_t *out, size_t cap, const CoopEventAck *a);
+int coop_event_ack_parse(const uint8_t *bytes, size_t n, CoopEventAck *out);
 
 // ---- signatures: EdDSA over Curve25519 with BLAKE2b (the library's crypto_eddsa). The room's message key cannot tell
 // one member from another, and the sync layer's state travels through every member, so what only one member may make

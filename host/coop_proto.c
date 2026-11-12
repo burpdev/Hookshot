@@ -82,6 +82,62 @@ static uint32_t get16(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1]
 static uint32_t get32(const uint8_t *p) { return get16(p) | get16(p + 2) << 16; }
 static uint64_t get64(const uint8_t *p) { return get32(p) | (uint64_t)get32(p + 4) << 32; }
 
+// ---- reliable event parts and acknowledgements
+
+int coop_event_kind(uint8_t kind) {
+    return kind && kind != COOP_K_BYE && kind != COOP_K_EVENT && kind != COOP_K_EVENT_ACK;
+}
+
+uint16_t coop_event_parts(size_t total) {
+    if (total > COOP_EVENT_MAX) return 0;
+    unsigned count = total ? (unsigned)((total + COOP_EVENT_PART - 1) / COOP_EVENT_PART) : 1;
+    return (uint16_t)((1u << count) - 1);
+}
+
+static size_t event_part_size(const CoopEventPart *p) {
+    size_t offset = (size_t)p->part * COOP_EVENT_PART;
+    size_t left = p->total - offset;
+    return left < COOP_EVENT_PART ? left : COOP_EVENT_PART;
+}
+
+size_t coop_event_part_pack(uint8_t *out, size_t cap, const CoopEventPart *p) {
+    uint16_t mask = coop_event_parts(p->total);
+    if (!p->recipient_session || !p->id || !coop_event_kind(p->kind) || p->part >= 16 || !(mask & (1u << p->part))) return 0;
+    size_t n = event_part_size(p);
+    if (cap < COOP_EVENT_HEAD + n || (n && !p->bytes)) return 0;
+    out[0] = 1, out[1] = p->kind;
+    put64(out + 2, p->recipient_session), put64(out + 10, p->id);
+    put16(out + 18, p->total), out[20] = p->part;
+    if (n) memcpy(out + COOP_EVENT_HEAD, p->bytes, n);
+    return COOP_EVENT_HEAD + n;
+}
+
+int coop_event_part_parse(const uint8_t *bytes, size_t n, CoopEventPart *out) {
+    if (n < COOP_EVENT_HEAD || bytes[0] != 1) return 0;
+    CoopEventPart p = {.kind = bytes[1], .recipient_session = get64(bytes + 2), .id = get64(bytes + 10),
+                       .total = (uint16_t)get16(bytes + 18), .part = bytes[20], .bytes = bytes + COOP_EVENT_HEAD};
+    uint16_t mask = coop_event_parts(p.total);
+    if (!p.recipient_session || !p.id || !coop_event_kind(p.kind) || p.part >= 16 || !(mask & (1u << p.part)) ||
+        n != COOP_EVENT_HEAD + event_part_size(&p)) return 0;
+    *out = p;
+    return 1;
+}
+
+size_t coop_event_ack_pack(uint8_t *out, size_t cap, const CoopEventAck *a) {
+    if (cap < COOP_EVENT_ACK_SIZE || !a->sender_session || !a->id || !a->parts) return 0;
+    out[0] = 1;
+    put64(out + 1, a->sender_session), put64(out + 9, a->id), put16(out + 17, a->parts);
+    return COOP_EVENT_ACK_SIZE;
+}
+
+int coop_event_ack_parse(const uint8_t *bytes, size_t n, CoopEventAck *out) {
+    if (n != COOP_EVENT_ACK_SIZE || bytes[0] != 1) return 0;
+    CoopEventAck a = {.sender_session = get64(bytes + 1), .id = get64(bytes + 9), .parts = (uint16_t)get16(bytes + 17)};
+    if (!a.sender_session || !a.id || !a.parts) return 0;
+    *out = a;
+    return 1;
+}
+
 // ---- datagrams
 
 size_t coop_dgram_pack(uint8_t *out, size_t cap, const CoopHdr *h, const void *payload, size_t n,

@@ -64,6 +64,26 @@ typedef struct { CoopMsgFn fn; void *user; } MsgHandler;
 typedef struct { CoopViewFn fn; void *user; } ViewHook;
 typedef struct { CoopTickFn fn; void *user; } TickHook;
 
+enum { EVENT_RETRY_MS = 250, EVENT_ACK_MS = 50, EVENT_SEND_MS = 32 };
+typedef struct { CoopEventFn fn; void *user; } EventHandler;
+typedef struct {
+    uint64_t session, next;
+    uint16_t acked, sent;
+} EventTarget;
+typedef struct {
+    uint64_t id;
+    uint16_t len;
+    uint8_t kind;
+    EventTarget target[COOP_MAX_MEMBERS + 1];
+    uint8_t bytes[COOP_EVENT_MAX];
+} EventOut;
+typedef struct {
+    uint64_t session, id, high, ack_at;
+    uint16_t len, parts;
+    uint8_t kind, dirty;
+    uint8_t bytes[COOP_EVENT_MAX];
+} EventIn;
+
 // A cause that logs at most once per LOG_EVERY_MS.
 enum { L_MALFORMED, L_SENDER, L_TAG, L_REPLAY, L_OUTBOX, L_NO_SERVER, L_RESOLVE, L_SOCKET, L_CAUSES };
 
@@ -105,6 +125,14 @@ struct CoopSess {
     int n_ticks;
     int pub_state;                              // state, readable without the lock
     int pub_joined;
+    uint64_t accepted_self, accepted[COOP_MAX_MEMBERS + 1];
+    EventHandler event_handler[256];
+    EventOut event_out[COOP_EVENT_SLOTS];
+    uint64_t event_id;                         // allocated under lock, never reused in a session
+    // Incoming reassembly and pacing are used only by the stepping thread.
+    EventIn event_in[COOP_MAX_MEMBERS + 1];
+    uint64_t event_next_send;
+    unsigned event_turn;
 
     // ---- the stepping thread's
     CoopState state;
@@ -297,6 +325,7 @@ static void send_room(CoopSess *s, uint8_t type, uint8_t dst, const void *payloa
 }
 
 static void go_left(CoopSess *s, const char *why, int log_it);
+static void events_reset(CoopSess *s);
 
 // A player message, sealed with the room's message key under this session and the next counter.
 static void send_sealed(CoopSess *s, uint8_t dst, uint8_t kind, const void *bytes, size_t n) {
@@ -349,6 +378,7 @@ static void go_left(CoopSess *s, const char *why, int log_it) {
     s->roster.n = 0;
     s->have_token = 0;
     memset(s->rw, 0, sizeof s->rw);
+    events_reset(s);
     set_state(s, COOP_LEFT);
     set_status(s, "%s", why);
     s->dirty = 1;
@@ -399,6 +429,7 @@ static int begin_episode(CoopSess *s, int intent, const char *secret, int rejoin
     if (secret != s->want) copy_str(s->want, sizeof s->want, secret);   // a rejoin passes the secret it already holds
     coop_room_keys(s->want, s->locator, s->msg_key);
     s->session = session, s->nonce = nonce, s->out_counter = 0;
+    events_reset(s);
     s->connect_seq = s->out_seq++;
     s->have_cookie = s->said_answer = s->heard_relay = 0;
     if (!rejoin) s->have_token = 0;
@@ -449,6 +480,224 @@ static const CoopMemberInfo *member_of(const CoopSess *s, int id) {
     for (int i = 0; i < s->roster.n; i++)
         if (s->roster.m[i].id == id) return &s->roster.m[i];
     return NULL;
+}
+
+// ---- reliable events and the consent owner's session-bound bindings
+
+static int accepted_locked(const CoopSess *s, int member) {
+    if (member < 1 || member > COOP_MAX_MEMBERS || member == s->view.self ||
+        !__atomic_load_n(&s->pub_joined, __ATOMIC_ACQUIRE) || s->accepted_self != s->view.session) return 0;
+    for (int i = 0; i < s->view.n; i++)
+        if (s->view.member[i].id == member)
+            return s->accepted[member] && s->accepted[member] == s->view.member[i].session;
+    return 0;
+}
+
+int coop_sess_member_accepted(CoopSess *s, int member) {
+    coop_lock(&s->lock);
+    int ok = accepted_locked(s, member);
+    coop_unlock(&s->lock);
+    return ok;
+}
+
+void coop_sess_accept_members(CoopSess *s, const CoopView *view, uint32_t members) {
+    coop_lock(&s->lock);
+    if (view && (view->version != s->view.version || view->session != s->view.session)) {
+        coop_unlock(&s->lock);
+        return;
+    }
+    s->accepted_self = view && view->state == COOP_JOINED ? view->session : 0;
+    memset(s->accepted, 0, sizeof s->accepted);
+    for (int i = 0; view && s->accepted_self && i < view->n; i++) {
+        const CoopPeer *p = &view->member[i];
+        if (p->id >= 1 && p->id <= COOP_MAX_MEMBERS && p->id != view->self && (members & (1u << p->id)))
+            s->accepted[p->id] = p->session;
+    }
+    for (int i = 0; i < COOP_EVENT_SLOTS; i++) {
+        EventOut *e = &s->event_out[i];
+        int any = 0;
+        for (int id = 1; id <= COOP_MAX_MEMBERS; id++) {
+            if (!s->accepted_self || e->target[id].session != s->accepted[id]) e->target[id].session = 0;
+            any |= e->target[id].session != 0;
+        }
+        if (!any) e->id = 0;
+    }
+    coop_unlock(&s->lock);
+}
+
+static void events_reset(CoopSess *s) {
+    coop_lock(&s->lock);
+    s->accepted_self = s->event_id = 0;
+    memset(s->accepted, 0, sizeof s->accepted);
+    for (int i = 0; i < COOP_EVENT_SLOTS; i++) {
+        s->event_out[i].id = 0;
+        memset(s->event_out[i].target, 0, sizeof s->event_out[i].target);
+    }
+    coop_unlock(&s->lock);
+    // No payload clearing: lengths/ids make the old storage unreachable.
+    for (int id = 1; id <= COOP_MAX_MEMBERS; id++) {
+        EventIn *e = &s->event_in[id];
+        e->session = e->id = e->high = e->ack_at = 0;
+        e->parts = e->dirty = 0;
+    }
+    s->event_next_send = 0, s->event_turn = 0;
+}
+
+int coop_sess_on_event(CoopSess *s, uint8_t kind, CoopEventFn fn, void *user) {
+    if (!coop_event_kind(kind)) return 0;
+    coop_lock(&s->lock);
+    s->event_handler[kind] = (EventHandler){fn, user};
+    coop_unlock(&s->lock);
+    return 1;
+}
+
+int coop_sess_send_event(CoopSess *s, int member, uint8_t kind, const void *bytes, size_t n) {
+    if (!coop_event_kind(kind) || n > COOP_EVENT_MAX || (n && !bytes) || member < 0 ||
+        (member > COOP_MAX_MEMBERS && member != COOP_DST_ALL)) return COOP_EVENT_INVALID;
+    coop_lock(&s->lock);
+    uint64_t recipients[COOP_MAX_MEMBERS + 1] = {0};
+    int any = 0;
+    for (int id = 1; id <= COOP_MAX_MEMBERS; id++)
+        if ((!member || member == COOP_DST_ALL || member == id) && accepted_locked(s, id))
+            recipients[id] = s->accepted[id], any = 1;
+    int result = COOP_EVENT_UNAVAILABLE;
+    if (any) {
+        result = s->event_id == UINT64_MAX ? COOP_EVENT_INVALID : COOP_EVENT_FULL;
+        for (int i = 0; s->event_id != UINT64_MAX && i < COOP_EVENT_SLOTS; i++) {
+            EventOut *e = &s->event_out[i];
+            if (e->id) continue;
+            memset(e->target, 0, sizeof e->target);
+            for (int id = 1; id <= COOP_MAX_MEMBERS; id++) e->target[id].session = recipients[id];
+            e->id = ++s->event_id, e->kind = kind, e->len = (uint16_t)n;
+            if (n) memcpy(e->bytes, bytes, n);
+            result = COOP_EVENT_QUEUED;
+            break;
+        }
+    }
+    coop_unlock(&s->lock);
+    return result;
+}
+
+// The stepping thread also checks the live roster: a new roster may not have been published to callers yet.
+static int event_peer(CoopSess *s, int id, uint64_t session) {
+    const CoopMemberInfo *m = member_of(s, id);
+    coop_lock(&s->lock);
+    int ok = m && m->session == session && s->accepted_self == s->session && s->accepted[id] == session;
+    coop_unlock(&s->lock);
+    return ok;
+}
+
+static int event_receive(CoopSess *s, int from, uint64_t session, uint8_t kind, const uint8_t *bytes, size_t n, uint64_t now) {
+    (void)now;
+    if (!event_peer(s, from, session)) return 0;
+    if (kind == COOP_K_EVENT_ACK) {
+        CoopEventAck a;
+        if (!coop_event_ack_parse(bytes, n, &a) || a.sender_session != s->session) return 0;
+        coop_lock(&s->lock);
+        for (int i = 0; i < COOP_EVENT_SLOTS; i++) {
+            EventOut *e = &s->event_out[i];
+            if (e->id != a.id || e->target[from].session != session) continue;
+            uint16_t full = coop_event_parts(e->len);
+            if (a.parts & ~full) break;
+            e->target[from].acked |= a.parts;
+            if (e->target[from].acked == full) e->target[from].session = 0;
+            int any = 0;
+            for (int id = 1; id <= COOP_MAX_MEMBERS; id++) any |= e->target[id].session != 0;
+            if (!any) e->id = 0;
+            break;
+        }
+        coop_unlock(&s->lock);
+        return 1;
+    }
+    CoopEventPart p;
+    if (!coop_event_part_parse(bytes, n, &p) || p.recipient_session != s->session) return 0;
+    coop_lock(&s->lock);
+    EventHandler h = s->event_handler[p.kind];
+    coop_unlock(&s->lock);
+    if (!h.fn) return 0;   // No application handler: never claim delivery.
+    EventIn *e = &s->event_in[from];
+    if (e->session != session) {
+        e->session = session, e->id = e->high = e->ack_at = 0;
+        e->parts = e->dirty = 0;
+    }
+    if (p.id < e->high || (p.id == e->high && p.id != e->id)) return 0;
+    if (e->id != p.id) {
+        if (e->id > e->high || p.id <= e->high) return 0;   // one unfinished event per sender
+        e->id = p.id, e->len = p.total, e->kind = p.kind, e->parts = 0;
+    }
+    if (e->len != p.total || e->kind != p.kind) return 0;
+    uint16_t bit = (uint16_t)(1u << p.part);
+    if (!(e->parts & bit)) {
+        size_t count = n - COOP_EVENT_HEAD;
+        if (count) memcpy(e->bytes + (size_t)p.part * COOP_EVENT_PART, p.bytes, count);
+        e->parts |= bit;
+    }
+    if (e->parts == coop_event_parts(e->len) && e->id > e->high) {
+        e->high = e->id;   // commit before the callback; no repeated dispatch, even after envelope resync
+        h.fn(from, session, e->id, e->bytes, e->len, h.user);
+    }
+    e->dirty = 1;   // ACKs coalesce, including a duplicate whose previous ACK was lost.
+    return 1;
+}
+
+static void events_tick(CoopSess *s, uint64_t now) {
+    if (s->state != COOP_JOINED) return;
+    for (int id = 1; id <= COOP_MAX_MEMBERS; id++) {
+        EventIn *e = &s->event_in[id];
+        if (!e->session) continue;
+        if (!event_peer(s, id, e->session)) {
+            e->dirty = 0;
+            if (e->id > e->high) e->id = 0, e->parts = 0;   // forget incomplete data, not delivered ids
+        } else if (e->dirty && now >= e->ack_at) {
+            uint8_t bytes[COOP_EVENT_ACK_SIZE];
+            CoopEventAck a = {.sender_session = e->session, .id = e->id, .parts = e->parts};
+            size_t n = coop_event_ack_pack(bytes, sizeof bytes, &a);
+            e->dirty = 0, e->ack_at = now + EVENT_ACK_MS;
+            if (n) send_sealed(s, (uint8_t)id, COOP_K_EVENT_ACK, bytes, n);
+            if (s->state != COOP_JOINED) return;
+        }
+    }
+    // Drop departed recipients even when there is no send due. No new peer inherits queued events.
+    coop_lock(&s->lock);
+    for (int i = 0; i < COOP_EVENT_SLOTS; i++) {
+        EventOut *e = &s->event_out[i];
+        if (!e->id) continue;
+        int any = 0;
+        for (int id = 1; id <= COOP_MAX_MEMBERS; id++) {
+            EventTarget *t = &e->target[id];
+            const CoopMemberInfo *m = member_of(s, id);
+            if (!m || m->session != t->session || s->accepted[id] != t->session || s->accepted_self != s->session) t->session = 0;
+            any |= t->session != 0;
+        }
+        if (!any) e->id = 0;
+    }
+    uint8_t bytes[COOP_EVENT_HEAD + COOP_EVENT_PART];
+    size_t n = 0;
+    int dst = 0;
+    for (unsigned turn = 0; now >= s->event_next_send && turn < COOP_MAX_MEMBERS; turn++) {
+        int id = (int)((s->event_turn + turn) % COOP_MAX_MEMBERS) + 1;
+        EventOut *first = NULL;
+        for (int i = 0; i < COOP_EVENT_SLOTS; i++) {
+            EventOut *e = &s->event_out[i];
+            if (e->id && e->target[id].session && (!first || e->id < first->id)) first = e;
+        }
+        if (!first) continue;
+        EventTarget *t = &first->target[id];
+        uint16_t full = coop_event_parts(first->len), missing = (uint16_t)(full & ~(t->sent | t->acked));
+        if (!missing && now >= t->next) t->sent = t->acked, missing = (uint16_t)(full & ~t->acked);
+        if (!missing) continue;
+        uint8_t part = 0;
+        while (!(missing & (1u << part))) part++;
+        CoopEventPart p = {.recipient_session = t->session, .id = first->id, .total = first->len,
+                           .kind = first->kind, .part = part, .bytes = first->bytes + (size_t)part * COOP_EVENT_PART};
+        n = coop_event_part_pack(bytes, sizeof bytes, &p);
+        t->sent |= (uint16_t)(1u << part);
+        if ((t->sent | t->acked) == full) t->next = now + EVENT_RETRY_MS;
+        dst = id, s->event_turn = (unsigned)id, s->event_next_send = now + EVENT_SEND_MS;
+        break;
+    }
+    coop_unlock(&s->lock);
+    if (n) send_sealed(s, (uint8_t)dst, COOP_K_EVENT, bytes, n);
 }
 
 // The roster the relay sent replaces ours; the log tells who came, went, changed name or went away. 1 when this
@@ -765,6 +1014,8 @@ static int on_data(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, co
     s->heard_at[h->src] = now;
     coop_unlock(&s->lock);
     TRACE(s, "rx message kind %u from member %u, %u bytes", kind, h->src, (unsigned)nb);
+    if (kind == COOP_K_EVENT || kind == COOP_K_EVENT_ACK)
+        return h->dst == s->self && event_receive(s, h->src, session, kind, bytes, nb, now);
     CoopMsgFn fn = __atomic_load_n(&s->msg[kind].fn, __ATOMIC_ACQUIRE);
     if (fn) fn(h->src, bytes, nb, s->msg[kind].user);
     return 1;
@@ -834,7 +1085,8 @@ static void flush_outbox(CoopSess *s) {
 }
 
 int coop_sess_send(CoopSess *s, int member, uint8_t kind, const void *bytes, size_t n) {
-    if (!__atomic_load_n(&s->pub_joined, __ATOMIC_ACQUIRE) || n > COOP_MAX_MESSAGE || member < 0 ||
+    if (kind == COOP_K_EVENT || kind == COOP_K_EVENT_ACK ||
+        !__atomic_load_n(&s->pub_joined, __ATOMIC_ACQUIRE) || n > COOP_MAX_MESSAGE || member < 0 ||
         (member > COOP_MAX_MEMBERS && member != COOP_DST_ALL))
         return 0;
     coop_lock(&s->lock);
@@ -1093,6 +1345,7 @@ void coop_sess_step(CoopSess *s) {
     memcpy(ticks, s->ticks, sizeof ticks);
     coop_unlock(&s->lock);
     for (int i = 0; i < nt; i++) ticks[i].fn(coop_now_ms(), ticks[i].user);
+    events_tick(s, coop_now_ms());
 }
 
 // ---- the session's interface
@@ -1194,6 +1447,7 @@ int coop_sess_remove(CoopSess *s, int member) {
 int coop_sess_wait_off(CoopSess *s, uint32_t ms) { return coop_event_wait_ns(&s->off_done, (uint64_t)ms * 1000000u); }
 
 int coop_sess_on_message(CoopSess *s, uint8_t kind, CoopMsgFn fn, void *user) {
+    if (kind == COOP_K_EVENT || kind == COOP_K_EVENT_ACK) return 0;
     s->msg[kind].user = user;
     __atomic_store_n(&s->msg[kind].fn, fn, __ATOMIC_RELEASE);
     return 1;
@@ -1543,4 +1797,24 @@ int coop_on_view(CoopViewFn fn, void *user) {
 int coop_on_tick(CoopTickFn fn, void *user) {
     CoopSess *s = process_session();
     return s && coop_sess_on_tick(s, fn, user);
+}
+
+int coop_send_event(int member, uint8_t kind, const void *bytes, size_t n) {
+    CoopSess *s = process_session();
+    return s ? coop_sess_send_event(s, member, kind, bytes, n) : COOP_EVENT_UNAVAILABLE;
+}
+
+int coop_on_event(uint8_t kind, CoopEventFn fn, void *user) {
+    CoopSess *s = process_session();
+    return s && coop_sess_on_event(s, kind, fn, user);
+}
+
+int coop_member_accepted(int member) {
+    CoopSess *s = process_session();
+    return s && coop_sess_member_accepted(s, member);
+}
+
+void coop_accept_members(const CoopView *view, uint32_t members) {
+    CoopSess *s = process_session();
+    if (s) coop_sess_accept_members(s, view, members);
 }

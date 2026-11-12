@@ -118,6 +118,24 @@ int coop_on_view(CoopViewFn fn, void *user);
 typedef void (*CoopTickFn)(uint64_t now_ms, void *user);
 int coop_on_tick(CoopTickFn fn, void *user);
 
+// Reliable events: one id per sender/session, delivered whole once, in enqueue order from each sender to each
+// recipient (no order across senders or with ordinary messages). At most 8 queued events, each at most 16 KiB.
+// member 0/COOP_DST_ALL snapshots the currently accepted peers; a later join is not a recipient. Retries have new
+// sealed counters. Leaving, reconnecting in a new session, or losing the member/session/acceptance cancels delivery
+// to that member. No other timeout: eventual delivery needs a working path and a registered handler at both ends.
+// ACK means dispatch to the callback, NOT permission to apply gameplay; the callback still validates its payload.
+// The bytes are borrowed for the callback only. It runs on the session thread, with no session lock held.
+enum { COOP_EVENT_SLOTS = 8, COOP_EVENT_INVALID = -2, COOP_EVENT_FULL = -1,
+       COOP_EVENT_UNAVAILABLE = 0, COOP_EVENT_QUEUED = 1 };
+typedef void (*CoopEventFn)(int from, uint64_t sender_session, uint64_t event_id, const uint8_t *bytes, size_t n, void *user);
+int coop_send_event(int member, uint8_t kind, const void *bytes, size_t n);
+int coop_on_event(uint8_t kind, CoopEventFn fn, void *user);
+// Current roster member, identified and accepted by this player, not removed; false outside a joined session.
+int coop_member_accepted(int member);
+// Consent owner only: publish bindings for exactly this view (bit per member id). NULL clears them. Stale views
+// cannot grant acceptance, and a different member session never inherits a binding. No game code is called here.
+void coop_accept_members(const CoopView *view, uint32_t members);
+
 // "host", "host:port", "[v6]:port" or a bare IPv6 address into host (cap bytes) and port (default 24680). 0 when text is
 // empty or does not fit.
 int coop_server_parse(const char *text, char *host, size_t cap, uint16_t *port);
@@ -147,6 +165,10 @@ int coop_sess_send(CoopSess *s, int member, uint8_t kind, const void *bytes, siz
 int coop_sess_on_message(CoopSess *s, uint8_t kind, CoopMsgFn fn, void *user);
 int coop_sess_on_view(CoopSess *s, CoopViewFn fn, void *user);
 int coop_sess_on_tick(CoopSess *s, CoopTickFn fn, void *user);
+int coop_sess_send_event(CoopSess *s, int member, uint8_t kind, const void *bytes, size_t n);
+int coop_sess_on_event(CoopSess *s, uint8_t kind, CoopEventFn fn, void *user);
+int coop_sess_member_accepted(CoopSess *s, int member);
+void coop_sess_accept_members(CoopSess *s, const CoopView *view, uint32_t members);
 void coop_sess_view(CoopSess *s, CoopView *out);
 // Replaces the settings the session reads with those of p (the timings stay as they were made); the stepping thread
 // applies them, on or off included. A new server ends the room; a new name, once the room is joined, joins it again under the new name a

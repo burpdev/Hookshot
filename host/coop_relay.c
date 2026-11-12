@@ -307,13 +307,18 @@ static void relay_connect(CoopRelay *r, const CoopHdr *h, const uint8_t *p, cons
         relay_joined(r, known, c.nonce); return;
     }
     unsigned reason = relay_refusal(r, &c, addr, rejoin);
+    RelayFailed *previous = NULL;
     if (reason) {
         for (unsigned i = 0; i < RELAY_HISTORY; i++) {
             RelayFailed *f = &r->failed[i];
-            if (f->reason == reason && f->cid == c.client_id && f->seq == h->seq &&
+            if (f->reason && f->cid == c.client_id && f->seq == h->seq &&
                 coop_addr_eq(&f->addr, addr) && !memcmp(f->locator, c.locator, COOP_KEY_LEN)) {
-                r->stats[R_REPEATS]++;
-                relay_error(r, addr, reason, c.nonce, c.locator, 0, 0); return;
+                if (f->reason == reason) {
+                    r->stats[R_REPEATS]++;
+                    relay_error(r, addr, reason, c.nonce, c.locator, 0, 0); return;
+                }
+                previous = f;
+                break;
             }
         }
     }
@@ -324,6 +329,7 @@ static void relay_connect(CoopRelay *r, const CoopHdr *h, const uint8_t *p, cons
     }
     r->stats[R_CHARGES]++;
     if (reason) {
+        if (previous) previous->reason = 0; /* Only the latest charged refusal of an attempt is remembered. */
         RelayFailed *f = &r->failed[r->failed_next];
         *f = (RelayFailed){.cid = c.client_id, .addr = *addr, .seq = h->seq, .reason = (uint8_t)reason, .when = now};
         memcpy(f->locator, c.locator, COOP_KEY_LEN);

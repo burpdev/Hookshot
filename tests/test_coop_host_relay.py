@@ -293,6 +293,21 @@ class HostOnly(unittest.TestCase):
         self.assertEqual(shared.Client("another network", ip="10.1.0.1").join(self.relay, 0)[0][0], cr.E_NO_ROOM)
         self.assertEqual(shared.Client("refilled").join(self.relay, 3)[0][0], cr.E_NO_ROOM)
 
+    def test_a_changed_refusal_replaces_the_attempts_old_reason(self):
+        # Same client/address/sequence/locator, but a different intent changes the refusal. Python remembers only
+        # the latest reason: switching back must pay again, not resurrect an old free answer.
+        for relay in (PythonRelay(), self.relay):
+            a = shared.Client("A")
+            a.join(relay, 0, cr.INTENT_CREATE)
+            b = shared.Client("B", secret=a.secret, ip="10.5.0.1")
+            b.session = a.session
+            before = relay.stats["join_charges"]
+            self.assertEqual(b.join(relay, 0)[0][0], cr.E_SESSION_USED)
+            for intent, reason in ((cr.INTENT_CREATE, cr.E_ROOM_EXISTS), (cr.INTENT_JOIN, cr.E_SESSION_USED)):
+                out = relay.handle(b.connect(intent, relay.cookie(b.addr, 0)), b.addr, 0)
+                self.assertEqual(cr.parse_error(cr.parse(out[0][1]).payload)[0], reason)
+            self.assertEqual(relay.stats["join_charges"] - before, 3)
+
 
 def compile_fixture(cc, folder, source, tsan=False, relay_text=None, coop_text=None):
     flags = ["-fsanitize=thread"] if tsan else ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"]

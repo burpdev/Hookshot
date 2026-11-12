@@ -95,6 +95,8 @@ cannot start another room. Multiple-room fairness and per-network room counts th
 opaque cookies use keyed BLAKE2b rather than HMAC-SHA256, still bound to the address, port and current/previous minute.
 It remembers 4096 sessions and refusals, and at most 4096 network budgets. Unlike the script's unbounded removal set,
 it keeps at most 4096 removals; once full, it refuses new members rather than forgetting a removed player.
+Only the latest refusal of a join attempt is remembered: when the reason changes, the attempt pays the network's
+join budget again, even if the reason later changes back.
 
 `tests/test_coop_host_relay.py` runs the applicable hostile-client and fake-clock cases from the Python relay tests
 against both relays, using real loopback UDP for the C fixture. It also runs the session fixture through the C relay

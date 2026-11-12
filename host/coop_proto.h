@@ -1,29 +1,30 @@
 // The co-op wire format, as pure functions on bytes: no sockets, no threads, no game state. docs/coop.md ("The room's
 // secret and the wire") is the description a reviewer checks this file against.
 //
-// A room is named by a secret the players share out of band: 18 characters of a 27-symbol alphabet (85 bits), shown
-// XXXXXX-XXXXXX-XXXXXX. The relay never sees it. Two values are derived from it with keyed BLAKE2b (the key is the
-// secret's 18 canonical characters): the room's locator (16 bytes), which the relay knows the room by and which keys
-// the tag of every datagram between a client and the relay, and the message key (32 bytes), which seals every message
-// between the players (XChaCha20-Poly1305), so that the relay and anyone on the path can neither read nor change nor
-// make one.
+// A room is named by a secret: 18 characters of a 27-symbol alphabet (85 bits), shown XXXXXX-XXXXXX-XXXXXX. One
+// player's game makes it when it starts hosting and tells it to every player that connects to it. Two values are
+// derived from it with keyed BLAKE2b (the key is the secret's 18 canonical characters): the room's locator (16 bytes),
+// which keys the tag of every frame of that room, and the message key (32 bytes), which seals every message between
+// the players (XChaCha20-Poly1305), so what a game takes was made by a player of this room and was not changed on the
+// way. Reaching the port is not a proof of anything: docs/coop.md says plainly that anyone who can reach the host can
+// join, and what the keys do hold is that two games are in one room and that a message of another one is not taken.
 //
-// A datagram is a 24-byte header (little-endian) and a payload; the header carries an 8-byte tag, BLAKE2b-64 over the
-// first 16 header bytes and the payload, keyed with the locator. The client and relay messages are CONNECT .. LEAVE and
-// KICK (scripts/coop_relay.py, the same format in Python); DATA carries a sealed player message: the envelope (sender's
-// session, counter) and, sealed, one kind byte and the message bytes the layers above the session define.
-// tests/coop_vectors.txt holds byte vectors that this file and the relay's Python are checked against
-// (tests/test_coop_proto.py, tests/test_coop_relay.py). Every parser checks every length against the bytes it was given
-// and fails closed.
+// A frame is a 24-byte header (little-endian) and a payload, written whole onto the TCP link (host/coop_net.c); the
+// header carries an 8-byte tag, BLAKE2b-64 over the first 16 header bytes and the payload, keyed with the locator. The
+// messages between two games are CONNECT, ROOM, JOINED, ERROR, ROSTER, PING, PONG, LEAVE and KICK; DATA carries a
+// sealed player message: the envelope (sender's session, counter) and, sealed, one kind byte and the message bytes the
+// layers above the session define.
+// tests/coop_vectors.txt holds byte vectors this file is checked against (tests/test_coop_proto.c, run by
+// tests/test_coop_proto.py). Every parser checks every length against the bytes it was given and fails closed.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
 
 enum {
     COOP_MAGIC = 0x434E,         // bytes 4E 43
-    COOP_PROTO = 2,              // protocol major: a relay and a client talk only when it is equal
+    COOP_PROTO = 2,              // protocol major: two games talk only when it is equal
     COOP_HDR_LEN = 24,
-    COOP_MAX_DGRAM = 1200,       // a datagram's size at most: it crosses any path without fragmenting
+    COOP_MAX_DGRAM = 1200,       // a frame's size at most: what one player reads of a link at once
     COOP_MAX_PAYLOAD = COOP_MAX_DGRAM - COOP_HDR_LEN,
     COOP_TAG_LEN = 8,
     COOP_KEY_LEN = 16,           // the locator, which keys the tags
@@ -42,10 +43,11 @@ enum {
     COOP_MAX_MESSAGE = COOP_MAX_PAYLOAD - COOP_ENV_OVERHEAD - 1,   // a player message's bytes after its kind, at most
 };
 
-// Datagram types. CONNECT .. LEAVE and KICK are between a client and the relay, DATA carries the players' messages.
+// Frame types. CONNECT, CHALLENGE, ROOM, JOINED, ERROR, ROSTER, PING, PONG, LEAVE and KICK are between a player's game
+// and the host it is joined to; DATA carries a player message, which the host passes on to the others.
 enum { COOP_T_CONNECT = 1, COOP_T_CHALLENGE = 2, COOP_T_JOINED = 3, COOP_T_ERROR = 5, COOP_T_ROSTER = 6, COOP_T_PING = 7,
-       COOP_T_PONG = 8, COOP_T_LEAVE = 9, COOP_T_KICK = 11, COOP_T_DATA = 0x10 };
-enum { COOP_INTENT_CREATE = 1, COOP_INTENT_JOIN = 2 };   // CONNECT: make the room of a locator or join it
+       COOP_T_PONG = 8, COOP_T_LEAVE = 9, COOP_T_KICK = 11, COOP_T_ROOM = 12, COOP_T_DATA = 0x10 };
+enum { COOP_INTENT_HOST = 1, COOP_INTENT_JOIN = 2 };   // CONNECT: this game is the host, or it came to join its room
 enum { COOP_E_NO_ROOM = 1, COOP_E_ROOM_FULL = 2, COOP_E_PROTO = 3, COOP_E_RATE = 4, COOP_E_BAD_TAG = 5, COOP_E_SERVER_FULL = 6,
        COOP_E_ROOM_EXISTS = 7, COOP_E_REMOVED = 8, COOP_E_SESSION_USED = 9 };   // 9: a session used in the room before
 enum { COOP_FLAG_AWAY = 1, COOP_FLAG_MAKER = 2 };   // roster flags: not heard from for a while; made the room
@@ -57,9 +59,10 @@ enum { COOP_K_HELLO = 1, COOP_K_POS = 2, COOP_K_DIGEST = 3, COOP_K_SECTION = 4, 
 
 typedef struct {
     uint8_t ver, type;
-    uint8_t src, dst;       // member ids 1..8; src 0 is the relay; dst COOP_DST_ALL: every other member
+    uint8_t src, dst;       // member ids 1..8; src 0 is a host answering a link that has no member id yet;
+                            // dst COOP_DST_ALL: every other member of the room
     uint16_t len;           // payload bytes
-    uint32_t room, seq;     // room 0 until joined; seq counts the sender's datagrams
+    uint32_t room, seq;     // room 0 until joined; seq counts the sender's frames
 } CoopHdr;
 
 // ---- room secrets: 18 characters of "23456789BCDFGHJKMNPRSTVWXYZ" (27 symbols, 85.6 bits; no vowels, 0/1/O/I/L, Q or
@@ -109,9 +112,19 @@ typedef struct {
 size_t coop_connect_pack(uint8_t *out, size_t cap, const CoopConnect *c);   // zero-padded to COOP_CONNECT_MIN as a datagram
 int coop_connect_parse(const uint8_t *p, size_t n, CoopConnect *c);
 
-// CHALLENGE: u64 nonce, u8[16] cookie.
+// CHALLENGE: u64 nonce, u8[16] cookie. The host sends it with ROOM as the answer to the first CONNECT of a link: the
+// CONNECT that carries the cookie back is the one that gets a member id, so the answers a game acts on came to the link
+// it sent them on.
 size_t coop_challenge_pack(uint8_t *out, size_t cap, uint64_t nonce, const uint8_t cookie[COOP_COOKIE_LEN]);
 int coop_challenge_parse(const uint8_t *p, size_t n, uint64_t *nonce, uint8_t cookie[COOP_COOKIE_LEN]);
+
+// ROOM (the host to a player that has connected): u64 nonce (of the CONNECT it answers), u8 length (always 18), the
+// room's secret. It is how a joiner gets into the host's room: the secret is the host's, made when it started hosting,
+// and the joiner's next CONNECT carries the keys made from it. Reaching the port is enough to be told the secret, which
+// is what the link is (docs/coop.md); what the secret holds is that both games mean one room, and that no message of
+// another room or of an earlier session of this one is taken.
+size_t coop_room_pack(uint8_t *out, size_t cap, uint64_t nonce, const char secret[COOP_SECRET_LEN]);
+int coop_room_parse(const uint8_t *p, size_t n, uint64_t *nonce, char secret[COOP_SECRET_LEN + 1]);
 
 // ROSTER: u8 n, n x (u8 id, u8 flags, u64 session, u8 name length, name).
 typedef struct { uint8_t id, flags; uint64_t session; char name[COOP_NAME_MAX + 1]; } CoopMemberInfo;

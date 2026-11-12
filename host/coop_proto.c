@@ -284,6 +284,23 @@ int coop_challenge_parse(const uint8_t *p, size_t n, uint64_t *nonce, uint8_t co
     return 1;
 }
 
+size_t coop_room_pack(uint8_t *out, size_t cap, uint64_t nonce, const char secret[COOP_SECRET_LEN]) {
+    if (cap < 9 + COOP_SECRET_LEN) return 0;
+    put64(out, nonce);
+    out[8] = COOP_SECRET_LEN;
+    memcpy(out + 9, secret, COOP_SECRET_LEN);
+    return 9 + COOP_SECRET_LEN;
+}
+
+int coop_room_parse(const uint8_t *p, size_t n, uint64_t *nonce, char secret[COOP_SECRET_LEN + 1]) {
+    char text[COOP_SECRET_LEN + 1];
+    if (n != 9 + COOP_SECRET_LEN || p[8] != COOP_SECRET_LEN) return 0;
+    memcpy(text, p + 9, COOP_SECRET_LEN);
+    text[COOP_SECRET_LEN] = 0;
+    *nonce = get64(p);
+    return coop_secret_normalize(text, secret);   // the canonical 18 characters of the alphabet, or nothing
+}
+
 size_t coop_roster_pack(uint8_t *out, size_t cap, const CoopRoster *r) {
     size_t at = 1;
     if (!cap || r->n > COOP_MAX_MEMBERS) return 0;

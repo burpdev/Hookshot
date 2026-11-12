@@ -1,6 +1,6 @@
-/* (hookshot) What co-op's session (host/coop.c) needs of the operating system, for Windows and Linux: a UDP socket
-   (IPv6 with IPv4 mapped, so one socket reaches either), a name lookup, random bytes, a clock, a thread, a lock, an
-   event and a once. Kept apart from the Win32 layer of host/posix so that tests compile host/coop.c with this file alone
+/* (hookshot) What co-op's session (host/coop.c) needs of the operating system, for Windows and Linux: the TCP link it
+   keeps with the player it hosts (IPv6 with IPv4 mapped, so one socket reaches either), a name lookup, random bytes, a
+   clock, a thread, a lock, an event and a once. Kept apart from the Win32 layer of host/posix so that tests compile host/coop.c with this file alone
    (tests/test_coop_session.py). Nothing here touches the game. */
 #pragma once
 #include <stddef.h>
@@ -25,7 +25,7 @@ typedef struct { pthread_t h; CoopEvent done; void (*fn)(void *); void *arg; int
 /* An address in one layout on every OS: IPv6 bytes (IPv4 as ::ffff:a.b.c.d), the port, the scope; two equal addresses
    compare equal (coop_addr_eq) however the OS reported them */
 typedef struct { uint8_t ip[16]; uint16_t port; uint32_t scope; } CoopAddr;
-typedef struct CoopUdp CoopUdp;
+
 
 void coop_lock_init(CoopLock *l);
 void coop_lock(CoopLock *l);
@@ -56,11 +56,28 @@ void coop_addr_str(const CoopAddr *a, char *out, size_t cap);   /* "1.2.3.4:5" o
 /* Numeric, non-loopback addresses of this PC, no DNS or network traffic; at most cap, with port attached.
    Used once when hosting to check the configured host and show LAN addresses. */
 unsigned coop_net_local_addresses(CoopAddr *out, unsigned cap, uint16_t port);
-/* A UDP socket bound to port (0: any) on every address, IPv6 and IPv4; NULL when none could be made */
-CoopUdp *coop_udp_open(uint16_t port);
-uint16_t coop_udp_port(const CoopUdp *u);   /* the port it is bound to */
-int coop_udp_send(CoopUdp *u, const CoopAddr *to, const void *p, size_t n);   /* 1 when handed to the OS */
-/* One datagram into buf, waiting at most ms: its size, 0 when none came, -1 on an error (a datagram larger than cap
-   is dropped and counts as none) */
-int coop_udp_recv(CoopUdp *u, void *buf, size_t cap, CoopAddr *from, uint32_t ms);
-void coop_udp_close(CoopUdp *u);
+/* ---- the direct link: one player's game listens on a TCP port and the others connect to it.
+   A frame is the whole of it as coop_proto.h packs one (its header says how long it is); coop_tcp_next hands over one
+   whole frame at a time, so a frame split over packets, or two frames in one read, is not the caller's problem. */
+typedef struct CoopTcp CoopTcp;                 /* one connection */
+typedef struct CoopTcpListen CoopTcpListen;     /* the port one player hosts on */
+typedef struct CoopTcpSet CoopTcpSet;           /* the connections one thread serves with one wait */
+
+CoopTcpListen *coop_tcp_listen(uint16_t port);            /* NULL when the port cannot be had */
+uint16_t coop_tcp_listen_port(const CoopTcpListen *l);    /* the port it is on (0 when there is none) */
+CoopTcp *coop_tcp_accept(CoopTcpListen *l, CoopAddr *from);   /* NULL when none is waiting */
+void coop_tcp_listen_close(CoopTcpListen *l);
+CoopTcp *coop_tcp_connect(const CoopAddr *to, uint32_t ms);   /* NULL when no link is up within ms */
+void coop_tcp_close(CoopTcp *t);
+int coop_tcp_alive(const CoopTcp *t);   /* 0 once the other end closed, or a read or a write failed */
+int coop_tcp_send(CoopTcp *t, const void *p, size_t n);   /* 1 when all of it is taken; 0 when its backlog is full or it is gone */
+
+CoopTcpSet *coop_tcp_set_new(CoopTcpListen *l, unsigned max);   /* at most max connections at once */
+void coop_tcp_set_free(CoopTcpSet *set);
+int coop_tcp_add(CoopTcpSet *set, CoopTcp *t);   /* the slot it takes (1..max), 0 when there is no room */
+CoopTcp *coop_tcp_at(const CoopTcpSet *set, int slot);
+void coop_tcp_drop(CoopTcpSet *set, int slot);   /* closes the connection in that slot */
+/* One whole frame into buf (cap at least COOP_MAX_DGRAM): its size, 0 when nothing is waiting, -1 when the listener has
+   a connection to take; *slot is the slot the frame came from (0 for none). Waits at most ms in all: call it again with 0
+   to take the rest. A frame larger than cap, or a header that is not one, closes that connection. */
+int coop_tcp_next(CoopTcpSet *set, void *buf, size_t cap, int *slot, uint32_t ms);

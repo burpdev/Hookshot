@@ -1,29 +1,41 @@
-// Co-op session layer (coop.h): the state machine of one player's connection to a relay, and the thread that runs it.
+// Co-op session layer (coop.h): the state machine of one player's link, and the thread that runs it.
+//
+// There is one way to reach the other players, and it is the other players' games. One player hosts: its game listens
+// on a TCP port (43400 unless coop_port says otherwise) and is the room's maker. The others connect to that game's
+// address (coop_server=, or the Co-op tab's Host address row); no one in between forwards anything, and the host
+// passes every player message on to the rest. Up to eight games, the host one of them.
 //
 // States: OFF (co-op is off: HOS_COOP or the options file's coop= did not switch it on), LEFT (on, in no room),
-// CONNECTING (reaching the relay to create or join a room), JOINED, RECONNECTING (the relay went silent; joining the
-// same room again as the same member).
+// CONNECTING (reaching the host, or waiting for the first player on the port), JOINED, RECONNECTING (the host went
+// silent; the same player joining the same room again as the same member).
 //
-// A room is its secret (coop_proto.h): the relay knows it by the locator derived from it, and the players seal their
-// messages with the message key derived from it, so the relay forwards what it cannot read, change or make.
+// A room is its secret (coop_proto.h). The host makes one when it starts hosting; a player that connects is told it in
+// ROOM and takes the keys made from it, so every frame of that room carries the locator's tag and every player message
+// is sealed with the message key: what a game takes was made by a player of this room and was not changed on the way.
+// Reaching the port gets a game the secret — the link trusts the players it reaches, as docs/coop.md says — and what
+// the keys hold is that two games mean one room, and that nothing of another room, or of this room's earlier sessions,
+// is taken.
 //
-// Reaching the relay is a cookie exchange (scripts/coop_relay.py): a CONNECT is answered by a CHALLENGE with a cookie, a
-// CONNECT that carries the cookie is answered by JOINED or an ERROR. Every answer carries the nonce of the attempt and
-// the locator's tag, so a datagram someone else sends from the relay's address does not end or redirect the attempt.
-// A burst of four CONNECTs 250 ms apart carries the exchange over a lossy path; a burst without an answer is followed by
-// a wait of 1, 2, 4, 8, then 15 s. A session that keeps its room (retry) asks for a room that is not there at most every
-// 10 s, and waits a minute when the relay refuses it for its network's joins, instead of ending. In a room a PING every
-// 2 s keeps the NAT mapping open and measures the round trip, and 8 s without any datagram from the relay is
-// RECONNECTING. JOINED hands out a rejoin token, which a later CONNECT of the same member carries: the relay gives a
-// member's id back only to it.
+// Joining is a short exchange: CONNECT, answered by CHALLENGE (a cookie) and ROOM (the secret); the CONNECT that
+// carries the cookie back and the room's locator is answered by JOINED with a member id and the roster, or by an ERROR
+// that says why not. The answers carry the attempt's nonce, and the ones after the keys are known carry its tag. A
+// burst of four CONNECTs 250 ms apart carries the exchange over a slow link; a burst without an answer is followed by a
+// wait of 1, 2, 4, 8, then 15 s. In a room a PING every 2 s measures the round trip, and 8 s without a frame from the
+// host is RECONNECTING. JOINED hands out a rejoin token, which the next CONNECT of the same player carries: the host
+// gives a member's id back only to it, for a minute after it left.
 //
-// Every join is a new session: a random number the CONNECT tells the relay, which lists it in the roster. A player's
-// messages carry its session and a counter from 1 in the sealed envelope; the others take a message only of the session
-// the roster names for its sender and once within a window of 64 counters, so a message recorded before a rejoin, or
-// sent again within the window, is refused. Four older ones in a row start the window again (window_below), after which
-// a recorded message of that session can come again: a layer that must take a message once checks a counter of its own.
+// Every join is a new session: a random number the CONNECT tells the host, which lists it in the roster the host
+// broadcasts at every change and every 5 s. A player's messages carry its session and a counter from 1 in the sealed
+// envelope; the others take a message only of the session the roster names for its sender and once within a window of
+// 64 counters, so a message recorded before a rejoin, or sent again within the window, is refused. Four older ones in a
+// row start the window again (window_below), after which a recorded message of that session can come again: a layer
+// that must take a message once checks a counter of its own.
 //
-// One thread owns the socket, the DNS lookup and the state. Other threads reach it through a mailbox (commands, settings), an
+// The host is a player too: it holds the roster, marks who is away (one it has heard nothing from for 15 s), removes a
+// member when its own game asks (the maker's remedy: KICK, then the link ends), and its own messages go out like
+// everyone else's. It keeps no room state on disk: when it leaves or closes, the room ends.
+//
+// One thread owns the sockets, the DNS lookup and the state. Other threads reach it through a mailbox (commands, settings), an
 // outbox (messages to send) and a copy of the state they may read; all three sit behind one lock that the thread holds only
 // to copy. The thread is a plain host thread, as host/discord_rpc.c's: it never touches guest memory. The process's
 // session has it only while co-op is switched on: switching co-op off, or the game closing, ends it (asked, then waited
@@ -37,7 +49,6 @@
 #include <string.h>
 
 #include "coop.h"
-#include "coop_relay.h"
 #ifndef HOOKSHOT_ENV_H   // (env_on: the switches' one rule)
 #include "../gpu/vk/compat/hookshot_env.h"
 #endif
@@ -47,20 +58,27 @@ void hos_log(const char *fmt, ...);
 enum {
     PING_MS = 2000, SILENCE_MS = 8000, BURST_GAP_MS = 250, BACKOFF_FIRST_MS = 1000, BACKOFF_MAX_MS = 15000,
     BURST_TRIES = 4,                 // CONNECTs per burst
-    NO_ROOM_WAIT_MS = 10000,         // a room that is not there is asked for this often at most (each asks the relay for a join)
-    RATE_WAIT_MS = 60000,            // the wait after the relay refused a join for the network's budget
+    ROSTER_EVERY_MS = 5000,          // (hosting) who is in the room, said again this often whatever else changed
+    ROSTER_AGAIN_MS = 750,           // and again after a change, so that a lost one is made up
+    AWAY_MS = 15000,                 // (hosting) a member it has heard nothing from for this long is marked away
+    HANDSHAKE_MS = 10000,            // a link that has not become a member by then is closed
+    CONNECT_WAIT_MS = 3000,          // how long a link to the host is waited for
+    TOKEN_KEEP_MS = 60000,           // a member that left may come back as the same member for this long
     ROSTER_AHEAD = 1 << 20,          // a roster's number is taken at most this far ahead of the last one's
     ROSTER_STALE_MS = 4000,          // after the silence time and this long without a roster taken, any roster is taken
     STATS_MS = 60000,                // the periodic counters line, while in a room
     LOG_EVERY_MS = 30000,            // a repeated cause logs this often
-    RENAME_MS = 1000,                // a name change joins the room again after this much quiet
+    RENAME_MS = 1000,                // a name change is told to the host after this much quiet
     OUT_SLOTS = 64,                  // messages waiting to be sent
-    DEFAULT_PORT = 24680,
+    LINK_SLOTS = COOP_MAX_MEMBERS + 4,   // the links one session serves: its members, and a few still handshaking
+    DEFAULT_PORT = 43400,            // the port a game hosts on, and the one it goes to when the address names none
     VIEW_HOOKS = 8,
     TICK_HOOKS = 4,
 };
 
 typedef struct { uint8_t dst, kind; uint16_t len; uint8_t data[COOP_MAX_MESSAGE]; } OutMsg;
+typedef struct { uint8_t token[COOP_COOKIE_LEN]; uint64_t session; uint64_t until; } GoneMember;   // until 0: never left
+typedef struct { int slot; uint64_t nonce, since; } PendingLink;   // (hosting) accepted, not yet a member
 typedef struct { CoopMsgFn fn; void *user; } MsgHandler;
 typedef struct { CoopViewFn fn; void *user; } ViewHook;
 typedef struct { CoopTickFn fn; void *user; } TickHook;
@@ -99,8 +117,8 @@ struct CoopSess {
     char tag[16];
     uint32_t ping_ms, silence_ms, burst_gap_ms, backoff_first_ms, backoff_max_ms;
     // what the stepping thread works with now
-    char server[160], name[COOP_NAME_MAX + 1], host[128];
-    uint16_t port, local_port;
+    char server[160], name[COOP_NAME_MAX + 1], host[128];   // server: the host to join, "host", "host:port" or "[v6]:port"
+    uint16_t port, host_port;        // port: the port this game hosts on; host_port: the one that address names
     uint64_t client_id;
     unsigned drop_pct;
     int retry;
@@ -108,13 +126,13 @@ struct CoopSess {
     // ---- shared, behind lock
     CoopLock lock;
     CoopEvent off_done;
-    CoopEvent wake;                             // a command or settings were queued: a session with no socket to wait on takes them now
+    CoopEvent wake;                             // a command or settings were queued: a session with no link to wait on takes them now
     int cmd;                                    // a command waiting (COOP_CMD_*), 0 none; a later one replaces it
     char cmd_secret[COOP_SECRET_LEN + 1];
     int cmd_remove;                             // a member the maker removes, 0 none, and its session in the view then
     uint64_t cmd_remove_session;
     int cfg_pending;                            // pending holds settings the thread has not applied
-    struct { char server[160], name[COOP_NAME_MAX + 1], why[48]; uint64_t client_id; uint16_t local_port; unsigned drop_pct; int retry, on; } pending;
+    struct { char server[160], name[COOP_NAME_MAX + 1], why[48]; uint64_t client_id; uint16_t port; unsigned drop_pct; int retry, on; } pending;
     OutMsg *out;
     unsigned out_head, out_tail;
     CoopView view;
@@ -138,22 +156,28 @@ struct CoopSess {
 
     // ---- the stepping thread's
     CoopState state;
-    CoopUdp *sock;
-    CoopRelay *host_relay;                      // optional, only the process's Make a room owns one
+    CoopTcpSet *link;                           // the links this session serves: its own (joining) or its members' (hosting)
+    CoopTcpListen *listener;                    // (hosting) the port it waits on; it lives inside link
+    int hosting;                                // this game listens: it is the room's maker
     int process_session;
-    CoopAddr relay;
-    int relay_known;
-    char relay_text[64];                        // the relay's resolved address, for the trace
-    int intent, made_room;                      // CONNECT's intent; this session's own CREATE made the room
+    CoopAddr host_at;                           // (joining) the host's address
+    int host_known;
+    char host_text[64];                         // the host's resolved address, for the trace
+    int own_slot;                               // (joining) the slot the link to the host took
+    int slot_of[COOP_MAX_MEMBERS + 1];          // (hosting) member id -> link slot, 0 none
+    int who[LINK_SLOTS + 1];                    // link slot -> member id, 0 for a link still handshaking
+    struct { int slot; uint64_t nonce; int asked; } pend[4];   // links that have not become members yet
+    GoneMember gone[COOP_MAX_MEMBERS];          // (hosting) members that left: their token, kept for a minute
+    int intent, made_room;                      // CONNECT's intent; this session's own hosting made the room
     uint64_t room_session;                      // the session the room lists for this player since its last JOINED
-    char want[COOP_SECRET_LEN + 1];             // the secret of the room being joined or made
-    uint8_t locator[COOP_KEY_LEN];              // of want: the relay's name of the room and the tags' key
+    char want[COOP_SECRET_LEN + 1];             // the secret of the room being joined, or this host's own
+    uint8_t locator[COOP_KEY_LEN];              // of want: the tags' key
     uint8_t msg_key[COOP_MSG_KEY_LEN];          // of want: seals the players' messages
     uint64_t session, nonce;                    // this join's session (in the roster); this attempt's nonce
     uint8_t cookie[COOP_COOKIE_LEN], token[COOP_COOKIE_LEN];
-    int have_cookie, have_token, said_answer, heard_relay;
+    int have_cookie, have_token, have_secret, said_answer, heard_host;
     uint32_t connect_seq, out_seq, out_counter;
-    uint64_t next_tx, last_connect_tx, last_rx, next_ping, next_stats, rename_at;
+    uint64_t next_tx, last_connect_tx, last_rx, next_ping, next_stats, rename_at, next_roster, roster_again;
     uint64_t roster_at, roster_rejoin_at;       // when a roster was last taken; the last rejoin a roster asked for
     int own_taken;                              // the roster taken last lists another session for this player
     uint32_t backoff;
@@ -172,7 +196,7 @@ struct CoopSess {
     uint32_t n_tx, n_rx, n_lost;                // (read by other threads for the view: written with bump)
     uint32_t n_malformed, n_bad_tag, n_sender, n_dup, n_test_drop, n_outbox_full;
     uint32_t stats_seen;
-    uint8_t rx[2048];
+    uint8_t rx[COOP_MAX_DGRAM];
 };
 
 // ---- logging
@@ -311,25 +335,48 @@ int coop_server_parse(const char *text, char *host, size_t cap, uint16_t *port) 
 
 // ---- sending
 
-// One datagram to the relay, tagged with the locator.
-static void send_dgram(CoopSess *s, uint8_t type, uint32_t room, uint8_t src, uint8_t dst, uint32_t seq,
-                       const void *payload, size_t n) {
+// One frame to the link at slot. key NULL: a zero tag, which is how a host answers a link before it has handed out the
+// room's key. 1 when the link took it (a link whose backlog is full does not).
+static int send_slot(CoopSess *s, int slot, uint8_t type, uint32_t room, uint8_t src, uint8_t dst,
+                     const void *payload, size_t n, const uint8_t *key) {
+    CoopTcp *t = coop_tcp_at(s->link, slot);
+    if (!t) return 0;
     uint8_t d[COOP_MAX_DGRAM];
-    CoopHdr h = {.ver = COOP_PROTO, .type = type, .src = src, .dst = dst, .room = room, .seq = seq};
-    size_t k = coop_dgram_pack(d, sizeof d, &h, payload, n, s->locator);
-    if (!k || !s->sock || !s->relay_known) return;
-    coop_udp_send(s->sock, &s->relay, d, k);
+    CoopHdr h = {.ver = COOP_PROTO, .type = type, .src = src, .dst = dst, .room = room, .seq = s->out_seq++};
+    size_t k = coop_dgram_pack(d, sizeof d, &h, payload, n, key);
+    if (!k) return 0;
+    if (!coop_tcp_send(t, d, k)) {
+        __atomic_add_fetch(&s->n_outbox_full, 1, __ATOMIC_RELAXED);
+        return 0;
+    }
     bump(&s->n_tx);
-    TRACE(s, "tx %s to %u, %u bytes", type_name(type), dst, (unsigned)k);
+    TRACE(s, "tx %s to link %d, %u bytes", type_name(type), slot, (unsigned)k);
+    return 1;
 }
 
-// A datagram of the room we are in.
+// A frame of the room we are in: over the link to the host, or (hosting) to every member dst names — a member id, or
+// COOP_DST_ALL for every other member. A host does not send a room frame to itself.
 static void send_room(CoopSess *s, uint8_t type, uint8_t dst, const void *payload, size_t n) {
-    send_dgram(s, type, s->room, (uint8_t)s->self, dst, s->out_seq++, payload, n);
+    if (!s->link) return;
+    if (!s->hosting) {
+        send_slot(s, s->own_slot, type, s->room, (uint8_t)s->self, dst, payload, n, s->locator);
+        return;
+    }
+    for (int id = 1; id <= COOP_MAX_MEMBERS; id++) {
+        if (id == s->self || !s->slot_of[id]) continue;
+        if (dst != COOP_DST_ALL && dst != id) continue;
+        send_slot(s, s->slot_of[id], type, s->room, (uint8_t)s->self, dst, payload, n, s->locator);
+    }
+}
+
+// The host's answer to a link that is still handshaking: no room number, no member, no tag — it has no keys yet.
+static void answer_link(CoopSess *s, int slot, uint8_t type, const void *payload, size_t n) {
+    send_slot(s, slot, type, 0, 0, 0, payload, n, NULL);
 }
 
 static void go_left(CoopSess *s, const char *why, int log_it);
 static void events_reset(CoopSess *s);
+static void end_link(CoopSess *s, int slot, const char *why);
 
 // A player message, sealed with the room's message key under this session and the next counter.
 static void send_sealed(CoopSess *s, uint8_t dst, uint8_t kind, const void *bytes, size_t n) {
@@ -342,7 +389,10 @@ static void send_sealed(CoopSess *s, uint8_t dst, uint8_t kind, const void *byte
     if (k) send_room(s, COOP_T_DATA, dst, payload, k);
 }
 
+// Who I am, to the host: the name, this join's session and nonce, the cookie it gave back, the room's keys once the
+// host has handed them out, and the token of the member I was. A host is asked; it does not ask.
 static void send_connect(CoopSess *s, uint64_t now) {
+    if (s->hosting) return;
     CoopConnect c = {.intent = (uint8_t)s->intent, .client_id = s->client_id, .session = s->session, .nonce = s->nonce};
     uint8_t payload[128];
     memcpy(c.locator, s->locator, COOP_KEY_LEN);
@@ -350,43 +400,41 @@ static void send_connect(CoopSess *s, uint64_t now) {
     if (s->have_cookie) memcpy(c.cookie, s->cookie, COOP_COOKIE_LEN);
     if (s->have_token) memcpy(c.token, s->token, COOP_COOKIE_LEN);
     size_t n = coop_connect_pack(payload, sizeof payload, &c);
-    send_dgram(s, COOP_T_CONNECT, 0, 0, 0, s->connect_seq, payload, n);
+    send_slot(s, s->own_slot, COOP_T_CONNECT, 0, 0, 0, payload, n, s->have_secret ? s->locator : NULL);
     if (!s->have_cookie) s->last_connect_tx = now;
 }
 
 // ---- leaving
 
-static void close_socket(CoopSess *s) {
-    if (s->sock) coop_udp_close(s->sock);
-    s->sock = NULL;
+// Every link, and the port when this game hosts one. The set owns the listener, so closing it closes the port.
+static void close_link(CoopSess *s) {
+    if (s->link) coop_tcp_set_free(s->link);
+    s->link = NULL;
+    s->listener = NULL;
+    s->own_slot = 0;
+    memset(s->slot_of, 0, sizeof s->slot_of);
+    memset(s->who, 0, sizeof s->who);
+    memset(s->pend, 0, sizeof s->pend);
 }
 
-// Tells the others and the relay, twice (a datagram may be lost): BYE to every member, then LEAVE.
+// Tells the others, twice: BYE to every member, then LEAVE. A host's links end with the room, but it says so first.
 static void say_goodbye(CoopSess *s) {
-    if (!s->sock || !s->relay_known || !s->room) return;
+    if (!s->link || !s->room) return;
     for (int i = 0; i < 2; i++) {
         if (s->state == COOP_JOINED) send_sealed(s, COOP_DST_ALL, COOP_K_BYE, NULL, 0);
-        send_room(s, COOP_T_LEAVE, 0, NULL, 0);
+        send_room(s, COOP_T_LEAVE, COOP_DST_ALL, NULL, 0);
     }
 }
 
-static void stop_host_relay(CoopSess *s) {
-    if (!s->host_relay) return;
-    coop_relay_stop(&s->host_relay);
-    s->host[0] = 0;
-    if (s->server[0]) coop_server_parse(s->server, s->host, sizeof s->host, &s->port);
-    s->relay_known = 0;
-}
-
-// Out of the room (or never in): closes the socket and shows why.
+// Out of the room (or never in): the links close and the reason shows.
 static void go_left(CoopSess *s, const char *why, int log_it) {
     int was_in = s->state == COOP_JOINED || s->state == COOP_RECONNECTING;
     if (log_it) {
         if (was_in) say(s, "left room (%s)", why);
         else say(s, "no room: %s", why);
     }
-    close_socket(s);
-    stop_host_relay(s);
+    close_link(s);
+    s->hosting = 0;
     s->room = 0, s->self = 0, s->made_room = 0;
     s->roster.n = 0;
     s->have_token = 0;
@@ -397,75 +445,153 @@ static void go_left(CoopSess *s, const char *why, int log_it) {
     s->dirty = 1;
 }
 
-// ---- reaching the relay
+// ---- the link: opening it, and getting into the room
 
-// A socket and the relay's address, when there are none yet. 0 and a status when they cannot be had.
-static int ensure_socket(CoopSess *s, uint64_t now) {
-    if (!s->sock) {
-        s->sock = coop_udp_open(s->local_port);
-        if (!s->sock) {
-            set_status(s, "cannot open a UDP socket");
-            SAY_LIMITED(s, L_SOCKET, now, "cannot open a UDP socket");
+// (hosting) The port this game waits on, and what the others can type to reach it.
+// (joining) The host's address, and a link to it. 0 and a status when they cannot be had.
+static int ensure_link(CoopSess *s, uint64_t now) {
+    if (s->hosting) {
+        if (s->link) return 1;
+        CoopTcpListen *l = coop_tcp_listen(s->port);
+        if (!l) {
+            set_status(s, "cannot listen on port %u", (unsigned)s->port);
+            SAY_LIMITED(s, L_SOCKET, now, "cannot listen on port %u: is another game hosting on it?", (unsigned)s->port);
             return 0;
         }
+        s->link = coop_tcp_set_new(l, LINK_SLOTS);
+        if (!s->link) {
+            coop_tcp_listen_close(l);
+            set_status(s, "cannot start the room");
+            return 0;
+        }
+        s->listener = l;   /* (the set owns it: close_link closes it) */
+        CoopAddr at[8];
+        const unsigned n = coop_net_local_addresses(at, 8, s->port);
+        for (unsigned i = 0; i < n && i < 4; i++) {
+            char text[64];
+            coop_addr_str(&at[i], text, sizeof text);
+            say(s, "players on this network can join %s", text);
+        }
+        return 1;
     }
-    if (!s->relay_known) {
-        say(s, "connecting to the relay");
-        TRACE(s, "the relay is %s", s->server);
-        if (!coop_net_resolve(s->host, s->port, &s->relay)) {
-            set_status(s, "cannot find the relay's address");
-            SAY_LIMITED(s, L_RESOLVE, now, "cannot resolve the relay's name");
+    if (!s->link) {
+        s->link = coop_tcp_set_new(NULL, LINK_SLOTS);
+        if (!s->link) return 0;
+    }
+    if (!s->host_known) {
+        say(s, "connecting to the host");
+        TRACE(s, "the host is %s", s->server);
+        if (!coop_net_resolve(s->host, s->host_port, &s->host_at)) {
+            set_status(s, "cannot find the host's address");
+            SAY_LIMITED(s, L_RESOLVE, now, "cannot resolve the host's name");
             return 0;
         }
-        coop_addr_str(&s->relay, s->relay_text, sizeof s->relay_text);
-        s->relay_known = 1;
+        coop_addr_str(&s->host_at, s->host_text, sizeof s->host_text);
+        s->host_known = 1;
+    }
+    if (!s->own_slot) {
+        CoopTcp *t = coop_tcp_connect(&s->host_at, CONNECT_WAIT_MS);
+        if (!t) {
+            set_status(s, "cannot reach the host at %s", s->host_text);
+            SAY_LIMITED(s, L_SOCKET, now, "no link to the host at %s", s->host_text);
+            s->host_known = 0;   // the whole attempt starts again, the name looked up fresh
+            return 0;
+        }
+        s->own_slot = coop_tcp_add(s->link, t);
+        if (!s->own_slot) {
+            coop_tcp_close(t);
+            return 0;
+        }
+        TRACE(s, "the host is at %s", s->host_text);
     }
     return 1;
 }
 
 static void schedule_backoff(CoopSess *s, uint64_t now) {
     s->next_tx = now + s->backoff;
-    if (!s->heard_relay && s->sock && s->relay_known) set_status(s, "no answer from the relay; trying again in %u s", (s->backoff + 500) / 1000);
+    if (!s->heard_host && s->own_slot) set_status(s, "no answer from the host; trying again in %u s", (s->backoff + 500) / 1000);
     s->backoff = s->backoff * 2 > s->backoff_max_ms ? s->backoff_max_ms : s->backoff * 2;
 }
 
-// A new attempt to get into a room: intent, the room's secret, and whether it is a rejoin of the room we were in (which
-// keeps the rejoin token). Every attempt is a new session and a new nonce; 0 (and no room) when the system's random
-// source cannot give them.
-static int begin_episode(CoopSess *s, int intent, const char *secret, int rejoin, uint64_t now) {
+// A new attempt at the host's room: its secret, and whether it is a rejoin of the room this player was in (which keeps
+// the rejoin token, so the host gives back the same member). The link itself starts again: a TCP link that ended does
+// not come back. Every attempt is a new session and a new nonce; 0 (and no room) when the system's random source
+// cannot give them.
+static int begin_episode(CoopSess *s, const char *secret, int rejoin, uint64_t now) {
     uint64_t session = random64(), nonce = random64();
     if (!session || !nonce) {
         go_left(s, "the system's random source failed: co-op needs it", 1);
         return 0;
     }
-    s->intent = intent;
+    s->intent = COOP_INTENT_JOIN;
     if (secret != s->want) copy_str(s->want, sizeof s->want, secret);   // a rejoin passes the secret it already holds
     coop_room_keys(s->want, s->locator, s->msg_key);
     s->session = session, s->nonce = nonce, s->out_counter = 0;
     events_reset(s);
     s->connect_seq = s->out_seq++;
-    s->have_cookie = s->said_answer = s->heard_relay = 0;
+    s->have_cookie = s->said_answer = s->heard_host = 0;
+    s->have_secret = s->want[0] != 0;   // a player that already holds the room's secret says so in its first CONNECT
     if (!rejoin) s->have_token = 0;
     s->burst_left = 0;
     s->next_tx = now;
     s->backoff = s->backoff_first_ms;
-    s->relay_known = 0;   // looked up again: the name may point elsewhere by now
+    s->host_known = 0;   // looked up again: the name may point elsewhere by now
+    if (s->link) end_link(s, s->own_slot, "reconnecting");   // the old link is not the host's link any more
     if (!rejoin) {
-        s->room = 0, s->self = 0, s->made_room = 0;
+        s->room = 0, s->self = 0;
         s->roster.n = 0;
     }
     set_state(s, rejoin ? COOP_RECONNECTING : COOP_CONNECTING);
-    if (rejoin) set_status(s, "reconnecting to the relay");
-    else set_status(s, "%s", intent == COOP_INTENT_CREATE ? "creating a room" : "joining the room");
+    if (rejoin) set_status(s, "rejoining the host");
+    else set_status(s, "joining the host");
     s->dirty = 1;
+    return 1;
+}
+
+// (hosting) This game is the room: a secret of its own, the port it waits on, and itself as the room's only member
+// until someone connects. Its rules are the ones its key signs (coop_state.h), as the maker's always are.
+static int start_hosting(CoopSess *s, uint64_t now) {
+    uint8_t r[32];
+    uint64_t session = random64(), room = random64();
+    if (!coop_random(r, sizeof r) || !coop_secret_from_random(r, s->want) || !session || !room) {
+        go_left(s, "the system's random source failed: co-op needs it", 1);
+        return 0;
+    }
+    coop_room_keys(s->want, s->locator, s->msg_key);
+    memcpy(s->secret, s->want, sizeof s->secret);
+    s->intent = COOP_INTENT_HOST;
+    s->hosting = 1;
+    s->have_secret = 1;
+    s->made_room = 1;
+    s->self = 1;                       // (the host is member 1: the room's maker, and a player like the others)
+    s->room = (uint32_t)room | 1u;
+    s->session = session, s->room_session = session, s->out_counter = 0;
+    s->roster.n = 0;
+    events_reset(s);
+    if (!ensure_link(s, now)) {
+        s->hosting = 0;
+        go_left(s, s->status[0] ? s->status : "cannot listen", 0);
+        return 0;
+    }
+    set_state(s, COOP_JOINED);
+    set_status(s, "%s", "");
+    s->last_rx = now;
+    s->next_ping = now + s->ping_ms;
+    s->next_stats = now + STATS_MS;
+    s->next_roster = now + ROSTER_EVERY_MS;
+    char label[8];
+    label_of(s->secret, label);
+    say(s, "hosting room %s on port %u", label, (unsigned)s->port);
+    s->dirty = 1;
+    publish_roster(s);
     return 1;
 }
 
 static void connect_timers(CoopSess *s, uint64_t now) {
     if (now < s->next_tx) return;
-    if (s->burst_left == 0) {   // a new burst: the socket and the relay's address first
-        if (!ensure_socket(s, now)) {
-            s->relay_known = 0;
+    if (s->burst_left == 0) {   // a new burst: the address and the link first
+        if (!ensure_link(s, now)) {
+            s->host_known = 0;
             schedule_backoff(s, now);
             return;
         }
@@ -493,6 +619,151 @@ static const CoopMemberInfo *member_of(const CoopSess *s, int id) {
     for (int i = 0; i < s->roster.n; i++)
         if (s->roster.m[i].id == id) return &s->roster.m[i];
     return NULL;
+}
+
+static void publish_roster(CoopSess *s);
+static int apply_roster(CoopSess *s, const CoopRoster *r);
+
+// ---- the room, when this game is the one that hosts it
+//
+// It holds who is in the room (its own line first, marked as the maker's), which link each of them came in on, and the
+// rejoin token of each one that left — the only way a player that drops for a moment gets its member id back. Every
+// change goes out as a ROSTER, and one goes out every ROSTER_EVERY_MS whatever else changed, so that a player that
+// missed one catches up.
+
+// The roster of a ROSTER frame is the room's, with this game's own line marked as the maker's.
+static void host_roster(const CoopSess *s, CoopRoster *r) {
+    memset(r, 0, sizeof *r);
+    for (int i = 0; i < s->roster.n && r->n < COOP_MAX_MEMBERS; i++) r->m[r->n++] = s->roster.m[i];
+    CoopMemberInfo *own = NULL;
+    for (int i = 0; i < r->n; i++)
+        if (r->m[i].id == s->self) own = &r->m[i];
+    if (!own && r->n < COOP_MAX_MEMBERS) own = &r->m[r->n++];
+    if (own) {
+        own->id = (uint8_t)s->self;
+        own->flags = COOP_FLAG_MAKER;
+        own->session = s->session;
+        copy_str(own->name, sizeof own->name, s->name);
+    }
+}
+
+// (hosting) The room as r says it is, said to every member. The number goes up with each one, which is how a player
+// knows a later one arrived (on_roster); apply_roster logs who came, went, changed name or went away.
+static void publish_rooms(CoopSess *s, const CoopRoster *r) {
+    apply_roster(s, r);
+    s->roster_seq++;
+    uint8_t payload[COOP_MAX_PAYLOAD];
+    size_t n = coop_roster_pack(payload, sizeof payload, r);
+    if (n) send_room(s, COOP_T_ROSTER, COOP_DST_ALL, payload, n);
+    const uint64_t now = coop_now_ms();
+    s->next_roster = now + ROSTER_EVERY_MS;
+    s->roster_again = now + ROSTER_AGAIN_MS;
+    s->dirty = 1;
+}
+
+static void publish_roster(CoopSess *s) {
+    CoopRoster r;
+    host_roster(s, &r);
+    publish_rooms(s, &r);
+}
+
+// A link that is over: whoever it carried leaves the room. Its rejoin token is kept for a minute, which is how the same
+// player coming back keeps its member id instead of becoming someone new.
+static void end_link(CoopSess *s, int slot, const char *why) {
+    if (!coop_tcp_at(s->link, slot)) return;
+    const int member = s->who[slot];
+    coop_tcp_drop(s->link, slot);
+    for (int i = 0; i < (int)(sizeof s->pend / sizeof s->pend[0]); i++)
+        if (s->pend[i].slot == slot) s->pend[i].slot = 0;
+    s->who[slot] = 0;
+    if (!member) return;
+    s->slot_of[member] = 0;
+    const CoopMemberInfo *m = member_of(s, member);
+    if (m) {
+        for (int i = 0; i < COOP_MAX_MEMBERS; i++) {
+            if (s->gone[i].until && s->gone[i].session != m->session) continue;
+            memset(s->gone[i].token, 0, COOP_COOKIE_LEN);
+            s->gone[i].session = m->session;
+            s->gone[i].until = coop_now_ms() + TOKEN_KEEP_MS;
+            break;
+        }
+    }
+    if (!s->hosting) return;
+    CoopRoster left;
+    memset(&left, 0, sizeof left);
+    for (int i = 0; i < s->roster.n && left.n < COOP_MAX_MEMBERS; i++)
+        if (s->roster.m[i].id != member) left.m[left.n++] = s->roster.m[i];
+    (void)why;   /* (apply_roster, through publish_roster, says who left and why the log has it) */
+    publish_roster(s);
+}
+
+// Sixteen random bytes for a link to come back with. Zero when the system's source failed, which is a link the host
+// cannot let into a room: a token anyone could guess would hand them someone else's member id.
+static int random_token(CoopSess *s, uint8_t out[COOP_COOKIE_LEN]) {
+    (void)s;
+    return coop_random(out, COOP_COOKIE_LEN) && out[0];
+}
+
+// (hosting) A link that has proved it holds the room's keys becomes a member: the id it had before, if it carries the
+// token of a player that left within the last minute, or else the lowest free one. The answer is its number, the room
+// key it already has, a token for next time, and who is in the room.
+static void take_member(CoopSess *s, int slot, const CoopConnect *c, uint64_t now) {
+    int id = 0;
+    if (c->token[0]) {
+        for (int i = 0; i < COOP_MAX_MEMBERS; i++) {
+            if (s->gone[i].until > now && s->gone[i].session && !memcmp(s->gone[i].token, c->token, COOP_COOKIE_LEN)) {
+                id = i + 1;
+                s->gone[i] = (GoneMember){0};
+                break;
+            }
+        }
+    }
+    for (int i = 2; !id && i <= COOP_MAX_MEMBERS; i++)   // the host is member 1, and the room holds eight
+        if (!s->slot_of[i] && !member_of(s, i)) id = i;
+    if (!id) {
+        CoopError e = {.reason = COOP_E_ROOM_FULL, .nonce = c->nonce};
+        copy_str(e.text, sizeof e.text, "the room is full");
+        uint8_t payload[128];
+        size_t k = coop_error_pack(payload, sizeof payload, &e);
+        if (k) answer_link(s, slot, COOP_T_ERROR, payload, k);
+        say(s, "refused a player: the room is full");
+        return;
+    }
+    s->who[slot] = id;
+    s->slot_of[id] = slot;
+    for (int i = 0; i < (int)(sizeof s->pend / sizeof s->pend[0]); i++)
+        if (s->pend[i].slot == slot) s->pend[i] = (PendingLink){0};
+    uint8_t payload[COOP_MAX_PAYLOAD];
+    CoopJoined j = {.member = (uint8_t)id, .nonce = c->nonce};
+    if (!random_token(s, j.token)) {   // a link the host cannot give a member id to: it would not come back as itself
+        CoopError e = {.reason = COOP_E_SERVER_FULL, .nonce = c->nonce};
+        copy_str(e.text, sizeof e.text, "this game cannot make random numbers: co-op needs them");
+        size_t k = coop_error_pack(payload, sizeof payload, &e);
+        if (k) answer_link(s, slot, COOP_T_ERROR, payload, k);
+        s->who[slot] = 0;
+        s->slot_of[id] = 0;
+        return;
+    }
+    memcpy(s->gone[id - 1].token, j.token, COOP_COOKIE_LEN);   /* (what it answers with if it is the one that left) */
+    s->gone[id - 1].session = c->session;
+    s->gone[id - 1].until = 0;
+    host_roster(s, &j.roster);
+    CoopMemberInfo *mine = NULL;
+    for (int i = 0; i < j.roster.n; i++)
+        if (j.roster.m[i].id == id) mine = &j.roster.m[i];
+    if (mine) {
+        mine->session = c->session;
+        copy_str(mine->name, sizeof mine->name, c->name);
+        mine->flags = 0;
+    }
+    uint8_t payload[COOP_MAX_PAYLOAD];
+    size_t k = coop_joined_pack(payload, sizeof payload, &j);
+    if (k) send_slot(s, slot, COOP_T_JOINED, s->room, (uint8_t)s->self, (uint8_t)id, payload, k, s->locator);
+    say(s, "%s joined the room as member %u", c->name, id);
+    coop_lock(&s->lock);
+    s->heard_at[id] = 0;
+    coop_unlock(&s->lock);
+    publish_roster(s);   // everyone hears who joined
 }
 
 // ---- reliable events and the consent owner's session-bound bindings
@@ -835,16 +1106,32 @@ static int window_below(Window *w, uint32_t counter) {
     return 1;
 }
 
-// The answers to a CONNECT: the attempt's nonce and the locator's tag.
+// The answers to a CONNECT carry this attempt's nonce. Before this game holds the room's secret they carry no tag at
+// all — a host answers a link it has just accepted before that link can prove anything — and after it they carry the
+// room's tag, so an answer is one this host could have made.
 static int answer_ok(CoopSess *s, const uint8_t *d, size_t n, uint64_t nonce) {
-    if (nonce != s->nonce || !coop_dgram_verify(d, n, s->locator)) {
+    if (nonce != s->nonce) {
+        s->n_dup++, bump(&s->n_lost);
+        return 0;
+    }
+    if (!s->have_secret) {
+        if (!coop_dgram_tag_zero(d)) {
+            s->n_bad_tag++, bump(&s->n_lost);
+            return 0;
+        }
+        return 1;
+    }
+    if (!coop_dgram_verify(d, n, s->locator)) {
         s->n_bad_tag++, bump(&s->n_lost);
         return 0;
     }
     return 1;
 }
 
-// The on_* handlers return 1 for a datagram that passed its checks and made sense: only those show the relay is there.
+// The on_* handlers return 1 for a frame that passed its checks and made sense: only those show the host is there.
+
+// CHALLENGE and ROOM come together as the answer to the first CONNECT of a link: a cookie to carry back, and the
+// host's room key.
 static int on_challenge(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, const uint8_t *p, uint64_t now) {
     uint64_t nonce;
     uint8_t cookie[COOP_COOKIE_LEN];
@@ -852,13 +1139,34 @@ static int on_challenge(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *
     if (!answer_ok(s, d, n, nonce)) return 0;
     memcpy(s->cookie, cookie, COOP_COOKIE_LEN);
     s->have_cookie = 1;
-    s->heard_relay = 1;
+    s->heard_host = 1;
     if (!s->said_answer) {
         s->said_answer = 1;
-        say(s, "the relay answered in %u ms", (unsigned)(now - s->last_connect_tx));
-        TRACE(s, "the relay is at %s", s->relay_text);
+        say(s, "the host answered in %u ms", (unsigned)(now - s->last_connect_tx));
+        TRACE(s, "the host is at %s", s->host_text);
     }
     send_connect(s, now);   // the CONNECT with the cookie, at once
+    return 1;
+}
+
+// ROOM: the host's secret, which is how a joiner gets into its room. Its next CONNECT carries the keys made from it,
+// and only then does the host give out a member id.
+static int on_room(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, const uint8_t *p, uint64_t now) {
+    uint64_t nonce;
+    char secret[COOP_SECRET_LEN + 1];
+    if ((s->state != COOP_CONNECTING && s->state != COOP_RECONNECTING) || !coop_room_parse(p, h->len, &nonce, secret)) return 0;
+    if (nonce != s->nonce || !coop_dgram_tag_zero(d)) {   // (an answer to this attempt, and never one to be forged)
+        s->n_bad_tag++, bump(&s->n_lost);
+        return 0;
+    }
+    memcpy(s->want, secret, sizeof s->want);
+    coop_room_keys(s->want, s->locator, s->msg_key);
+    s->have_secret = 1;
+    s->heard_host = 1;
+    s->burst_left = 0;
+    s->next_tx = now;   // the CONNECT with the room's keys goes now
+    char label[8];
+    say(s, "the host is in room %s", label_of(secret, label));
     return 1;
 }
 
@@ -869,14 +1177,13 @@ static int on_joined(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, 
         s->n_malformed++, bump(&s->n_lost);
         return 0;
     }
-    if (!answer_ok(s, d, n, j.nonce)) return 0;   // the room asked for (our locator), this attempt (our nonce)
-    int rejoined = s->state == COOP_RECONNECTING;
+    if (!answer_ok(s, d, n, j.nonce)) return 0;   // this room (its locator), this attempt (our nonce)
+    const int rejoined = s->state == COOP_RECONNECTING;
     s->room = h->room;
     s->self = j.member;
     memcpy(s->secret, s->want, sizeof s->secret);
     memcpy(s->token, j.token, COOP_COOKIE_LEN);
     s->have_token = 1;
-    if (!rejoined) s->made_room = s->intent == COOP_INTENT_CREATE;   // this session's own creation, not the relay's mark
     s->room_session = s->session;
     apply_roster(s, &j.roster);   // after a rejoin: against the roster before it, so a member whose session is the same stays as it was
     s->roster_seq = h->seq;
@@ -887,111 +1194,109 @@ static int on_joined(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, 
     char label[8];
     label_of(s->secret, label);
     if (rejoined) say(s, "rejoined room %s as member %u", label, s->self);
-    else if (s->intent == COOP_INTENT_CREATE) say(s, "room %s created (member %u)", label, s->self);
-    else say(s, "joined room %s as member %u", label, s->self);
+    else say(s, "joined room %s as member %u of %d", label, s->self, j.roster.n);
     set_state(s, COOP_JOINED);
     set_status(s, "%s", "");
     s->dirty = 1;
     return 1;
 }
 
+// Why the host would not take this player. A host says so in the few words an ERROR carries; a room that ended while
+// this player was in it (the host left, or its game closed) is not something a player can wait out, so a session that
+// was told to keep its room (HOS_COOP_AUTO) keeps asking for it and the rest leave.
 static void refused(CoopSess *s, uint8_t reason, uint64_t now) {
-    char label[8];
-    label_of(s->want, label);
     switch (reason) {
     case COOP_E_NO_ROOM:
-        if (s->state == COOP_RECONNECTING) {   // the relay lost the room: a restart
-            say(s, "room %s is gone from the relay", label);
-            if (!s->retry) go_left(s, "the room is closed", 0);
-            else if (s->made_room) {
-                say(s, "creating room %s again", label);
-                if (begin_episode(s, COOP_INTENT_CREATE, s->want, 0, now)) set_status(s, "the room was lost; creating it again");
-            } else if (begin_episode(s, COOP_INTENT_JOIN, s->want, 0, now)) {
-                set_status(s, "the room was lost; waiting for it");
-            }
-        } else if (s->retry) {   // not made yet, perhaps: wait and ask again
-            s->heard_relay = 1;
-            set_status(s, "room %s not found; waiting for it", label);
-            if (s->burst_left || now >= s->next_tx) {   // the first answer of a burst ends it; a CONNECT sent twice is answered twice
-                s->burst_left = 0;
-                schedule_backoff(s, now);
-                // each question asks the relay for one of the network's joins: at most one every NO_ROOM_WAIT_MS, so
-                // that players behind one address who wait for a room leave joins for the others (the same attempt
-                // asked again costs nothing at the relay)
-                if (s->next_tx < now + NO_ROOM_WAIT_MS) s->next_tx = now + NO_ROOM_WAIT_MS;
-            }
+        if (s->retry) {
+            s->heard_host = 1;
+            s->burst_left = 0;
+            set_status(s, "that game is not hosting a room; waiting for it");
+            if (s->next_tx < now + s->backoff_max_ms) s->next_tx = now + s->backoff_max_ms;
         } else {
-            go_left(s, "no such room", 1);
+            go_left(s, "that game is not hosting a room", 1);
         }
         break;
     case COOP_E_ROOM_FULL: go_left(s, "the room is full", 1); break;
-    case COOP_E_PROTO: go_left(s, "update required: the relay speaks another protocol version", 1); break;
-    case COOP_E_RATE:
-        if (s->retry) {   // a session that keeps its room waits until the network's joins are back, and stays
-            if (s->next_tx < now + RATE_WAIT_MS) {
-                say(s, "the relay refused: too many joins from this network; trying again in a minute");
-                s->next_tx = now + RATE_WAIT_MS;
-            }
-            s->heard_relay = 1, s->burst_left = 0;
-            set_status(s, "too many joins from this network; trying again in a minute");
-        } else {
-            go_left(s, "too many joins from this network; try again in a minute", 1);
-        }
-        break;
-    case COOP_E_ROOM_EXISTS:
-        if (s->retry && s->intent == COOP_INTENT_CREATE) {
-            // a session that keeps its room (coop_auto): someone made the room again first after the relay lost it, or
-            // it is open already. Joining it keeps the player in the room they meant; the rules stay the ones the
-            // players accepted, since a game takes them only signed by the maker it pinned (coop_state.h)
-            say(s, "room %s is open already; joining it", label);
-            if (begin_episode(s, COOP_INTENT_JOIN, s->want, 0, now)) set_status(s, "the room is open already; joining it");
-        } else {
-            go_left(s, "a room with this secret is already open on the relay: join it", 1);
-        }
-        break;
+    case COOP_E_PROTO: go_left(s, "update required: that game speaks another co-op version", 1); break;
+    case COOP_E_BAD_TAG: go_left(s, "the host does not know this room key", 1); break;
     case COOP_E_REMOVED: go_left(s, "the room's maker removed this player", 1); break;
-    case COOP_E_SESSION_USED:
-        if (s->retry) {   // someone sent this attempt's CONNECT first (seen on the way): a new attempt, a new session
-            say(s, "the relay saw this session in the room before (a replay on the way?); trying again with a new one");
-            int rejoin = s->state == COOP_RECONNECTING;
-            if (begin_episode(s, s->intent, s->want, rejoin, now)) s->next_tx = now + NO_ROOM_WAIT_MS;
-        } else {
-            go_left(s, "the relay saw this session in the room before (a replay on the way?)", 1);
-        }
+    case COOP_E_SERVER_FULL: go_left(s, "that game cannot take another player", 1); break;
+    case COOP_E_SESSION_USED:   // its own session listed in the room before: a new attempt with a new one
+        say(s, "the host saw this session in the room before; trying again with a new one");
+        if (begin_episode(s, s->want, s->state == COOP_RECONNECTING, now)) s->next_tx = now + s->backoff_max_ms;
         break;
-    default: go_left(s, "the relay refused", 1); break;
+    default: go_left(s, "the host refused", 1); break;
     }
 }
 
 static int on_error(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, const uint8_t *p, uint64_t now) {
-    int connecting = s->state == COOP_CONNECTING || s->state == COOP_RECONNECTING;
+    const int connecting = s->state == COOP_CONNECTING || s->state == COOP_RECONNECTING;
     CoopError e;
     if (!coop_error_parse(p, h->len, &e)) {
         s->n_malformed++, bump(&s->n_lost);
         return 0;
     }
-    // an answer to this attempt; in a room, only a removal (nonce 0, the room's tag). A removal in the room never
-    // arrives (it carries nonce 0, never this attempt's), and must not be taken by accepting nonce 0: anyone who saw a
-    // CONNECT can tag a datagram with its locator. The maker's removal shows as the member leaving the roster instead.
-    if (connecting ? !answer_ok(s, d, n, e.nonce) : s->state != COOP_JOINED || e.reason != COOP_E_REMOVED || h->room != s->room ||
-                                                        !answer_ok(s, d, n, 0))
+    // An answer to this attempt carries its nonce; in a room the only ERROR a host sends is a removal, which carries
+    // none and is tagged with the room's locator. A removal is what the maker's KICK becomes: the member's link ends
+    // and the roster says who is left, so this is the reason the link says rather than a message that has to arrive.
+    if (connecting ? !answer_ok(s, d, n, e.nonce)
+                   : s->state != COOP_JOINED || e.reason != COOP_E_REMOVED || h->room != s->room || !answer_ok(s, d, n, 0))
         return 0;
     refused(s, e.reason, now);
     return 1;
 }
 
-// This player's own line lists another session: join again to take the place back, at most once per backoff_max_ms,
-// so that rosters from someone on the path cannot use up the network's joins; a later one waits for its turn (timers).
+// This player's own line lists another session: someone else's CONNECT reached this host with this player's token
+// (its address read on the way, say). Join again to take the place back, at most once per backoff_max_ms; a later one
+// waits for its turn (timers).
 static void roster_rejoin(CoopSess *s, uint64_t now) {
     if (s->roster_rejoin_at && now - s->roster_rejoin_at < s->backoff_max_ms) return;
     s->roster_rejoin_at = now ? now : 1;
-    say(s, "the relay lists another session for this player; joining the room again");
-    begin_episode(s, COOP_INTENT_JOIN, s->want, 1, now);
+    say(s, "the host lists another session for this player; joining again");
+    begin_episode(s, s->want, 1, now);
+}
+
+// The host's roster replaces ours; the log tells who came, went, changed name or went away. 1 when this player's own
+// line lists another session than its own: someone reached the host with this player's token, and the session joins
+// again to take the place back (roster_rejoin).
+static int apply_roster(CoopSess *s, const CoopRoster *r) {
+    int taken = 0;
+    for (int i = 0; i < r->n; i++) {
+        const CoopMemberInfo *m = &r->m[i], *old = member_of(s, m->id);
+        if (m->id == s->self) {   // this session's own line: the host's maker mark is not taken for it (start_hosting)
+            taken = m->session != s->session;
+            continue;
+        }
+        if (!old) say(s, "%s (member %u) joined the room", m->name, m->id);
+        else if (strcmp(old->name, m->name)) say(s, "member %u is now %s", m->id, m->name);
+        else if ((old->flags ^ m->flags) & COOP_FLAG_AWAY)
+            say(s, "%s (member %u) %s", m->name, m->id, m->flags & COOP_FLAG_AWAY ? "is away" : "is back");
+        // a new member, or a new session of it: nothing heard from it yet. Its replay window stays: a window belongs to
+        // one session (window_check takes another session as new), so the same session, listed again after this player
+        // joined again, keeps refusing what it already delivered
+        if (!old || old->session != m->session) {
+            coop_lock(&s->lock);
+            s->heard_at[m->id] = 0;
+            coop_unlock(&s->lock);
+        }
+    }
+    for (int j = 0; j < s->roster.n; j++) {
+        int id = s->roster.m[j].id, found = 0;
+        for (int i = 0; i < r->n; i++) found |= r->m[i].id == id;
+        if (found) continue;
+        say(s, "%s (member %u) left the room", s->roster.m[j].name, id);
+        coop_lock(&s->lock);
+        s->heard_at[id] = 0;
+        coop_unlock(&s->lock);
+    }
+    s->roster = *r;
+    s->dirty = 1;
+    return taken;
 }
 
 static int on_roster(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, const uint8_t *p, uint64_t now) {
     CoopRoster r;
-    if (s->state != COOP_JOINED || h->room != s->room) return 0;
+    if (s->hosting || s->state != COOP_JOINED || h->room != s->room) return 0;
     if (!coop_dgram_verify(d, n, s->locator)) {
         s->n_bad_tag++, bump(&s->n_lost);
         return 0;
@@ -1000,12 +1305,12 @@ static int on_roster(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, 
         s->n_malformed++, bump(&s->n_lost);
         return 0;
     }
-    // a later roster, up to ROSTER_AHEAD past the last one: anyone who saw a CONNECT can tag one, and a number far
-    // ahead would make every roster of the relay after it look old. An older one arriving late is dropped, unless no
-    // roster was taken for a while (the relay sends one every few seconds): then the last one's number was not the
-    // relay's
-    int32_t ahead = (int32_t)(h->seq - s->roster_seq);
-    int stale = now - s->roster_at >= (uint64_t)s->silence_ms + ROSTER_STALE_MS;
+    // A later roster, up to ROSTER_AHEAD past the last one: a player that recorded one and sends it again, with a
+    // number far ahead, would make every roster the host sends after it look old. An older one arriving late is
+    // dropped, unless no roster was taken for a while (the host sends one every few seconds): then the last one's
+    // number was not the host's.
+    const int32_t ahead = (int32_t)(h->seq - s->roster_seq);
+    const int stale = now - s->roster_at >= (uint64_t)s->silence_ms + ROSTER_STALE_MS;
     if ((ahead > 0 && ahead <= ROSTER_AHEAD) || (stale && ahead)) {
         s->roster_seq = h->seq, s->roster_at = now;
         s->own_taken = apply_roster(s, &r);
@@ -1016,12 +1321,12 @@ static int on_roster(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, 
 
 static int on_pong(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, const uint8_t *p, uint64_t now) {
     uint32_t token;
-    if (s->state != COOP_JOINED || h->room != s->room || !coop_u32_parse(p, h->len, &token)) return 0;
+    if (s->hosting || s->state != COOP_JOINED || h->room != s->room || !coop_u32_parse(p, h->len, &token)) return 0;
     if (!coop_dgram_verify(d, n, s->locator)) {
         s->n_bad_tag++, bump(&s->n_lost);
         return 0;
     }
-    uint32_t rtt = (uint32_t)now - token;
+    const uint32_t rtt = (uint32_t)now - token;
     if (rtt <= 60000) {   // a token of ours
         coop_lock(&s->lock);
         s->view.ping_ms = rtt ? rtt : 1;
@@ -1030,6 +1335,7 @@ static int on_pong(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, co
     return 1;
 }
 
+// A player message, from either side: the room's, of a session the roster names for its sender, once.
 static int on_data(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, const uint8_t *p, uint64_t now) {
     (void)d, (void)n;
     if (s->state != COOP_JOINED || h->room != s->room) return 0;
@@ -1075,7 +1381,97 @@ static int on_data(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, co
     return 1;
 }
 
-static void handle_datagram(CoopSess *s, size_t n, const CoopAddr *from, uint64_t now) {
+// (hosting) The frame goes on to every other member it is for, as it came: the host carries what it cannot read.
+static void forward_frame(CoopSess *s, int from_member, const uint8_t *frame, size_t n) {
+    for (int id = 1; id <= COOP_MAX_MEMBERS; id++) {
+        if (id == from_member || !s->slot_of[id]) continue;
+        CoopTcp *t = coop_tcp_at(s->link, s->slot_of[id]);
+        if (t && coop_tcp_send(t, frame, n)) bump(&s->n_tx);
+    }
+}
+
+// (hosting) A room is a name, a roster and a port: what a player may say on its link is a CONNECT (who I am), a DATA
+// (what I have to say, which goes on to the others), a PING, and LEAVE. Everything else a member sends is out of its
+// place: only the host says who is in the room, and a member cannot make a JOINED, a ROSTER or a ROOM for itself.
+static int host_frame(CoopSess *s, int slot, const uint8_t *d, size_t n, const CoopHdr *h, const uint8_t *p, uint64_t now) {
+    const int member = s->who[slot];
+    if (!member) {   // a link that is still handshaking
+        if (h->type != COOP_T_CONNECT) return 0;
+        CoopConnect c;
+        if (!coop_connect_parse(p, h->len, &c)) {
+            s->n_malformed++, bump(&s->n_lost);
+            return 0;
+        }
+        if (c.intent != COOP_INTENT_JOIN) return 0;
+        int at = -1;
+        for (int i = 0; i < (int)(sizeof s->pend / sizeof s->pend[0]); i++)
+            if (s->pend[i].slot == slot) at = i;
+        if (at < 0) {   // its first CONNECT: here is the cookie to carry back, and the room
+            if ((int)(sizeof s->pend / sizeof s->pend[0]) <= pending_count(s)) return 0;   // (no room to answer it in)
+            at = pending_add(s, slot, c.nonce, now);
+            if (at < 0) return 0;
+            uint8_t payload[128];
+            size_t k = coop_challenge_pack(payload, sizeof payload, c.nonce, s->pend[at].cookie);
+            if (k) answer_link(s, slot, COOP_T_CHALLENGE, payload, k);
+            k = coop_room_pack(payload, sizeof payload, c.nonce, s->secret);
+            if (k) answer_link(s, slot, COOP_T_ROOM, payload, k);
+            return 1;
+        }
+        if (c.nonce != s->pend[at].nonce) return 0;   // not the attempt this link is answering
+        // The second CONNECT carries the cookie back and the keys made from the room the host named. A player that was
+        // in the room already says as much in its first CONNECT, which is why a rejoin needs no exchange.
+        const int proved = coop_dgram_verify(d, n, s->locator) && !memcmp(c.locator, s->locator, COOP_KEY_LEN) &&
+                           !memcmp(c.cookie, s->pend[at].cookie, COOP_COOKIE_LEN);
+        if (!proved) {
+            CoopError e = {.reason = COOP_E_BAD_TAG, .nonce = c.nonce};
+            copy_str(e.text, sizeof e.text, "that is not the key of this room");
+            size_t k = coop_error_pack(payload_of(s), COOP_MAX_PAYLOAD, &e);   // (see refuse_link below)
+            (void)k;
+            return 0;
+        }
+        take_member(s, slot, &c, now);
+        return 1;
+    }
+    switch (h->type) {
+    case COOP_T_CONNECT: {   // who I am, again: the Co-op tab changed this player's name
+        CoopConnect c;
+        const CoopMemberInfo *m = member_of(s, member);
+        if (!coop_connect_parse(p, h->len, &c) || !m || c.session != m->session || !coop_dgram_verify(d, n, s->locator)) {
+            s->n_sender++, bump(&s->n_lost);
+            return 0;
+        }
+        if (!strcmp(c.name, m->name)) return 1;
+        CoopRoster r = s->roster;
+        for (int i = 0; i < r.n; i++)
+            if (r.m[i].id == member) copy_str(r.m[i].name, sizeof r.m[i].name, c.name);
+        publish_rooms(s, &r);
+        return 1;
+    }
+    case COOP_T_DATA:
+        if (h->src != member) {   // a member cannot speak as another
+            s->n_sender++, bump(&s->n_lost);
+            SAY_LIMITED(s, L_SENDER, now, "member %d sent a message as member %u: thrown away", member, h->src);
+            return 0;
+        }
+        if (h->room == s->room && (h->dst == COOP_DST_ALL || member_of(s, h->dst))) forward_frame(s, member, d, n);
+        return on_data(s, d, n, h, p, now);
+    case COOP_T_PING: {
+        uint8_t token[4];
+        size_t k = coop_u32_pack(token, sizeof token, (uint32_t)now);
+        if (k) send_slot(s, slot, COOP_T_PONG, s->room, (uint8_t)s->self, (uint8_t)member, token, k, s->locator);
+        return 1;
+    }
+    case COOP_T_LEAVE:
+        end_link(s, slot, "left the room");
+        return 1;
+    default:
+        s->n_malformed++, bump(&s->n_lost);
+        return 0;
+    }
+}
+
+// What a link says, from either side: the host's own room, or the host's answers on the one link this game has.
+static void handle_frame(CoopSess *s, int slot, size_t n, uint64_t now) {
     if (s->drop_pct && rnd(s) % 100 < s->drop_pct) {
         s->n_test_drop++;
         return;
@@ -1084,38 +1480,42 @@ static void handle_datagram(CoopSess *s, size_t n, const CoopAddr *from, uint64_
     const uint8_t *p;
     if (!coop_dgram_parse(s->rx, n, &h, &p)) {
         s->n_malformed++, bump(&s->n_lost);
-        SAY_LIMITED(s, L_MALFORMED, now, "a datagram that is not a co-op datagram was thrown away");
-        return;
-    }
-    if (!s->relay_known || !coop_addr_eq(from, &s->relay)) {   // only the relay talks to us
-        s->n_sender++, bump(&s->n_lost);
-        SAY_LIMITED(s, L_SENDER, now, "a datagram from an address that is not the relay was thrown away");
+        SAY_LIMITED(s, L_MALFORMED, now, "a frame that is not a co-op frame was thrown away, and the link with it");
+        end_link(s, slot, "sent something that is not a co-op frame");
         return;
     }
     if (h.ver != COOP_PROTO) {
-        // a relay of another version answers a CONNECT with an untagged ERROR it cannot word in our format: taken only
-        // as the first answer of an attempt, so a stray one does not end a session
-        if (h.type == COOP_T_ERROR && coop_dgram_tag_zero(s->rx) && !s->heard_relay &&
+        // A game of another co-op version: it answers a CONNECT with an ERROR it cannot word in our format, taken only
+        // as the first answer of an attempt so that a stray frame does not end a session.
+        if (!s->hosting && h.type == COOP_T_ERROR && coop_dgram_tag_zero(s->rx) && !s->heard_host &&
             (s->state == COOP_CONNECTING || s->state == COOP_RECONNECTING)) {
             bump(&s->n_rx);
             refused(s, COOP_E_PROTO, now);
+        } else {
+            s->n_sender++, bump(&s->n_lost);
+            end_link(s, slot, "speaks another co-op version");
         }
         return;
     }
-    TRACE(s, "rx %s, %u bytes", type_name(h.type), (unsigned)n);
-    int ok = 0;
-    switch (h.type) {
+    TRACE(s, "rx %s from link %d, %u bytes", type_name(h.type), slot, (unsigned)n);
+    int ok;
+    if (s->hosting) ok = host_frame(s, slot, s->rx, n, &h, p, now);
+    else switch (h.type) {
     case COOP_T_CHALLENGE: ok = on_challenge(s, s->rx, n, &h, p, now); break;
+    case COOP_T_ROOM: ok = on_room(s, s->rx, n, &h, p, now); break;
     case COOP_T_JOINED: ok = on_joined(s, s->rx, n, &h, p, now); break;
     case COOP_T_ERROR: ok = on_error(s, s->rx, n, &h, p, now); break;
     case COOP_T_ROSTER: ok = on_roster(s, s->rx, n, &h, p, now); break;
     case COOP_T_PONG: ok = on_pong(s, s->rx, n, &h, p, now); break;
     case COOP_T_DATA: ok = on_data(s, s->rx, n, &h, p, now); break;
-    default: break;
+    default:
+        s->n_malformed++, bump(&s->n_lost);
+        ok = 0;
+        break;
     }
     if (ok) {
         bump(&s->n_rx);
-        s->last_rx = now;   // a datagram the relay made: it is there
+        s->last_rx = now;   // a frame the host made: the host is there
     }
 }
 

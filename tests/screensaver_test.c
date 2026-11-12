@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 /* All APIs are mocks: no window, screen saver, security or power setting is accessed. */
 #include <stdint.h>
 #include <stdio.h>

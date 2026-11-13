@@ -23,7 +23,7 @@
 //    removed member or a copied identity changes nothing, and the rules' key is pinned. Answers are fair.
 // 7. Random bytes into the receiver.
 // 8. The third review: flags only from keys the player accepted, a drain the maker's restarted game undoes, identity
-//    replays, the relay's maker mark against the members' rules, signed names, failed signatures, own pool records
+//    replays, the host's maker mark against the members' rules, signed names, failed signatures, own pool records
 //    after the room came back, removals that stay.
 // 9. The fourth review: records with the lowest base, pools that follow the player's own acceptance, two resets, ended
 //    sessions per key, forged rosters, what a contributor took per pool.
@@ -70,9 +70,9 @@ typedef struct {
 
 typedef struct {
     int id;                         // member id
-    int made;                       // it made the room: the relay names it the maker
+    int made;                       // it made the room: the host marks it the maker
     int ask;                        // its player accepts nothing by itself (else every offer, as coop_accept = always)
-    uint64_t session;               // its session in the room (the relay's roster lists it)
+    uint64_t session;               // its session in the room (the host's roster lists it)
     uint64_t client;                // its start's random value (the seed of its keys)
     CoopSync *eng;
     Flag f[MAX_FLAGS];
@@ -263,7 +263,7 @@ static void net_flush(Net *net, uint64_t now) {
     }
 }
 
-// Every present game hears the roster: who is there, and the maker the relay names (a present game that made the room).
+// Every present game hears the roster: who is there, and the maker the host marks (a present game that made the room).
 static void net_roster(Net *net, const char *code, uint64_t now) {
     int ids[MAX_PLAYERS], n = 0, maker = 0;
     uint64_t sessions[MAX_PLAYERS];
@@ -981,7 +981,7 @@ static void check_identities(void) {
     coop_sync_offer(b.eng, &o, now);
     CHECK(o.token && !o.accepted && !coop_sync_open(b.eng), "identity: a removed player back under its name with a new key is a new offer (accepted %d)",
           o.accepted);
-    // the same key back in a new session (the relay would refuse it; a hostile relay might not): removed, ignored
+    // the same key back in a new session (the host would not list it twice; a hostile one might): removed, ignored
     m.session ^= 0x10, m.id = 5;
     net.games[2] = &m, net.present[2] = 1;
     coop_sync_name(m.eng, "P3");
@@ -1124,8 +1124,8 @@ static void check_save_switch(void) {
     printf("coop-sync-test: sync save switch: another save in the room is a new offer and a new copy\n");
 }
 
-// The rules' key is pinned when the player accepts: a member the relay marks as the maker later (a restart, a hostile
-// relay) changes nothing, the maker's own changes still hold, and a newcomer takes nobody's rules while the members
+// The rules' key is pinned when the player accepts: a member the host marks as the maker later (a new room, a hostile
+// host) changes nothing, the maker's own changes still hold, and a newcomer takes nobody's rules while the members
 // disagree about who made the room.
 static void check_maker_pinned(void) {
     Net net = {0}, alone = {0};
@@ -1135,11 +1135,11 @@ static void check_maker_pinned(void) {
     defaults(&b, 0);
     net.games[0] = &a, net.games[1] = &b, net.present[0] = net.present[1] = 1;
     uint64_t now = run(&net, (net_roster(&net, "PIN001", 1000), 1000), 3000);
-    // H made the room for itself while the relay had lost it, with rupees pooled
+    // H made the room for itself while no roster listed it, with rupees pooled
     settings(&h, 1, COOP_MODE_SHARED, COOP_MODE_POOL, COOP_MODE_POOL, COOP_MODE_POOL, COOP_MODE_SHARED);
     alone.games[0] = &h, alone.present[0] = 1;
     now = run(&alone, (net_roster(&alone, "PIN001", now), now), 2000);
-    // the relay marks H as the maker of the room A and B are in
+    // the host marks H as the maker of the room A and B are in
     a.made = 0;
     net.games[2] = &h, net.present[2] = 1;
     now = run(&net, (net_roster(&net, "PIN001", now), now), 4000);
@@ -1148,13 +1148,13 @@ static void check_maker_pinned(void) {
     CoopOffer o;
     coop_sync_offer(b.eng, &o, now);
     CHECK(rb.mode[COOP_CAT_RUPEES] == COOP_MODE_OWN && rb.maker == 1 && o.maker_moved,
-          "maker: a member the relay marks later cannot change the rules (rupees %s, from member %d, moved %d)", coop_mode_name(rb.mode[COOP_CAT_RUPEES]),
+          "maker: a member the host marks later cannot change the rules (rupees %s, from member %d, moved %d)", coop_mode_name(rb.mode[COOP_CAT_RUPEES]),
           rb.maker, o.maker_moved);
     settings(&a, 0, COOP_MODE_SHARED, COOP_MODE_POOL, COOP_MODE_OWN, COOP_MODE_POOL, COOP_MODE_SHARED);   // A pools ammunition
     now = run(&net, now, 3000);
     coop_sync_rules(b.eng, &rb);
     CHECK(rb.mode[COOP_CAT_AMMO] == COOP_MODE_POOL && rb.mode[COOP_CAT_RUPEES] == COOP_MODE_OWN,
-          "maker: the maker's key still changes the rules without the relay's mark (ammo %s)", coop_mode_name(rb.mode[COOP_CAT_AMMO]));
+          "maker: the maker's key still changes the rules without the host's mark (ammo %s)", coop_mode_name(rb.mode[COOP_CAT_AMMO]));
     // A leaves; D joins while H carries its own rules and B the maker's
     net.present[0] = 0, h.made = 0;
     d.ask = 1;
@@ -1428,7 +1428,7 @@ static void check_h3_drain(void) {
     // M leaves, and so does the maker's game
     net.present[2] = 0, net.present[0] = 0;
     now = run(&net, (net_roster(&net, "H3F2", now), now), 3000);
-    // the maker's game starts again: a new engine and session, the room's key from the profile; the relay marks nobody
+    // the maker's game starts again: a new engine and session, the room's key from the profile; the host marks nobody
     game_init(&a2, 1, 0x3204);
     coop_sync_room_seed(a2.eng, "H3F2", maker_seed);
     defaults(&a2, 0);
@@ -1476,8 +1476,8 @@ static void check_h3_drain(void) {
 
 // Finding 4: an identity of a session that ended is not taken again, after any number of other sessions or a room lost.
 // A session ends when its member's identity in its next session names it (from the fifth review on: a roster that
-// leaves the member out, or a relay that says the room is gone, ends nothing by itself, since anyone on the path can
-// send those), so B joins again before each replay.
+// leaves the member out, or a roster that says the room is gone, ends nothing by itself, since whoever holds the secret
+// can send those), so B joins again before each replay.
 static Packet capture_digest(Game *g, uint64_t at) {   // g's digest as its engine sends it at that time
     Net cap = {0};
     cap.sending = g->id;
@@ -1540,7 +1540,7 @@ static void check_h3_replay(void) {
     printf("coop-sync-test: sync replay: an identity of a session that ended is never taken again\n");
 }
 
-// Finding 5: the relay's mark gives no rules that the members' charters contradict, and a game's own mark is not taken
+// Finding 5: the host's mark gives no rules that the members' charters contradict, and a game's own mark is not taken
 // for its own creation.
 static void check_h3_mark(void) {
     Net net = {0};
@@ -1549,7 +1549,7 @@ static void check_h3_mark(void) {
     defaults(&a, 1), defaults(&b, 0);
     net.games[0] = &a, net.games[1] = &b, net.present[0] = net.present[1] = 1;
     uint64_t now = run(&net, (net_roster(&net, "H3F5", 1000), 1000), 3000);
-    // A is gone; H made the room again (the relay marks it) and signs rules of its own
+    // A is gone; H made the room again (the host marks it) and signs rules of its own
     net.present[0] = 0;
     defaults(&h, 1), h.ask = 1;
     net.games[2] = &h, net.present[2] = 1;
@@ -1569,7 +1569,7 @@ static void check_h3_mark(void) {
     game_free(&a), game_free(&b), game_free(&h), game_free(&n);
     free(net.q);
 
-    // a hostile relay marks the newcomer X as the maker in X's own roster
+    // a hostile host marks the newcomer X as the maker in X's own roster
     Net n2 = {0};
     Game p, q, x;
     game_init(&p, 1, 0x3511), game_init(&q, 2, 0x3512), game_init(&x, 3, 0x3513);
@@ -1584,11 +1584,11 @@ static void check_h3_mark(void) {
     now = run(&n2, now, 6000);
     CoopRules rx;
     coop_sync_rules(x.eng, &rx);
-    CHECK(rx.epoch && rx.maker == 1, "F5: a newcomer the relay marks in its own roster takes the maker's rules, not its own (epoch %u, by %d)", rx.epoch,
+    CHECK(rx.epoch && rx.maker == 1, "F5: a newcomer the host marks in its own roster takes the maker's rules, not its own (epoch %u, by %d)", rx.epoch,
           rx.maker);
     game_free(&p), game_free(&q), game_free(&x);
     free(n2.q);
-    printf("coop-sync-test: sync mark: the relay's maker mark gives no rules the members' charters contradict\n");
+    printf("coop-sync-test: sync mark: the host's maker mark gives no rules the members' charters contradict\n");
 }
 
 // Findings 6 and 8: a signed name is shown cleaned; identities and charters that fail their check are not checked twice
@@ -1664,7 +1664,7 @@ static void check_h3_own_records(void) {
     flag_of(&y, KEYS_FOREST)->value += 1;
     int caught = catch_record(&net, &y, KEYS_FOREST, &now, old);
     for (int i = 0; i < 3; i++) flag_of(&y, KEYS_FOREST)->value += 1, now = run(&net, now, 2000);
-    // the relay lost the room; Y is back in it, and Z (identified to Y first) hands Y its own old record before the
+    // the room was lost; Y is back in it, and Z (identified to Y first) hands Y its own old record before the
     // room's records arrive
     coop_sync_room(y.eng, "", 0, NULL, NULL, 0, 0, now);
     net_roster(&net, "H3F10", now += 8);
@@ -1959,7 +1959,7 @@ static void check_h4_forged_roster(void) {
     int ids[3] = {1, 2, 3};
     uint64_t forged[3] = {a.session, b.session ^ 0xF00D, c.session}, real[3] = {a.session, b.session, c.session};
     coop_sync_room(c.eng, "H4F4", 3, ids, forged, 3, 1, now += 8);   // someone on the path: another session for B
-    coop_sync_room(c.eng, "H4F4", 3, ids, real, 3, 1, now += 8);     // the relay's roster again
+    coop_sync_room(c.eng, "H4F4", 3, ids, real, 3, 1, now += 8);     // the host's roster again
     now = run(&net, now, 3000);
     CoopOffer o;
     coop_sync_offer(c.eng, &o, now);
@@ -2019,8 +2019,8 @@ static void check_h4_spent(void) {
 //
 // One seed is one room: three honest games, two hostile members who hold the secret and are admitted by the maker when
 // its player accepts everything (else nobody's accepts them), and an attacker who holds the secret but no key anyone
-// accepted: whoever runs the relay knowing the secret, or a sender on a player's network that can send from the
-// relay's address. The hostile members send every signed record and flag the wire format allows, with extreme and
+// accepted: whoever reaches the host's port holding the secret: the host itself, or a player the host admitted
+// with it. The hostile members send every signed record and flag the wire format allows, with extreme and
 // random values, charters signed with their own keys, and their own games' counters at the extremes. The attacker
 // sends sections in another member's name; rosters that leave a member out, list another session or an earlier one
 // for it, or list a member nobody is; what the honest games sent before (their identities and sections, of their
@@ -2349,7 +2349,7 @@ static void adv_save(Adv *a, Game *g) {   // the counters of a save
 
 static void adv_roster(Adv *a) { net_roster(&a->net, a->code, a->now); }
 
-// The room as the relay lists it now: ids, sessions, the maker.
+// The room as the host's roster lists it now: ids, sessions, the maker.
 static int adv_list(Adv *a, int *ids, uint64_t *sess, int *maker) {
     int n = 0;
     *maker = 0;
@@ -2527,7 +2527,7 @@ static void adv_forge_section(Adv *a) {
 }
 
 // A roster at one honest game: a member left out, a session nobody holds for one, an earlier session of one, or a
-// member nobody is; the relay's own roster comes back after a while.
+// member nobody is; the host's own roster comes back after a while.
 static void adv_forge_roster(Adv *a) {
     int k = (int)adv_below(a, ADV_H), ids[MAX_PLAYERS + 1], maker;
     uint64_t sess[MAX_PLAYERS + 1];
@@ -2845,7 +2845,7 @@ static int adv_run(uint64_t seed) {
             const CoopOfferMember *x = offer_member(&o, a->h[k].id);
             uint64_t kid = 0;
             if (k != g && !(x && x->heard && coop_sync_key_parse(x->key, &kid) && kid == a->hkid[k]))
-                ADV_FAIL(a, "at the end: game %d does not identify game %d by its key in the session the relay lists for it (%s)", g + 1, k + 1,
+                ADV_FAIL(a, "at the end: game %d does not identify game %d by its key in the session the host's roster lists for it (%s)", g + 1, k + 1,
                          !x ? "not in its room" : x->heard ? "another key holds its place" : "a roster, a replay or a forged digest ended or keeps that session");
             if (k != g && ignored >> a->h[k].id & 1) ADV_FAIL(a, "at the end: game %d ignores game %d", g + 1, k + 1);
         }
@@ -2911,8 +2911,8 @@ static int heard_at(Game *g, int id, uint64_t now) {   // g's offer shows member
     return x && x->heard;
 }
 
-// Finding 1: an attacker who holds the room's secret (and so the message key) but no key the players accepted, as a
-// relay run by someone who knows the secret or a sender on a player's network can, makes sections in B's name. A, who
+// Finding 1: an attacker who holds the room's secret (and so the message key) but no key the players accepted, as
+// the host itself or a member the host admits holding it can, makes sections in B's name. A, who
 // accepted B, takes none of their flags, and a flood of them costs A no more than its budget of checks for B, while
 // B's own flags still arrive.
 static void check_h5_forged_sender(void) {
@@ -2956,12 +2956,12 @@ static void check_h5_forged_sender(void) {
 }
 
 // Finding 2: no roster, and no replayed message or identity, ends a member's session for good. A (or C) identifies B in
-// B's own session once the relay's roster is back, after (a) a roster that lists B's earlier session and B's message of
-// it, replayed; (b) a roster without B; (c) the relay saying the room is gone; (d) as (a), at a game that joined after
+// B's own session once the host's roster is back, after (a) a roster that lists B's earlier session and B's message of
+// it, replayed; (b) a roster without B; (c) a roster saying the room is gone; (d) as (a), at a game that joined after
 // B's earlier session was over, with B's identity of it replayed.
 static void check_h5_session_end(void) {
     static const char *const what[4] = {"a roster with B's earlier session and B's message of it replayed", "a roster without B",
-                                        "the relay saying the room is gone", "a roster with B's earlier session and B's identity of it replayed"};
+                                        "a roster saying the room is gone", "a roster with B's earlier session and B's identity of it replayed"};
     for (int v = 0; v < 4; v++) {
         char code[8];
         snprintf(code, sizeof code, "H5F2%c", 'A' + v);
@@ -2990,9 +2990,9 @@ static void check_h5_session_end(void) {
         } else {
             coop_sync_room(t->eng, "", 0, NULL, NULL, 0, 0, now += 8);
         }
-        now = run(&net, (net_roster(&net, code, now + 8), now + 8), 5000);   // the relay's roster is back
+        now = run(&net, (net_roster(&net, code, now + 8), now + 8), 5000);   // the host's roster is back
         int heard = heard_at(t, 2, now);
-        CHECK(old.n && before && heard, "F2: after %s, %s identifies B again in B's own session once the relay's roster is back (%d; before %d)", what[v],
+        CHECK(old.n && before && heard, "F2: after %s, %s identifies B again in B's own session once the host's roster is back (%d; before %d)", what[v],
               v == 3 ? "C" : "A", heard, before);
         game_free(&a), game_free(&b), game_free(&c);
         free(net.q);
@@ -3351,10 +3351,10 @@ static void check_h6_carry(void) {
 // ---- 13. the seventh review's findings
 
 // Finding 3: a key the player accepted, in another member's place and under that member's name. A (who asks) accepted
-// the room with B and M in it. M leaves; B joins again in a new session and the relay holds B's messages to A back; M,
+// the room with B and M in it. M leaves; B joins again in a new session and the host holds B's messages to A back; M,
 // who still has the secret, sends A an identity of its own key for member 2 in B's new session under B's name, then a
 // section that key signs there. A must be asked again before anything of it counts, and its log must say so; once B's
-// own identity arrives the two keys are disputed, and that is logged too. And a relay restart that hands the members
+// own identity arrives the two keys are disputed, and that is logged too. And the host starting the room again, which hands the members
 // other numbers, under their own names, is no new offer.
 static void check_h7_moved_key(void) {
     {
@@ -3373,7 +3373,7 @@ static void check_h7_moved_key(void) {
         now = run(&net, now, 2000);
         net.present[2] = 0;   // M leaves
         now = run(&net, (net_roster(&net, code, now), now), 2000);
-        b.session ^= 0x5107;   // B joins again; the relay holds its messages back from A
+        b.session ^= 0x5107;   // B joins again; the host holds its messages back from A
         net.mute[2] = 1;
         now = run(&net, (net_roster(&net, code, now), now), 100);
         CoopSyncStats s0, s1, s2;
@@ -3431,8 +3431,8 @@ static void check_h7_moved_key(void) {
         coop_sync_offer(a.eng, &o, now);
         int took = coop_sync_accept(a.eng, o.token);
         now = run(&net, now, 2000);
-        // the relay restarted: everyone joins again in a new session, and B and C get each other's numbers; their names
-        // go with them (a game's name is its own, the number the relay's)
+        // the host started the room again: everyone joins again in a new session, and B and C get each other's numbers; their names
+        // go with them (a game's name is its own, the number the host's)
         coop_sync_name(b.eng, "P2"), coop_sync_name(c.eng, "P3");
         b.id = 3, c.id = 2, by_id[2] = &c, by_id[3] = &b;
         a.session ^= 0x77, b.session ^= 0x77, c.session ^= 0x77;
@@ -3441,7 +3441,7 @@ static void check_h7_moved_key(void) {
         now = run(&net, now, 3000);
         coop_sync_offer(a.eng, &o, now);
         CHECK(took && o.accepted && coop_sync_open(a.eng) && value_of(&a, 111) == 1,
-              "H7 F3: a relay restart that hands B and C each other's numbers is no new offer (accepted %d, open %d), and B's flag arrives (%d)",
+              "H7 F3: the host starting the room again hands B and C each other's numbers, which is no new offer (accepted %d, open %d), and B's flag arrives (%d)",
               o.accepted, coop_sync_open(a.eng), value_of(&a, 111));
         game_free(&a), game_free(&b), game_free(&c);
         free(net.q);
@@ -3449,7 +3449,7 @@ static void check_h7_moved_key(void) {
     printf("coop-sync-test: sync moved key: a key the player accepted under another member's name is a new offer, and a key that changes is said\n");
 }
 
-// The layers' consent query uses signed identity, not merely the relay's roster or its member number.
+// The layers' consent query uses signed identity, not merely the host's roster or its member number.
 static void check_member_acceptance(void) {
     Net net = {0};
     Game a, b;

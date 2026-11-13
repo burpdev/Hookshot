@@ -120,17 +120,16 @@ screen. It costs some GPU time on cards that cull quickly, so it is off unless s
 
 ### Co-op
 
-Co-op is one room (host/coop.c, its wire host/coop_net.c and host/coop_proto.h, its rules host/coop_state.c and
-host/coop_oot.c, its players' layer host/oot_coop.c) and it is [described in coop.md](coop.md). It is turned on by the
-Co-op tab's **Host** or **Join** row, not by a switch.
+Co-op's direct link (`host/oot_coop.c`, [coop-network.md](coop-network.md)) is turned on by the Co-op tab's
+Connection row, not by a switch.
 These change parts of it or stand in for the tab in test runs:
 
 | Switch | What it does |
 |---|---|
 | `HOS_COOP_ENEMY_PLACE=0` | Enemies are not kept in one place for all players: each game moves its own copies (their life is still shared) |
 | `HOS_COOP_BOSS=0` | Bosses are left to each game: no leader, no hand-over (their life is still shared) |
-| `HOS_COOP_AUTO=host` or `join`, `HOS_COOP_PORT=<port>`, `HOS_COOP_SERVER=<host>`, `HOS_COOP_NAME=<name>` | Test runs: in a room from the start without the Host or Join row; the port, the host's address and the name, over their rows |
-| `HOS_COOP_TEST=1` | Test runs: the room also takes the test lines (`G` travel or stand at a place, `A` an animation on the bodies, `Z` an actor beside Link, `E` and `S` equipment on the bodies); `HOS_COOP_FOLLOW=1` or `2` with it: this game never leads an enemy, or only a boss it took over by its own hit |
+| `HOS_COOP_AUTO=host` or `join`, `HOS_COOP_PORT=<port>` | Test runs: connected from the start without the Connection row; the port, over the Port row |
+| `HOS_COOP_TEST=1` | Test runs: the link also takes the test lines (`G` travel or stand at a place, `A` an animation on the bodies, `Z` an actor beside Link, `E` and `S` equipment on the bodies); `HOS_COOP_FOLLOW=1` or `2` with it: this game never leads an enemy, or only a boss it took over by its own hit |
 
 ### Input for scripted runs
 
@@ -142,7 +141,7 @@ These change parts of it or stand in for the tab in test runs:
 | `HOS_INPUT_EXCLUSIVE`, `HOS_INPUT_BACKGROUND`, `HOS_INPUT_SCRIPT_BACKGROUND` (set) | As above; the last lets every device count while the window is behind another one |
 | `RX_VK_MENU_SCRIPT=<seconds>:<key>,...` | Timed Insert menu keys: `INS`, `UP`, `DOWN`, `LEFT`, `RIGHT`, `ESC`, `ENTER`, `TABL`, `TABR`, the pad's face buttons `PADS`, `PADE`, `PADW`, `PADN`; and for a text field, `TYPE:<text>` (typed as the keyboard would, up to the next comma) and, while it has the keyboard, `HOME`, `END`, `BACK`, `DEL` besides `LEFT`, `RIGHT`, `ENTER`, `ESC`; `ROW:<name>` selects the shown tab's row of that name if it shows (rows come and go with the GPU and the Co-op tab's room, so a script need not count them) |
 | `RX_VK_UI_PROMPTS=pad` or `keys` | The menu's button prompts for a controller or the keys, whatever was used last (screenshots) |
-| `HOS_COOP_DEMO=1` | The Insert menu's Co-op tab on a made-up room (`host/coop_menu.c`), for screenshots and trying the tab without a relay: Make a room connects in a second; two other players come in, one not identified for three seconds; the room is offered for acceptance and one player is away for a while; Join a room (any valid secret) puts you third in another room; Accept and Leave work. The co-op session never starts and nothing is sent |
+| `HOS_COOP_DEMO=1` | The Insert menu's Co-op tab on a made-up room (`host/coop_menu.c`), for screenshots and trying the tab without another game: Host connects in a second; two other players come in, one not identified for three seconds; the room is offered for acceptance and one player is away for a while; Join (any valid address) puts you third in another room; pressing Host or Join again leaves it; Accept and Remove work. The co-op session never starts and nothing is sent |
 | `RX_VK_UI_GAME_FONT=0` | The menu, the counter and the start-up screen in the included Libertinus, not the game's own font |
 
 The presses are `<seconds>:<button>[+<button>...][/<ms>]`, separated by commas, for example `2:A,5.5:LUP/1500,9:ZL+R`.
@@ -424,7 +423,7 @@ number is not the obvious one:
 The other rows are 0 Off and 1 On. Some are read at the start, before the menu exists, by the code that needs them:
 `handheld_profile` and `output_res` (`host/nn_applet.c`), `ultrawide` (`host/hos_main.c`), `robust_buffers`
 (`gpu/vk/vk_main.cpp`) and the controls (`host/nn_hid.c`). Co-op's `coop`, `coop_name`, `coop_server` and `coop_port`
-are read at the start by `host/coop.c`; `coop_name` and `coop_server` are the Co-op tab's Your name and Relay, which the
+are read at the start by `host/coop.c`; `coop_name` and `coop_server` are the Co-op tab's Player name and Host address, which the
 menu writes (an empty field, no line; a `coop_server` longer than the field's 63 characters is kept as it is), `coop` is
 its Room rules page's Co-op at start, and the menu keeps `coop_port` as it keeps every line it does not write
 ([coop.md](coop.md)). The page's other rows are a room's rules, `coop_progress`, `coop_items`, `coop_songs`,

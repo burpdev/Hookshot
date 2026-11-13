@@ -1,11 +1,12 @@
 """host/coop_proto.c, co-op's wire format, compiled with Monocypher (third_party/monocypher) and tests/coop_proto_test.c:
-known answers, sealing and opening, signatures, every byte vector of tests/coop_vectors.txt (which scripts/coop_relay.py
-is checked against too, by tests/test_coop_relay.py), 400000 random and changed datagrams into every parser, and the POS
-counter. On Linux with AddressSanitizer and UBSan when the compiler has them. Also checks that the runtime's build
-compiles Monocypher (nx2/build.py), without which the game does not link.
+known answers for BLAKE2b and the signatures, every byte vector of tests/coop_vectors.txt, 400000 random buffers and one
+changed byte of every vector into each parser, the POS counter and the parts an event of a given size has. On Linux with
+AddressSanitizer and UBSan when the compiler has them. Also checks that the runtime's build compiles Monocypher
+(nx2/build.py), without which the game does not link.
 
     python -I -B tests/test_coop_proto.py [--cc gcc]
-    python -I -B tests/test_coop_proto.py --sealed   the sealed vectors' payloads, for tests/test_coop_relay.py's SEALED
+    python -I -B tests/test_coop_proto.py --write-vectors   rewrite tests/coop_vectors.txt from the codec, for when the
+                                                            format itself is what changed (docs/coop.md)
 """
 import argparse
 import os
@@ -52,12 +53,21 @@ def check_build_wiring():
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--cc", default=os.environ.get("CC") or shutil.which("gcc") or shutil.which("clang") or "gcc")
-    p.add_argument("--sealed", action="store_true")
+    p.add_argument("--write-vectors", action="store_true")
     a = p.parse_args()
     check_build_wiring()
     with tempfile.TemporaryDirectory(prefix="hookshot-coop-proto-") as temp:
         exe = compile_fixture(a.cc, Path(temp))
-        args = ["--sealed"] if a.sealed else [str(ROOT / "tests" / "coop_vectors.txt")]
+        if a.write_vectors:
+            w = subprocess.run([str(exe), "--write-vectors"], capture_output=True, text=True, timeout=300)
+            if w.returncode:
+                print(w.stdout + w.stderr)
+                raise SystemExit("FAIL: tests/coop_proto_test.c could not write the byte vectors")
+            (ROOT / "tests" / "coop_vectors.txt").write_text(w.stdout, encoding="utf-8")
+            print("wrote tests/coop_vectors.txt: %d vectors" %
+                  len([l for l in w.stdout.splitlines() if l and not l.startswith("#")]))
+            return 0
+        args = [str(ROOT / "tests" / "coop_vectors.txt")]
         r = subprocess.run([str(exe)] + args, capture_output=True, text=True, timeout=300)
         sys.stdout.write(r.stdout)
         sys.stdout.write(r.stderr)

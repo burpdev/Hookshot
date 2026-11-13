@@ -142,8 +142,9 @@ static bool coop_secret_shown;                            // (masked again at ea
 static void coop_refresh(bool*) { (void)coop_secret_shown; }
 static bool coop_option_line(const char*, const char*) { return false; }
 struct TextField { char text[64]; int len = 0, max = 63; };
-static TextField coop_name_field, coop_relay_field;
-static bool coop_relay_whole = true;
+static TextField coop_name_field, coop_addr_field;
+static bool coop_addr_whole = true;
+static int coop_port = 43400;   // (the Co-op tab's Port row: ini_key's key for it)
 static void text_set(TextField& f, const char* t) {
     f.len = (int)std::min(std::strlen(t), sizeof f.text - 1);
     std::memcpy(f.text, t, (size_t)f.len);

@@ -40,6 +40,7 @@ FIXTURE = r"""
 #include "upscaler_rows.h"
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -71,6 +72,12 @@ void mic_chosen() {}
 void samplers_changed() {}
 int temporal_resets = 0;
 void temporal_reset_failure() { ++temporal_resets; }
+/* (the Co-op tab's Port row, in ini_key and in set_row: the room's port, told to host/coop_menu.c. No room and no
+   host here, so the host's pointer is there and its coop_command is not) */
+int coop_port = 43400;
+const char* tx_port(int v) { static char t[16]; std::snprintf(t, sizeof t, "%d", v); return t; }
+constexpr int HOS_COOP_CMD_PORT = 4;
+struct { int (*coop_command)(int, const char*, uint32_t); } coop_host{nullptr}, *host = &coop_host;
 void prompts_at_once(const Row&) {}
 int step_output_choice(int id, int dir) { return id + dir; }
 // (the Aspect ratio row moves the Output resolution to one of its shape's sizes, output_for_aspect: not what this checks)

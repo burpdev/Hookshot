@@ -98,7 +98,7 @@ static int ini_text(const char *key, char *out, size_t size) {
     snprintf(slash + 1, (size_t)(path + MAX_PATH - slash - 1), "hookshot_options.ini");
     FILE *f = fopen(path, "r");
     if (!f) return 0;
-    /* (256, not 80: co-op's relay, coop_server=, is up to 159 bytes (host/coop.c). A longer line came in pieces of 79: the
+    /* (256, not 80: co-op's host address, coop_server=, is up to 159 bytes (host/coop.c). A longer line came in pieces of 79: the
        value was cut and the rest read as a line of its own. The menu's save reads the lines it keeps with 256 too) */
     char line[256];
     const size_t len = strlen(key);

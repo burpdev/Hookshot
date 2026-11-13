@@ -13,6 +13,11 @@
 typedef SOCKET Sock;
 #define SOCK_NONE INVALID_SOCKET
 #define sock_close closesocket
+#define sock_error() WSAGetLastError()
+#define sock_would_block (WSAGetLastError() == WSAEWOULDBLOCK)
+/* A non-blocking connect that has started and has not finished. Winsock says WSAEWOULDBLOCK; Linux says EINPROGRESS,
+   which is not EAGAIN, and calling that a failure closes the link before the room is even reached. */
+#define sock_connecting sock_would_block
 #else
 #include <arpa/inet.h>
 #include <errno.h>
@@ -21,6 +26,7 @@ typedef SOCKET Sock;
 #include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/random.h>
 #include <sys/socket.h>
@@ -29,9 +35,29 @@ typedef SOCKET Sock;
 typedef int Sock;
 #define SOCK_NONE (-1)
 #define sock_close close
+#define sock_error() errno
+#define sock_would_block (errno == EAGAIN || errno == EWOULDBLOCK)
+#define sock_connecting (errno == EINPROGRESS || sock_would_block)
 #endif
 
-struct CoopUdp { Sock s; uint16_t port; };
+/* A link whose peer closed is an everyday thing in a room: whoever is writing to it must be told with an error, not
+   with a signal. On Linux a write to that socket raises SIGPIPE, which ends the game process; MSG_NOSIGNAL asks the OS
+   for EPIPE instead, and the link reads as broken like any other. Windows has no SIGPIPE. */
+#ifdef _WIN32
+#define sock_send_flags 0
+#else
+#define sock_send_flags MSG_NOSIGNAL
+#endif
+
+struct CoopTcp {
+    Sock s;
+    int listening;
+    int broken;                     /* the OS says the link is gone: readable returns -1 until it is closed */
+    unsigned char out[COOP_TCP_OUT_CAP];
+    size_t out_len, out_at;       /* what the OS has not taken yet, from out_at */
+    unsigned char in[COOP_TCP_OUT_CAP];
+    size_t in_len, in_at;         /* what arrived and has not been read */
+};
 
 /* ---- lock, event, once, clock, thread, random */
 #ifdef _WIN32
@@ -318,21 +344,65 @@ unsigned coop_net_local_addresses(CoopAddr *out, unsigned cap, uint16_t port) {
     return count;
 }
 
-/* ---- the socket */
 
-CoopUdp *coop_udp_open(uint16_t port) {
-    if (!net_up()) return NULL;
-    Sock s = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-    if (s == SOCK_NONE) return NULL;
+/* ---- the TCP link: one player's game listens, the others connect to it */
+
+static int sock_nonblocking(Sock s) {
 #ifdef _WIN32
-    /* Windows otherwise allows a same-user, specific-address socket beside this wildcard bind. It could take
-       this socket's datagrams (including a dual-stack socket's IPv4 traffic). Own the entire requested port. */
+    u_long on = 1;
+    return ioctlsocket(s, FIONBIO, &on) == 0;
+#else
+    int f = fcntl(s, F_GETFL, 0);
+    return f >= 0 && fcntl(s, F_SETFL, f | O_NONBLOCK) == 0;
+#endif
+}
+
+/* A peer that vanished without a goodbye shows here in about a minute, and a home router's mapping stays open. */
+static void sock_keepalive(Sock s) {
+    const int on = 1;
+    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (const char *)&on, sizeof on);
+#ifdef _WIN32
+    struct { u_long onoff, keepalivetime, keepaliveinterval; } v = {1, 10000, 3000};
+    DWORD got = 0;
+    WSAIoctl(s, 0x98000004 /* SIO_KEEPALIVE_VALS */, &v, sizeof v, NULL, 0, &got, NULL, NULL);
+#else
+    static const int idle = 10, interval = 3;
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof interval);
+#endif
+}
+
+/* Windows permits a same-user, specific-address socket beside a default wildcard bind, including the IPv4 half of a
+   dual-stack socket: another program could take this link's traffic, or send from an overlapping local endpoint. Own the
+   whole requested port. Linux enables neither SO_REUSEADDR nor SO_REUSEPORT, so an overlapping bind is refused there. */
+static int sock_exclusive(Sock s) {
+#ifdef _WIN32
     const int exclusive = 1;
-    if (setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&exclusive, sizeof exclusive)) {
+    return setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&exclusive, sizeof exclusive) == 0;
+#else
+    (void)s;
+    return 1;
+#endif
+}
+
+static CoopTcp *tcp_new(Sock s, int listening) {
+    CoopTcp *t = calloc(1, sizeof *t);
+    if (!t) {
         sock_close(s);
         return NULL;
     }
-#endif
+    t->s = s, t->listening = listening;
+    return t;
+}
+
+CoopTcp *coop_tcp_listen(uint16_t port) {
+    if (!net_up()) return NULL;
+    Sock s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    if (s == SOCK_NONE) return NULL;
+    if (!sock_exclusive(s)) {
+        sock_close(s);
+        return NULL;
+    }
     int off = 0;   /* (IPv4 too, as ::ffff:a.b.c.d) */
     setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&off, sizeof off);
     struct sockaddr_in6 any;
@@ -340,80 +410,227 @@ CoopUdp *coop_udp_open(uint16_t port) {
     any.sin6_family = AF_INET6;
     any.sin6_addr = in6addr_any;
     any.sin6_port = htons(port);
-    if (bind(s, (struct sockaddr *)&any, sizeof any)) {
+    if (bind(s, (struct sockaddr *)&any, sizeof any) || listen(s, COOP_MAX_PENDING)) {
         sock_close(s);
         return NULL;
     }
     socklen_t len = sizeof any;
     getsockname(s, (struct sockaddr *)&any, &len);
+    if (!sock_nonblocking(s)) {
+        sock_close(s);
+        return NULL;
+    }
+    return tcp_new(s, 1);
+}
+
+uint16_t coop_tcp_port(const CoopTcp *t) {
+    struct sockaddr_in6 at;
+    socklen_t len = sizeof at;
+    if (!t || getsockname(t->s, (struct sockaddr *)&at, &len)) return 0;
+    return ntohs(at.sin6_port);
+}
+
+CoopTcp *coop_tcp_accept(CoopTcp *l, CoopAddr *from) {
+    if (!l || l->broken) return NULL;
+    struct sockaddr_storage sa;
+    socklen_t len = sizeof sa;
+    Sock s = accept(l->s, (struct sockaddr *)&sa, &len);
+    if (s == SOCK_NONE) return NULL;   /* (the listener is non-blocking: nobody is waiting) */
+    if (!sock_nonblocking(s)) {
+        sock_close(s);
+        return NULL;
+    }
+    sock_keepalive(s);
+    if (from) addr_from(from, (const struct sockaddr *)&sa);
+    return tcp_new(s, 0);
+}
+
+CoopTcp *coop_tcp_connect(const CoopAddr *to, uint32_t ms) {
+    if (!net_up()) return NULL;
+    Sock s = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    if (s == SOCK_NONE) return NULL;
+    if (!sock_nonblocking(s)) {
+        sock_close(s);
+        return NULL;
+    }
+    struct sockaddr_in6 at;
+    addr_to(to, &at);
+    if (connect(s, (struct sockaddr *)&at, sizeof at) != 0 && !sock_connecting) {
+        sock_close(s);
+        return NULL;
+    }
 #ifdef _WIN32
-    /* (an ICMP "port unreachable" for an earlier datagram would end every later recvfrom with WSAECONNRESET) */
-    BOOL no = FALSE;
-    DWORD got = 0;
-    WSAIoctl(s, _WSAIOW(IOC_VENDOR, 12) /* SIO_UDP_CONNRESET */, &no, sizeof no, NULL, 0, &got, NULL, NULL);
-#endif
-#ifdef _WIN32
-    u_long nonblocking = 1;
-    if (ioctlsocket(s, FIONBIO, &nonblocking)) {
+    fd_set w;
+    FD_ZERO(&w);
+    FD_SET(s, &w);
+    struct timeval tv = {(long)(ms / 1000), (long)(ms % 1000) * 1000};
+    const int ready = select(0, NULL, &w, NULL, &tv);
 #else
-    if (fcntl(s, F_SETFL, O_NONBLOCK) < 0) {
+    struct pollfd pf = {s, POLLOUT, 0};
+    int ready = poll(&pf, 1, (int)ms);
+    if (ready < 0 && errno == EINTR) ready = 0;
 #endif
+    int failed = ready <= 0;
+    if (!failed) {
+        int err = 0;
+        socklen_t size = sizeof err;
+        if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&err, &size) == 0 && err) failed = 1;
+    }
+    if (failed) {
         sock_close(s);
         return NULL;
     }
-    CoopUdp *u = calloc(1, sizeof *u);
-    if (!u) {
-        sock_close(s);
-        return NULL;
+    sock_keepalive(s);
+    return tcp_new(s, 0);
+}
+
+/* Hand what is waiting for the OS to take it, then take p. 0 when the link cannot hold it: the caller drops that frame
+   rather than growing without bound, and a link that keeps filling is a link that is going. */
+static int tcp_pump(CoopTcp *t) {
+    while (t->out_at < t->out_len) {
+        const int wrote = (int)send(t->s, (const char *)t->out + t->out_at, (int)(t->out_len - t->out_at), sock_send_flags);
+        if (wrote > 0) {
+            t->out_at += (size_t)wrote;
+            if (t->out_at >= t->out_len) t->out_len = t->out_at = 0;
+            continue;
+        }
+        if (sock_would_block) return 1;   /* (the OS's buffer is full: tried again at the next step) */
+        t->broken = 1;
+        return 0;
     }
-    u->s = s, u->port = ntohs(any.sin6_port);
-    return u;
+    return 1;
 }
 
-uint16_t coop_udp_port(const CoopUdp *u) { return u ? u->port : 0; }
-
-int coop_udp_send(CoopUdp *u, const CoopAddr *to, const void *p, size_t n) {
-    struct sockaddr_in6 sa;
-    addr_to(to, &sa);
-    return sendto(u->s, (const char *)p, (int)n, 0, (const struct sockaddr *)&sa, sizeof sa) == (int)n;
+int coop_tcp_send(CoopTcp *t, const void *p, size_t n) {
+    if (!t || t->broken || !n) return 0;
+    if (!tcp_pump(t)) return 0;
+    if (!t->out_len) {   /* (nothing waiting: hand it to the OS directly) */
+        const int wrote = (int)send(t->s, (const char *)p, (int)n, sock_send_flags);
+        if (wrote == (int)n) return 1;
+        if (wrote < 0 && sock_would_block) {
+            if (n > sizeof t->out) {
+                t->broken = 1;
+                return 0;
+            }
+            memcpy(t->out, p, n), t->out_len = n, t->out_at = 0;
+            return 1;
+        }
+        t->broken = 1;
+        return 0;
+    }
+    if (t->out_len + n > sizeof t->out) {
+        if (t->out_at && t->out_len - t->out_at + n <= sizeof t->out) {   /* (slide what is left to the front) */
+            memmove(t->out, t->out + t->out_at, t->out_len - t->out_at);
+            t->out_len -= t->out_at, t->out_at = 0;
+        } else
+            return 0;
+    }
+    memcpy(t->out + t->out_len, p, n), t->out_len += n;
+    return 1;
 }
 
-int coop_udp_recv(CoopUdp *u, void *buf, size_t cap, CoopAddr *from, uint32_t ms) {
+/* What the link holds, moved to the front so what arrives next lands after it: a frame the network cut in two is
+   joined here, not thrown away. */
+static void tcp_settle(CoopTcp *t) {
+    if (t->in_at) {
+        memmove(t->in, t->in + t->in_at, t->in_len - t->in_at);
+        t->in_len -= t->in_at, t->in_at = 0;
+    }
+}
+
+/* The size of the whole frame at the front of what is held, 0 when the bytes there are not a frame yet. */
+static size_t tcp_frame_here(const CoopTcp *t) {
+    const size_t have = t->in_len - t->in_at;
+    if (have < COOP_TCP_HDR) return 0;
+    const uint8_t *h = t->in + t->in_at;
+    const uint32_t len = (uint32_t)h[4] | ((uint32_t)h[5] << 8u) | ((uint32_t)h[6] << 16u) | ((uint32_t)h[7] << 24u);
+    if (len > COOP_TCP_MAX_BODY) return (size_t)-1;   /* (no reader of this room's can hold that: not a co-op stream) */
+    return have >= COOP_TCP_HDR + (size_t)len ? COOP_TCP_HDR + (size_t)len : 0;
+}
+
+int coop_tcp_readable(CoopTcp *t, uint32_t ms) {
+    if (!t || t->broken) return -1;
+    if (t->listening) {
+        /* A door is not a link: nothing is read from it, only whether someone is waiting behind it. recv here would
+           answer "not connected", which is not the door being broken: it is the door having no one at it. */
+#ifdef _WIN32
+        fd_set r;
+        FD_ZERO(&r);
+        FD_SET(t->s, &r);
+        struct timeval tv = {(long)(ms / 1000), (long)(ms % 1000) * 1000};
+        const int waiting = select(0, &r, NULL, NULL, &tv);
+#else
+        struct pollfd pf = {t->s, POLLIN, 0};
+        int waiting = poll(&pf, 1, (int)ms);
+        if (waiting < 0 && errno == EINTR) return 0;
+#endif
+        if (waiting < 0) {
+            t->broken = 1;   /* (the door itself is gone: not a join to take) */
+            return -1;
+        }
+        return waiting > 0 ? 1 : 0;
+    }
+    tcp_settle(t);
+    tcp_pump(t);   /* (what the OS has not taken yet of what this link is sending goes out now: the step that is
+                    * waiting to hear is also the step that can finish sending) */
+    if (tcp_frame_here(t) || t->in_len == sizeof t->in) return 1;   /* (what is already here is enough to take) */
 #ifdef _WIN32
     fd_set r;
     FD_ZERO(&r);
-    FD_SET(u->s, &r);
+    FD_SET(t->s, &r);
     struct timeval tv = {(long)(ms / 1000), (long)(ms % 1000) * 1000};
-    int ready = select(0, &r, NULL, NULL, &tv);
+    const int ready = select(0, &r, NULL, NULL, &tv);
 #else
-    struct pollfd pf = {u->s, POLLIN, 0};
+    struct pollfd pf = {t->s, POLLIN, 0};
     int ready = poll(&pf, 1, (int)ms);
     if (ready < 0 && errno == EINTR) return 0;
 #endif
-    if (ready < 0) return -1;
-    if (ready == 0) return 0;
-    struct sockaddr_storage sa;
-    socklen_t len = sizeof sa;
-#ifdef _WIN32
-    int n = (int)recvfrom(u->s, (char *)buf, (int)cap, 0, (struct sockaddr *)&sa, &len);
-#else
-    int n = (int)recvfrom(u->s, buf, cap, MSG_TRUNC, (struct sockaddr *)&sa, &len);   /* (the datagram's own size) */
-    if (n > (int)cap) return 0;
-#endif
-    if (n < 0) {
-#ifdef _WIN32
-        const int e = WSAGetLastError();
-        return e == WSAEMSGSIZE || e == WSAECONNRESET || e == WSAEWOULDBLOCK ? 0 : -1;
-#else
-        return errno == EAGAIN || errno == EINTR || errno == ECONNREFUSED ? 0 : -1;
-#endif
+    if (ready < 0) {
+        t->broken = 1;
+        return -1;
     }
-    addr_from(from, (const struct sockaddr *)&sa);
+    if (ready == 0) return 0;
+    const int n = (int)recv(t->s, (char *)(t->in + t->in_len), (int)(sizeof t->in - t->in_len), 0);
+    if (n == 0 || (n < 0 && !sock_would_block)) {
+        t->broken = 1;   /* (the other end closed, or the link is gone) */
+        return -1;
+    }
+    if (n < 0) return 0;
+    t->in_len += (size_t)n;
+    return 1;
+}
+
+size_t coop_tcp_read(CoopTcp *t, void *buf, size_t cap) {
+    if (!t) return 0;
+    const size_t have = t->in_len - t->in_at, n = have < cap ? have : cap;
+    if (n) memcpy(buf, t->in + t->in_at, n);
+    t->in_at += n;
+    if (t->in_at >= t->in_len) t->in_len = t->in_at = 0;
     return n;
 }
 
-void coop_udp_close(CoopUdp *u) {
-    if (!u) return;
-    sock_close(u->s);
-    free(u);
+/* One whole frame off the stream: the header, then the payload its length asks for. What is left over stays here for
+   the next call, and a frame that is not whole yet is left whole in here too: nothing is taken apart and thrown away. */
+int coop_tcp_frame(CoopTcp *t, void *buf, size_t cap, size_t *out) {
+    if (out) *out = 0;
+    if (!t || t->broken || cap < COOP_TCP_HDR) return -1;
+    const size_t have = t->in_len - t->in_at;
+    if (have < COOP_TCP_HDR) return 0;
+    const uint8_t *h = t->in + t->in_at;
+    const uint32_t len = (uint32_t)h[4] | ((uint32_t)h[5] << 8u) | ((uint32_t)h[6] << 16u) | ((uint32_t)h[7] << 24u);
+    if (len > (uint32_t)(cap - COOP_TCP_HDR)) return -1;   /* (not a frame this reader can hold: the stream is not co-op's) */
+    if (have < COOP_TCP_HDR + (size_t)len) return 0;       /* (the rest of it has not arrived) */
+    memcpy(buf, h, COOP_TCP_HDR + (size_t)len);
+    t->in_at += COOP_TCP_HDR + (size_t)len;
+    if (t->in_at >= t->in_len) t->in_len = t->in_at = 0;
+    if (out) *out = COOP_TCP_HDR + (size_t)len;
+    return 1;
+}
+
+int coop_tcp_backlog(const CoopTcp *t) { return t ? (int)(t->out_len - t->out_at) : 0; }
+
+void coop_tcp_close(CoopTcp *t) {
+    if (!t) return;
+    sock_close(t->s);
+    free(t);
 }

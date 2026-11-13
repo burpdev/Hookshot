@@ -1,256 +1,181 @@
 # Co-op
 
-Each player runs their own game and their own save; co-op connects the games of up to 8 players through a relay. The
-game has no multiplayer of its own and its `nn::socket` stays offline: co-op is the runtime's own, a UDP socket of its
-own on a thread of its own.
+Each player runs their own game and their own save; co-op connects the games of up to 8 players into one room. The
+game has no multiplayer of its own and its `nn::socket` stays offline: co-op is the runtime's own, a TCP link of its own
+on a thread of its own, built the same on Windows and on Linux.
 
-What exists so far: the relay (`scripts/coop_relay.py`), the wire format both ends speak (`host/coop_proto.c`: rooms
-named by a secret, the datagrams between a game and the relay, the sealed messages between the players), and the
-game's session (`host/coop.c`, `host/coop_net.c`): the game makes or joins a room from the Insert menu's Co-op tab, or
-at start from its settings, and stays in it; and progress sync (`host/coop_oot.c`, [below](#progress-sync)): what one
-player's game gains, the others' games get.
+There is one way in. **One player's game holds the room** — the Co-op tab's **Host** — and the others reach it at that
+game's address and port with **Join**. No relay to run, no room to name, no code to type.
 
-## Running a relay
+| The room | What it is |
+|---|---|
+| `host/coop.c` | the room and its session: Host and Join, the members and their ids, the roster, who is away, the round trip |
+| `host/coop_net.c`, `host/coop_net.h` | its TCP sockets (listen, accept, connect, one frame at a time), portable through `host/posix/` |
+| `host/coop_proto.h`, `host/coop_proto.c` | the frames and the player messages, as pure functions on bytes ([below](#the-link-and-the-wire)) |
+| `host/coop_state.c`, `host/coop_oot.c` | the room's rules and progress sync: what a room shares, its pools, each player's accepted key, its signed rules ([below](#progress-sync)) |
+| `host/oot_coop.c` | the players in the world: where each stands, their bodies and animations, the enemies' one life and one place, PvP, and hearts and Gold Skulltula tokens one for one |
+| `host/coop_menu.c` | the Co-op tab's rows, and the settings that carry them to the room |
+## One room: Host and Join
 
-```
-python -I scripts/coop_relay.py [--host 0.0.0.0] [--port 24680] [--log-addrs] [--log-joins] [--max-rooms 1000] [--rooms-per-network 8] [--member-copies 480] [--member-bytes 262144]
-```
+**Host** makes this game the room. It listens on port 43400 (the Port row changes it) and its Host address row shows what
+the others type: an address of this PC when one stands out, and the log names it too (`hosting the room on port 43400
+(room 3f1c…)`). **Join** reaches a room at the Host address row: `host`, `host:port`, `[IPv6]:port` or a bare IPv6
+address. Each row switches co-op on for this run; each takes a second press when it would leave a room already in
+progress, where the row reads **Stop hosting** or **Leave the room**.
 
-Python 3, standard library only. A player who can reach it by UDP (forward the port on the router, open it in the
-firewall) is all it takes; the others give its address to their games. The relay forwards the sealed datagrams of a
-room and can read none of what the players send each other. It keeps only who is in which room, writes nothing to
-disk, and loses its rooms when it stops: the room's maker makes it again under the same secret. Its log has one line
-per room made, join, leave and removal, with names, member ids and a random room id (never the secret or the locator);
-addresses only with `--log-addrs`; a line when a network's joins ran out (at most every 10 s); and with `--log-joins`,
-where each network's joins went.
+Forward that port on the router and open it in the firewall, as for any game you host at home, or play on a LAN. The room
+exists while its host's game runs: when the host closes, the room ends and the others are told. Nothing else is run by
+hand and nothing about the room is kept on disk — its members, its rules and each player's place live in the games.
 
-- A room holds up to 8 players, is closed 10 minutes after the last one left (a minute, if nobody but its maker was ever
-  in it), and a player the relay has not heard from for 15 s is dropped (the member id is kept for a minute so that the
-  same game, with its rejoin token, joins again as the same member).
-- The roster (who is in the room, each one's session, which one made it) goes out at a change, again 0.25 s and 0.75 s
-  later, and every 5 s: a datagram is lost now and then, and roster updates are not acknowledged.
-- Limits: a source address answers a cookie challenge before the relay sends it anything larger than it sent; each
-  member is limited to 480 forwarded copies and 256 KiB per second, a datagram forwarded to seven counted seven times
-  in both budgets (bursts 960 copies and 512 KiB). `--member-copies` and `--member-bytes` change the rates; each burst
-  is twice its rate. A control datagram or one sent to nobody still costs one packet and its bytes. Each
-  network (an IPv4 /24, an IPv6 /48) gets 20 challenges a second, a join every 3 s after a burst of 20, and 8 open rooms;
-  each room that forwarded to someone in the last 2 s to an equal share of the forwarding (rooms that send nothing, or
-  send to nobody, take nothing); the relay as a whole to 5000 challenges a second and 8 MB/s of forwarding. A join
-  attempt costs its network one join whatever the answer, and the same attempt sent again (its answer was lost, or it
-  asks again for a room that is not there yet) is answered from memory without a charge while the answer is the same
-  refusal. The relay keeps the budgets of at most 4096 networks and forgets a budget that is full again, and checks its
-  own challenge budget first, so a flood from spoofed addresses leaves no state behind.
-- A member that rejoins with its token from its own address and in its own session needs no challenge; from another
-  address, or with a new session, it answers one first, so someone who saw its CONNECT cannot take its place. The
-  challenges for a CONNECT with a member's valid token come from that member's own challenges (2 a second, 8 at once,
-  kept apart for its own network and for the others), never from its packets, and from a share set aside for rejoins:
-  1000 a second split equally among the open rooms for CONNECTs from other networks than the member's, and 1000 a second
-  split among the rooms and then among the eight member numbers of each for CONNECTs from the member's own network. So
-  a flood of CONNECTs with a member's token, someone else's or seen on the way, from another network neither drops the
-  member's messages nor keeps its rejoin from its own network out of the room. A session that was in the room before is
-  refused (the last 4096 of each room are kept). A flood from many networks can still use up the relay's 5000
-  challenges a second for newcomers: a relay has finite capacity, and its operator's firewall is the place for more.
-- `--host ::` listens for IPv6 as well as IPv4.
-
-A full room can sustain 30 broadcasts per second from each of eight players: 210 forwarded copies per sender,
-1,680 for the room. Even at the 1,200-byte datagram ceiling that is 252,000 bytes/s per sender and 2,016,000 for the
-room. Design for one body update at 15 Hz and one batch of all enemies a game leads at 10–15 Hz, not one packet per
-enemy. Smaller state messages leave room for events and progress; 30 maximum-sized broadcasts leave only 10,144
-bytes/s of each sender's byte budget, not room for another full-rate stream. Progress sections and pushes still pace
-themselves at 32 KiB/s before relay fan-out (8 KiB burst); the periodic and on-join digests are separate. This is a
-ceiling, not bandwidth reserved in addition to gameplay. The relay's unchanged
-8 MiB/s total and equal shares support four such full rooms by bytes alone; more active rooms share less. Room shares
-and the relay's total can limit traffic before a member's own ceiling. None of these rates promises delivery.
-
-### Hosting a room on your own PC
-
-Set `coop_host=1` in `hookshot_options.ini`, or `HOS_COOP_HOST=1` in your own environment, then **Make a room**.
-Nothing else needs starting. This is off by default and applies only to Make, not Join. Leave **Relay** empty for UDP
-port 24680, or use `127.0.0.1:<port>` to choose another. An address in `coop_server` must be `localhost`, loopback or a
-numeric address of this PC; a different host is refused with a clear log line, not silently replaced. `coop_port`
-still selects the game's own client socket, not the relay port: normally leave it at 0.
-
-On one home network, give friends one of the addresses printed as `hosting: players on this network can try ...`,
-and the room secret separately. They put that address in **Relay** and join with the secret. The maker's own game
-connects over loopback; the relay listens for IPv4 and IPv6 on its own UDP socket and thread, forwards the sealed
-messages without reading them, and never touches game memory.
-
-Across the internet, forward that **one UDP port** on the router to the maker's PC, allow it through the PC's firewall,
-and give friends the router's public address and port. A router behind carrier-grade NAT may not accept a port forward;
-use a reachable relay elsewhere in that case. The game does not discover a public address or change a router or firewall.
-Windows may ask whether to allow Hookshot on a network: allow the network you intend to host on, not every network
-indiscriminately. That prompt and Windows networking have not been tested here.
-
-The maker pays for forwarding: each member has 480 forwarded copies and 256 KiB per second, with a two-second burst;
-a broadcast to seven costs seven copies and seven times its bytes. With eight members this bounds DATA forwarding at
-2 MiB/s sustained, a 4 MiB burst, plus the rate-limited connection and roster traffic. The relay's outer forwarding
-cap remains 8 MiB/s. Playing below the limits uses less. This is not a bandwidth measurement from a game run.
-
-Unlike a relay elsewhere, this room ends when the maker leaves, turns co-op off or closes the game. The other games
-can keep playing their own saves, but cannot exchange messages until the maker hosts again. No room state is saved.
-
-The hosted relay uses the same datagrams, cookie challenge, roster repeats, rejoin tokens, silence/drop times and
-network budgets as the script. It accepts only the room and local maker socket authorized by Make; remote CREATEs
-cannot start another room. Multiple-room fairness and per-network room counts therefore reduce to one room. Its
-opaque cookies use keyed BLAKE2b rather than HMAC-SHA256, still bound to the address, port and current/previous minute.
-It remembers 4096 sessions and refusals, and at most 4096 network budgets. Unlike the script's unbounded removal set,
-it keeps at most 4096 removals; once full, it refuses new members rather than forgetting a removed player.
-Only the latest refusal of a join attempt is remembered: when the reason changes, the attempt pays the network's
-join budget again, even if the reason later changes back.
-
-`tests/test_coop_host_relay.py` runs the applicable hostile-client and fake-clock cases from the Python relay tests
-against both relays, using real loopback UDP for the C fixture. It also runs the session fixture through the C relay
-at 0% and 30% simulated receive loss, and counts threads and sockets across starts, stops and hosted settings.
-
-## Rooms and secrets
-
-A room is its secret: 18 characters of `23456789BCDFGHJKMNPRSTVWXYZ` (no vowels, no 0/1/O/I/L, no Q or E), typed in
-any case, with or without `-` and spaces, shown `XXXXXX-XXXXXX-XXXXXX`. The game makes a new random one for each room it
-makes, and the maker passes it on to the others (by voice, a chat message). The relay never learns it. A create of a
-secret whose room is open on the relay is refused (it is not a join), so nobody can be put into a room they did not
-mean to join.
-
+- A room holds up to 8 players. The host is member 1 and always the room's maker; an id is given out as a player joins
+  and is not given to someone else while the room lasts, so a hit that names a member means the same player in every
+  game.
+- A joiner sends HELLO with its name and a session drawn for that join; the host answers WELCOME with the member id, the
+  room's id (16 hex, what a signature says the rules were made for — not a secret and nothing to type) and the roster,
+  then sends the roster at every change and every 5 s. At most 4 joins wait for their HELLO, which must come within 3 s of
+  being accepted.
+- The host has not heard from a member for 8 s: it is dropped; silent 5 s: shown away. A joined game sends its host a PING
+  every 2 s — the keep-alive that also holds a home router's mapping open, whose PONG gives the round trip the tab shows —
+  and takes 8 s without anything from the host as the link being gone: it reaches the same address again after 1, 2, 4, 8
+  and 15 s. Its own Host row ends it at once.
+- Each member may send 32 KB/s and 480 messages a second, each burst twice that, and a message sent to the room counts
+  once for each member it reaches. A frame larger than 1168 bytes is not sent; a payload over 1160 bytes is refused.
+- Every message the host forwards carries the member id it came from, stamped by the host, so a member cannot speak as
+  another. The link itself is plain TCP, as the direct link this replaced was: what needs trust is signed, not encrypted —
+  each player's Ed25519 identity key, the room's rules signed by its maker's key, each removal signed the same way. That
+  is what makes a room safe to hold on a machine someone else can reach ("What joining a room means for your save",
+  "The room's rules").
+- On Windows the room takes its port with `SO_EXCLUSIVEADDRUSE` before binding, so another program of the same user cannot
+  bind a specific address beside the wildcard socket and answer for the host; the Linux paths set neither `SO_REUSEADDR`
+  nor `SO_REUSEPORT`, where an overlapping bind is refused already. See [Microsoft's socket-binding
+  rules](https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse).
+- `HOS_COOP_DEMO=1` shows the tab on a made-up room, for screenshots: no session starts and nothing is sent.
 ## Switching it on: the game's settings
 
 Co-op is off unless switched on. Off, the game opens no socket and starts no thread (`coop_init` in
 `host/hos_main.c` returns at once). The settings are read once, when the game starts: `hookshot_options.ini` beside the
 game, and the environment over it (a variable that is set wins over the file's line). The Insert menu's Co-op tab
-(below) changes them while the game runs.
+(below) changes them while the game runs and writes them back to that file.
 
 | `hookshot_options.ini` | Environment | What it does | Default |
 |---|---|---|---|
 | `coop=1` | `HOS_COOP=1` | co-op on | off |
 | `coop_name=` | `HOS_COOP_NAME` | the player's name in the room: at most 24 bytes of UTF-8 (a control or text-direction character, or a byte that is not UTF-8, shows as `?`) | `Player-` and four random hex digits, new at each start |
-| `coop_server=` | `HOS_COOP_SERVER` | the relay: `host`, `host:port`, `[IPv6]:port` or a bare IPv6 address | none (the players run one); port 24680 |
-| `coop_port=` | `HOS_COOP_PORT` | the game's own UDP port (one forwarded on the router, say) | 0: any free one |
-| `coop_host=1` | `HOS_COOP_HOST=1` | Make a room hosts the relay on this PC; `coop_server` selects its local address/port, as above | off |
-| | `HOS_COOP_AUTO=create\|join` with `HOS_COOP_ROOM=<secret>` | make or join that room at start, and stay: a room the relay lost (a restart) is made again by its maker and waited for by the others. `create` without a room makes a new one. For tests; with `HOS_COOP_ROOM` alone, the tab's Make a room makes the room of that secret | off |
-| | `HOS_COOP_DROP=<percent>` | a test's loss: that share of the received datagrams is thrown away | 0 |
-| | `HOS_COOP_TRACE=1` | a log line for every datagram sent and received, and the relay's address | off |
+| `coop_server=` | `HOS_COOP_SERVER` | the host's address to join: `host`, `host:port`, `[IPv6]:port` or a bare IPv6 address | none (the others ask the host) |
+| `coop_port=` | `HOS_COOP_PORT` | the port this game hosts on, or joins at. A port typed into the address (`host:port`) wins over it | 43400 |
+| | `HOS_COOP_AUTO=host` or `join` | Test runs: hold a room, or reach `coop_server`, from the start, and stay in it | off |
+| | `HOS_COOP_DROP=<percent>` | a test's loss: that share of the bytes read from the link is thrown away | 0 |
+| | `HOS_COOP_TRACE=1` | a log line for every frame sent and received, with the room's id and the host's address | off |
 
 None of these variables is taken from `hookshot_env.txt`: the game leaves out every line of it whose name begins
 `HOS_COOP`. That file is passed around between players and comes with packs; one that could set them would switch
-co-op on, name its author's relay and put whoever uses it into its author's room. Co-op is switched on in
+co-op on, name its author's host and put whoever uses it into its author's room. Co-op is switched on in
 `hookshot_options.ini` and on the menu's Co-op tab; the variables are for the player's own environment and for
 tests (the file `HOS_ENV_FILE` names, a test run's own, sets them like anything else).
 
-In a room the game sends the relay a PING every 2 s (the keep-alive that also holds a home router's mapping open; the
-PONG gives the round trip), and takes 8 s without any datagram from the relay as the relay lost: it joins the same room
-again as the same member (`relay lost; rejoining`). Reaching the relay is a burst of four CONNECTs 250 ms apart, then a
-wait of 1, 2, 4, 8 and 15 s between bursts. When the player leaves the room, switches co-op off or closes the game's
-window, the game says BYE to the others and LEAVE to the relay (twice each, in under half a second), so the others see
-the player go at once. One host thread does all of it, as the Discord status's does; it never touches the game's
-memory. The thread exists only while co-op is switched on: switching co-op off, or closing the game, asks it to end
-and waits for it (at most 0.4 s), with the socket closed; switching co-op on starts it again.
-
+When the player leaves the room, switches co-op off or closes the game's window, the game says BYE to the others and
+closes its link (twice each, in under half a second), so the others see the player go at once. One thread does all of it,
+as the Discord status's does; it never touches the game's memory. The thread exists only while co-op is switched on:
+switching co-op off, or closing the game, asks it to end and waits for it (at most 0.4 s), with the socket closed;
+switching co-op on starts it again. A Port change while in a room closes the room and reopens it as it was asked for
+(hosting: on the new port; joined: at the same address on the new port).
 ### A game that ends without a goodbye
 
 The goodbye is said on the game's own ways out only (`hos_window_closed_exit` in `host/hos_relaunch.c`, and the control
-bridge's `quit` in `host/control.c`). Co-op installs no signal handler. With a window, SIGTERM and SIGINT close the
-window (SDL turns them into its quit event), so the goodbye is said. A game that is killed (SIGKILL; SIGTERM or SIGINT
-for a game without a window, as `HOS_HEADLESS` test runs are), crashes, or loses its network says nothing, and the
-relay goes by silence:
+bridge's `quit` in `host/control.c`). Co-op installs no signal handler. With a window, SIGTERM and SIGINT close the window
+(SDL turns them into its quit event), so the goodbye is said. A game that is killed (SIGKILL; SIGTERM or SIGINT for a game
+without a window, as `HOS_HEADLESS` test runs are), crashes, or loses its network says nothing, and its host goes by
+silence:
 
-- **0 to 8 s:** nothing changes for the others. The player is still in their roster; what they send still goes to its
-  address and is lost there. State messages continue; reliable events for that member wait for an acknowledgement.
-- **after 8 s** without a datagram from the member, the relay's roster marks it away: the others' logs say
-  `<name> (member <n>) is away`, and the Co-op tab shows the member as away. A game whose network
-  only stalled sends again, and is `is back`.
-- **after 15 s** the relay drops the member: its log says `<name> (member <n>) dropped, silent 15 s`, and the others'
-  `<name> (member <n>) left the room`, as after a goodbye. The relay keeps the member id for a minute, so the same game,
-  still running, joins again as the same member (`rejoined room`); a game started again is a new member.
+- **0 to 5 s:** nothing changes for the others. The player is still in the roster, and what is sent to it waits on its
+  link (a member whose link cannot take more has the new message dropped, counted as `outbox full` in the stats line).
+- **after 5 s** without a frame from the member, the roster marks it away: the others' logs say `<name> (member <n>) is
+  away`, and the Co-op tab shows it away. A game whose network only stalled sends again, and is `is back`.
+- **after 8 s** the host drops the member: the logs say `<name> (member <n>) left the room: its link closed` (or `: its
+  game left the room`, after a goodbye), which is what the others see. Nothing is held back for the member whose id it
+  had: no one else is given that id while the room lasts, so a body, a hit and an animation that name member 4 mean the
+  same player in every game. The same person, playing again, joins as a new member with a new id.
 
-So a killed game shows as present for 8 s and as away for 7 s more. Its progress up to its last message is with the
-others already; nothing is taken from anyone when it goes.
-
+So a killed game shows as present for 5 s and as away for 3 s more. Its progress up to its last message is with the others
+already; nothing is taken from anyone when it goes. The other way round — a game joined, whose host goes silent — is the
+same 8 s, and that game reaches its host again by itself (`nothing from the host for 8 s`, then waits of 1, 2, 4, 8 and
+15 s) until it hosts nothing any more (`stopped trying to reach the room`) or the player leaves.
 ### The Co-op tab
 
-The Insert menu's last tab does the same from the game, with no setting written by hand. **Your name** and **Relay**
-are `coop_name` and `coop_server`. **Make a room** and **Join a room** (the secret typed or pasted) switch co-op on for
-this run and make or join the room. In a room the tab shows its state and the relay's round trip, the **Room secret**
-(masked until Enter shows it), and a line per player with the fingerprint of the key their game signed; **Accept the
-room** shows while the room waits for your acceptance (see "What joining a room means for your save"), **Leave the
-room** always. The game that holds the maker's key also gets **Remove a player** and **Reset the pools**, once it has
-accepted the room. **Room rules**, outside a room and for that game, opens a page with the rules of a room this game
-makes (`coop_progress` .. `coop_ammo`, see "What is shared") and **Co-op at start** (`coop`). Accept, the remedies and
-Leave take a second press. `HOS_COOP_DEMO=1` runs the tab on a made-up room, for screenshots: no session starts and
-nothing is sent.
+The Insert menu's last tab does the same from the game, with no setting written by hand. **Host** and **Join** make this
+game the room or reach one at an address; outside a room Join is what a player uses, in a room the same two rows read
+**Stop hosting** and **Leave the room** (a second press). **Host address** is `coop_server` (up to 63 characters: letters,
+digits and `.` `-` `:` `[` `]` `_`; `host:port` sets the port too), **Port** is `coop_port`, **Player name** is
+`coop_name`. **Status** is the room's own words — what is going on, or what went wrong, with the round trip to the host.
 
+In a room the tab shows a line per player: its number, its name, `you`, `the room` for the host, `away`, and the
+fingerprint of the key that player's game signed (gold once you accepted it, "not identified yet" while the room waits
+for it). **Accept the room** shows while the room waits for your acceptance (see "What joining a room means for your
+save"); **Go to player** travels to one of the others. The game that holds the room gets **Remove a player** and **Reset
+the pools**. **Room rules** — for the host, and for a game not in a room — opens the page of the rules a room this game
+makes (`coop_progress` .. `coop_ammo`, see "What is shared"). Accept, the remedies and leaving take a second press.
+`HOS_COOP_DEMO=1` runs the tab on a made-up room, for screenshots: no session starts and nothing is sent.
 ## The log
 
-Every line of the session starts with `coop: `. The room's secret never reaches the log: a room is named by its first
-three characters and `…` (`room H7K…`). A remote relay's address is logged only with `HOS_COOP_TRACE` on (`=1`; `=0`
-is off, as for every on/off switch: `env_on`). Hosting deliberately logs this PC's candidate LAN addresses and port
-so that the maker can give one to friends; it never logs the room secret.
+Every line of the session starts with `coop: `. A room is named by its id — 16 hex characters, `room 3f1c…` — which is
+not a secret and nothing to type: it says which room a signature was made for. Hosting logs this PC's candidate addresses
+and the port (`a joiner can type 192.168.1.20 (this PC's address)`) so the host can give one to friends; joining logs the
+address it reached.
 
 | Line | When |
 |---|---|
-| `on, as <name>; the relay from HOS_COOP_SERVER` (or `hookshot_options.ini`), or `...; no relay given (...)` | at start, co-op on |
-| `HOS_COOP_AUTO=<create\|join>: room XXX… at start` (or `a new room at start`) | the room the game makes or joins at start |
-| `connecting to the relay`, `the relay answered in <n> ms` | each attempt; the first answer of one |
-| `room XXX… created (member 1)`, `joined room XXX… as member <n>`, `rejoined room XXX… as member <n>` | in the room |
-| `<name> (member <n>) joined the room`, `... left the room`, `... is away`, `... is back`, `member <n> is now <name>` | the others, from the relay's roster |
-| `stats: sent <n>, accepted <n>, thrown away <n> (tag, sender, not co-op, replay), dropped by the test <n>, outbox full <n>, round trip <n> ms` | every minute in a room while datagrams flow (the keep-alives count) |
-| `relay lost; rejoining`, `room XXX… is gone from the relay`, `creating room XXX… again`, `room XXX… is open already; joining it` | the relay went silent or restarted |
-| `left room (<why>)` | leaving: `leave requested`, `the game is closing`, `co-op turned off`, `the server changed`, `the room's maker removed this player`, ... |
-| `no room: <why>` | an attempt refused: `no such room`, `the room is full`, `a room with this secret is already open on the relay: join it`, `update required: ...`, ... |
-| `removing <name> (member <n>) from the room` | the room's maker removed a member |
-| `a datagram that is not a co-op datagram was thrown away`, `... from an address that is not the relay ...`, `a message that does not open with the room's key ...`, `a message of member <n> that is not of its present session, or seen before, ...` | at most every 30 s each; the stats line has the counts |
-| `cannot open a UDP socket`, `cannot resolve the relay's name`, `the system's random source failed; co-op stays off`, `cannot start the co-op thread`, `HOS_COOP_AUTO must be off, create or join`, `HOS_COOP_ROOM is not a room secret ...` | what went wrong |
-| with `HOS_COOP_TRACE`: `the relay is <address>`, `tx <TYPE> to <member>, <n> bytes`, `rx <TYPE>, <n> bytes`, `rx message kind <k> from member <n>, <n> bytes` | every datagram |
+| `on, as <name>, on port <port>; <the host's address, or no host given>` | at start, co-op on |
+| `HOS_COOP_AUTO=host at start`, `HOS_COOP_AUTO=join at start`, `HOS_COOP_AUTO=join needs a host's address (HOS_COOP_SERVER or coop_server=)`, `HOS_COOP_AUTO must be off, host or join` | a test run's room at start |
+| `hosting the room on port <port> (room <id>)`, `a joiner can type <address> (this PC's address)` | this game holds the room |
+| `joining the room as <name>`, `joining the room at <address>`, `joined the room at <address> as member <n>` | reaching a room, and in it |
+| `<name> (member <n>) joined the room`, `<name> (member <n>) joined the room again`, `<name> (member <n>) left the room`, `... left the room: <why>`, `<name> (member <n>) is away`, `... is back`, `member <n> is now <name>` | the others, from the host's roster |
+| `stats: sent <n>, accepted <n>, thrown away <n> (sender <n>, not co-op <n>, replay <n>), dropped by the test <n>, outbox full <n>, round trip <n> ms` | every minute in a room while frames flow (the keep-alives count) |
+| `nothing from the host for <n> s`, `the link to the host closed`, `stopped trying to reach the room`, `this join was taken over: joining the room again` | the link to the host |
+| `left the room (<why>)` | leaving: `leave requested`, `the game is closing`, `co-op turned off`, `the host changed`, `the host removed this player`, ... |
+| `no room: <why>` | an attempt that never got in: `no host's address given`, `the room is full`, `update required: that game speaks another co-op protocol`, ... |
+| `removing <name> (member <n>) from the room`, `only the game that hosts can remove a player, and only one in the room` | the host's remedy |
+| `a join was turned away: the room is full (<n> players)`, `a join that is not a co-op HELLO was turned away`, `a join that never said who it is was turned away`, `Join needs a host's address: host, host:port or [v6]:port`, `the coop_server setting is not host or host:port` | a join refused, or an address that is not one |
+| `the system's random source failed; co-op stays off`, `cannot start the co-op thread`, `the port (HOS_COOP_PORT or coop_port=) is not 1 to 65535: <n> is used`, `out of memory`, `HOS_COOP_DROP: <n>% of the received frames are thrown away (a test)` | what went wrong, or a test's switch at work |
+| with `HOS_COOP_TRACE`: `the room's id is <id>`, `the host is at <address>`, `tx <TYPE> to <member>, <n> bytes`, `rx <TYPE> from <member>, <n> bytes`, `rx message kind <k> from member <n>, <n> bytes`, `a join from <address> is waiting for its HELLO` | every frame, every message |
 
-The relay's own log has the other side: `room <id> created`, `room <id>: <name> joined as member <n> (<k>/8)`,
-`... rejoined as member <n>`, `<name> (member <n>) left (<k>/8)`, `... dropped, silent 15 s`, `room <id> closed, ...`.
-
+`HOS_COOP_TRACE` also logs the host's address for a joined game; without it, no address is logged but the one this game
+reached or can be reached at.
 ## Testing it
 
 `tests/test_coop_session.py` (in `tests/run_all.py`) compiles `host/coop.c` and `host/coop_net.c` with
-`tests/coop_session_test.c` (AddressSanitizer and UBSan on Linux) and runs, at once: the sockets on loopback (IPv4 and
-IPv6, a datagram too large dropped), `coop_server_parse`'s cases, and co-op off (no thread, no socket); co-op switched
-off, on and off again as the Co-op tab does, each off leaving no thread and no socket behind (counted in `/proc/self/task`
-and `/proc/self/fd`), these two also under ThreadSanitizer. Before taking the baseline, the fixture waits for each joined
-helper's specific Linux thread ID to leave `/proc/self/task`: a userspace join alone can precede that removal. The
-wait is bounded and the exact thread/socket-count checks remain. It also runs two sessions in
-one process through a relay of the test's own that also acts as a hostile one (changed, forged and replayed messages,
-garbage, forged rosters, lies to a player who connects), with no loss and with 30 % of the datagrams thrown away; and
-the same two through `scripts/coop_relay.py` on 127.0.0.1, restarted midway, with the game's own session started from
-the settings and, on Linux, a child process ended by SIGTERM, which says nothing: the others see it away, then gone
-when the relay drops it 15 s later. Two games on one PC: start a relay
-(`python -I scripts/coop_relay.py --host 127.0.0.1 --port 0 --log-joins`), then each game with `HOS_COOP=1
-HOS_COOP_SERVER=127.0.0.1:<port>`, the first with `HOS_COOP_AUTO=create HOS_COOP_ROOM=<secret>`, the second with
-`HOS_COOP_AUTO=join` and the same secret, each with its own `--user` folder.
+`tests/coop_session_test.c` (AddressSanitizer and UBSan on Linux) and runs, at once: TCP links on loopback (IPv4 and
+IPv6, an over-long frame refused), `coop_server_parse`'s cases, and co-op off (no thread, no socket); co-op switched off,
+on and off again as the Co-op tab does, each off leaving no thread and no socket behind (counted in `/proc/self/task` and
+`/proc/self/fd`), these two also under ThreadSanitizer. Before taking the baseline, the fixture waits for each joined
+helper's specific Linux thread ID to leave `/proc/self/task`: a userspace join alone can precede that removal. The wait is
+bounded and the exact thread and socket-count checks remain. It also runs two sessions in one process where the host's
+side of the link is driven by a hostile fixture (forged and replayed frames, garbage, forged rosters, lies to a player who
+connects), with no loss and with 30 % of the bytes read thrown away; and a child process ended by SIGTERM, which says
+nothing: the others see it away, then gone when the host drops it 8 s later.
 
-The game and relay reserve their requested UDP addresses on Windows with `SO_EXCLUSIVEADDRUSE` before binding.
-Without it, Windows permits another program of the same user to bind a specific IPv4 address beside a wildcard
-socket, including a dual-stack socket: it can receive or inject datagrams and disrupt the room, though it cannot
-decrypt sealed player messages without the room secret. Addresses and relay-control metadata are not encrypted.
-The Linux paths set neither `SO_REUSEADDR` nor `SO_REUSEPORT`, so overlapping binds are refused there already.
-The socket tests cover wildcard/specific IPv4 coexistence in both orders, and a competing socket requesting reuse,
-on each OS; the compiled Windows-call fixture also checks option order and failure cleanup. The session modes still
-run concurrently. See [Microsoft's socket-binding rules](https://learn.microsoft.com/en-us/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse).
-The Windows fixture drivers declare `_CRT_SECURE_NO_WARNINGS` before any header, including forced headers and each
-separately compiled runtime source; their existing warning-as-error settings and assertions remain enabled.
-
-On Windows, the second game folder can hard-link the game's read-only data files instead of copying them; give each game its own user folder.
-A headless Windows game has no window to receive a polite close request; a scripted forced stop sends no goodbye, so an external relay drops it as `silent 15 s`.
+Two games on one PC: start one and press **Host**, then the other with `Host address` set to `127.0.0.1` and **Join** —
+or, for a scripted run, `HOS_COOP=1` on both, `HOS_COOP_AUTO=host` on the first and `HOS_COOP=1 HOS_COOP_SERVER=127.0.0.1
+HOS_COOP_AUTO=join` on the second, each with its own `--user` folder. A headless Windows game has no window to receive a
+polite close request; a scripted forced stop sends no goodbye, so its host drops it as silent after 8 s.
 
 `tests/test_coop_env_file.py` checks that `hookshot_env.txt` sets no variable whose name begins `HOS_COOP` (every such
 name the host's sources hold, and one made up), and that the environment and `HOS_ENV_FILE`'s file still do.
-`tests/test_coop_options_text.py` checks that a `coop_server=` line of 159 bytes (the longest relay text the game
+`tests/test_coop_options_text.py` checks that a `coop_server=` line of 159 bytes (the longest host address the game
 keeps) is read whole from `hookshot_options.ini`, and that text inside such a line is not taken for a setting.
 
-Wire byte counts in diagnostics are bounded by `COOP_MAX_DGRAM` and printed as `unsigned`, so the same source and
+Wire byte counts in diagnostics are bounded by `COOP_MAX_FRAME` and printed as `unsigned`, so the same source and
 fixtures pass Microsoft's printf-format checking without changing the format attribute or requiring GNU stdio.
 
 Besides what they compile and run, the protocol, session, progress and menu tests check in the source where the pieces
 are wired in (the build, the game's start and its ways out, the present, the save mount, the menu's interface and the
 host's table). The menu tests use scripted input and a simulated session; they do not cover a real window's events,
-keyboards or controllers.
-
+keyboards or controllers. On Windows, the second game folder can hard-link the game's read-only data files instead of
+copying them; give each game its own user folder.
 ## Reliable events
 
 `coop_send_event(member, kind, bytes, n)` and `coop_on_event(kind, callback, user)` are the one session helper for
-one-off events and large initial state. Ordinary `coop_send` messages are still replaceable datagrams. The helper
+one-off events and large initial state. Ordinary `coop_send` messages are still replaceable: the newest of a kind wins.
+The helper
 wraps a layer's kind in EVENT (16), sends only to accepted current members, and dispatches only to that kind's event
 handler. It never dispatches an event through `coop_on_message`, nor lets an ordinary message invoke an event handler.
 
@@ -260,7 +185,7 @@ handler. It never dispatches an event through `coop_on_message`, nor lets an ord
   event, which the sender abandoned. The receiver retains this floor even when it discards partial bytes, so delayed
   pieces cannot revive an abandoned event. Events that are not abandoned remain FIFO per sender/recipient across
   kinds. No order across senders or with state messages. Cancellation cannot retract a callback already delivered.
-- A recipient sends a small sealed EVENT_ACK (17) with the event id, received-part mask and assembly epoch, at most
+- A recipient sends a small EVENT_ACK (17) with the event id, received-part mask and assembly epoch, at most
   once per 50 ms per sender while something changed or a duplicate arrived. Discarding a partial assembly advances
   that epoch. A newer epoch replaces the sender's old mask and makes it resend missing pieces; an older epoch is
   ignored. Masks from two assemblies never combine. Consent revocations are recorded even if acceptance is granted
@@ -268,7 +193,7 @@ handler. It never dispatches an event through `coop_on_message`, nor lets an ord
   ACKs are their own messages rather than changing every layer's wire format. A lost ACK is answered again when
   the sender retries. The final ACK means the whole event reached its callback, not that a hit or authority claim
   was valid or applied. ACK body version2 is 27 bytes; version1 is refused, so all peers need the updated helper.
-- Missing parts are retried after 250 ms; every retry is sealed anew, with a new envelope counter and the same event
+- Missing parts are retried after 250 ms; every retry goes out anew, with a new envelope counter and the same event
   id. Event data is paced to one unicast fragment per 32 ms for the session, with recipients taking turns; ACKs have
   their separate bound. An event stuck at one recipient does not hold up delivery to the others or ordinary messages.
 - Eight outgoing events fit; `COOP_EVENT_FULL` (-1) means none was queued. `COOP_EVENT_QUEUED` (1), `UNAVAILABLE` (0,
@@ -292,8 +217,8 @@ Send an application result when the other side needs to know whether the effect 
 a malicious holder can forge an event or ACK in another member's name. This helper is not an individual signature,
 a gameplay authority or protection against a trusted member lying.
 
-`tests/test_coop_events.py` runs the real session sender, codecs and receiver over sealed loopback datagrams with a
-deterministic relay clock: loss, reordering, duplicated envelopes, full queues, departure, consent and fragmentation.
+`tests/test_coop_events.py` runs the real session sender, codecs and receiver over loopback TCP links with a
+deterministic session clock: loss, reordering, duplicated envelopes, full queues, departure, consent and fragmentation.
 Reset cases cancel partial sends and deliver later ids in order, revoke between halves without combining ACK masks,
 replay an older assembly's ACK and revoke/reaccept between socket steps. The original loss and concurrent caller
 cases remain; the concurrent caller also runs under ThreadSanitizer on Linux when the compiler provides it.
@@ -347,10 +272,10 @@ number alone, identifies pending work. Use `coop_send_event` / `coop_on_event` f
 counting state or events. The session helper already checks it for events, but game-thread work must check again
 when it runs.
 
-Design to 1,146 payload bytes per message (1,200 bytes including the sealed datagram), about 30 state datagrams/s per
-player, and one batch for **all** enemies that game leads at 10–15 Hz. Keep POS small; a richer body description uses
-another registered kind, not a larger POS. Pace progress, events and state within the same relay ceilings, not as
-separate bandwidth allowances. State should heal itself: for damage, keep a running total per player and enemy, merge
+Design to 1,146 payload bytes per message (a frame is 1,168 bytes on the link at most), about 30 state messages per
+second per player, and one batch for **all** enemies that game leads at 10–15 Hz. Keep POS small; a richer body
+description uses another registered kind, not a larger POS. Pace progress, events and state within the room's ceilings
+(the 32 KB/s and 480 messages a second per member), not as separate bandwidth allowances. State should heal itself: for damage, keep a running total per player and enemy, merge
 each player's total by taking the highest value seen, then add the players' totals together (one shared total merged
 by "highest wins" loses a hit when two players strike at once: totals of 2 and 2 would stay 2, not 4; and a
 subtraction sent once can be lost). Don't turn every animation frame into a reliable event.
@@ -358,7 +283,7 @@ subtraction sent once can be lost). Don't turn every animation frame into a reli
 Before received bytes count: check accepted current member/session, exact version and length, finite numbers and
 bounded text/counts; signed rule **present and on** (absent is off); matching area/encounter and object generation;
 the sender's authority and plausible values/timing; and a state counter that rejects stale/repeated updates. The
-session has checked roster, destination, session and the sealed envelope, not those gameplay facts. Only the game
+session has checked roster, destination, session and the envelope, not those gameplay facts. Only the game
 thread applies bounded queued work, rechecking consent and context. Durable save changes keep their signatures and
 backup/acceptance gate; the room key alone is not an individual identity proof.
 
@@ -379,81 +304,78 @@ void layer_start(void) { coop_on_message(MY_STATE, state, NULL); coop_on_event(M
 int layer_action(int peer) { return coop_send_event(peer, MY_EVENT, event_bytes, event_size); }
 ```
 
-## The room's secret and the wire
+## The link and the wire
 
-For a reviewer: what is derived from what, what each datagram carries and what a receiver checks. The code is
-`host/coop_proto.c` (C) and `scripts/coop_relay.py` (the relay's side, Python); `tests/coop_vectors.txt` holds byte
-vectors of every message that both are checked against (`tests/test_coop_proto.py`, `tests/test_coop_relay.py`).
+For a reviewer: what is derived from what, what each frame carries and what a receiver checks. The code is
+`host/coop_proto.c` (pure functions on bytes) with `host/coop.c` (who sends what when); `tests/coop_vectors.txt` holds
+byte vectors of every frame and message, which the C checks are run against (`tests/test_coop_proto.py`).
 
 **Library.** Monocypher 4.0.2 (`third_party/monocypher/`, two files, unmodified, BSD-2-Clause, dual-licensed with CC0)
-for BLAKE2b, XChaCha20-Poly1305 and EdDSA. It is small, has no dependencies, builds the same on Windows and Linux, and
-its primitives are standard (RFC 7693, the XChaCha20-Poly1305 construction of the IETF draft, EdDSA over Curve25519).
-It is used only in `coop_proto.c`, behind `coop_room_keys`, `coop_seal`, `coop_open`, the datagram tags and, for what
-one player signs, `coop_sign_keypair`, `coop_sign`, `coop_sign_check` and `coop_blake2b`, so another library can replace
-it there. The relay needs no library: it uses Python's own BLAKE2b.
+for BLAKE2b and EdDSA. It is small, has no dependencies, builds the same on Windows and Linux, and its primitives are
+standard (RFC 7693, EdDSA over Curve25519). It is used in `coop_proto.c` and in the rules engine (`coop_state.c`,
+`coop_oot.c`) behind `coop_sign_keypair`, `coop_sign`, `coop_sign_check` and `coop_blake2b`, so another library can
+replace it there. Nothing on the link is encrypted, so no stream cipher is needed: what must be trusted is signed.
 
-**The secret.** 18 symbols, each drawn uniformly from 27 (bytes from the operating system's random source, a byte
-below 243 taken modulo 27): log2(27^18) = 85.6 bits. It is made by the game that creates the room and never sent to
-the relay or written to a log.
+**Frames.** An 8-byte header, little-endian — `u8 type, u8 src, u8 dst, u8 kind, u32 payload length` — then the payload;
+at most `COOP_MAX_PAYLOAD` = 1160 bytes of it, `COOP_MAX_FRAME` = 1168 in all. Member ids are 1..8 and `src` 0 is the
+host; `dst` is a member or `COOP_DST_ALL` (0xFF, every other member). The major version is `COOP_PROTO` = 3 and travels
+in HELLO and WELCOME: a host and a joiner talk only when it is equal, and ERROR (`COOP_E_PROTO`) says it was not.
 
-**Derivation.** With `S` the 18 canonical ASCII characters as the key of BLAKE2b:
+| Frame | Between | Carries |
+|---|---|---|
+| HELLO (1) | joiner → host | its protocol major, its session (random for this join), its name |
+| WELCOME (2) | host → joiner | the member id given, the protocol major, the room's 16-byte id, the roster |
+| ROSTER (3) | host → all | each member's id, flags (away `COOP_FLAG_AWAY`, maker `COOP_FLAG_MAKER`), session and name |
+| DATA (4) | either way, through the host | one player message (below) |
+| PING (5), PONG (6) | both ways | nothing: the keep-alive and the round trip |
+| BYE (7) | either way | a member is going |
+| KICK (8) | host → the member removed | its id and session |
+| ERROR (9) | host → a joiner | why a join was refused: room full, protocol, room closed, removed |
 
-- locator `L` = BLAKE2b-128(key `S`, "hookshot-coop/2 room"): the relay's name for the room, and the key of the tags
-  of datagrams between a game and the relay. The relay and anyone who sees a CONNECT learn `L`; getting `S` from it is
-  a search over 2^85.6 secrets.
-- message key `K` = BLAKE2b-256(key `S`, "hookshot-coop/2 messages"): seals every message between the players. Only
-  holders of `S` have it.
+The host stamps `src` on every DATA frame it forwards: a member cannot claim to be another one. A joiner is accepted by
+the host's listen, then HELLO within 3 s; `COOP_MAX_WAIT` = 4 joins may wait at once. A member not heard from for 8 s is
+dropped, and its id is not given to anyone else while the room lasts.
 
-**The game and relay datagrams.** A 24-byte header (magic, version 2, type, the relay's room id, src, dst, length,
-sequence) and an 8-byte tag, BLAKE2b-64(key `L`, header[0:16] ‖ payload). CONNECT carries `L`, a client id (random for
-each start of the game), a session (random for each join), a nonce (random for each attempt), the name, the relay's
-cookie and the rejoin token. CHALLENGE, JOINED and ERROR echo the nonce and carry `L`'s tag; a game takes only answers
-with its own nonce and its own `L`, so a datagram someone else sends from the relay's address neither ends an attempt
-nor puts the player into another room (an untagged "protocol version" error is taken only as the first answer of an
-attempt). JOINED carries a rejoin token, random per member: the relay gives a member's id (and the maker's mark) back
-only to a CONNECT with it. The ROSTER lists each member's id, flags (away, maker), session and name. KICK (maker to
-relay) names a member and its session. These datagrams are authenticated against outsiders who do not know `L` only;
-the relay and an observer of a CONNECT can make them, which lets them disturb a session (drop, reorder, invent members
-that cannot speak), not change a save.
+**The room's id.** 16 random bytes the host draws when it starts listening, sent in WELCOME, shown in the log as 16 hex
+characters. It is not a secret and nothing to type: it is what a signature says the rules were made for, so a room's
+signed rules, its removals and its pools cannot be carried into another room. `coop_room_id_hex` is the only form it
+takes in the log or in a message.
 
-**The player message envelope** (the payload of DATA, version byte 1):
+**The player message envelope** (the payload of DATA):
 
 ```
-u8 envelope version (1) | u64 sender's session | u32 counter | XChaCha20-Poly1305 ciphertext of (u8 kind, message) | u8[16] tag
-nonce (24 bytes) = session (8, LE) | counter (4, LE) | sender's member id (1) | 11 zero bytes
-associated data = destination member id, envelope version
+u8 envelope version (1) | u64 sender's session | u32 counter | u8 kind | message
 ```
 
-A session is drawn for every join and the counter starts at 1. Before the counter wraps, the sender leaves the room
-with an error and requires a new join; it never reuses a counter in that session. Random sessions can collide with
-probability about n²/2^65. The kind byte and the message are inside the ciphertext: a new kind of message needs only
-a number, and a later envelope version can change the outer fields without touching the messages. A message is at
-most `COOP_MAX_MESSAGE` = 1146 bytes after its kind.
+A session is drawn for every join and the counter starts at 1. Random sessions can collide with probability about
+n²/2^65. The kind byte and the message are outside any cipher — they are what the host forwards — so a new kind of
+message needs only a number, and a later envelope version can change the outer fields without touching the messages. A
+message is at most `COOP_MAX_MESSAGE` = 1146 bytes after its kind.
 
-**What a receiver checks, in order:** the sender is in the roster and is not itself, the destination is it or
-everyone, the envelope's session is the one the roster lists for that sender, the counter is new within a window of
-the last 64 of that session, the tag opens with `K` for that sender and destination; only then is the counter recorded
-and the message delivered. A counter older than the window is refused, unless it opens and is the fourth of that
-sender's messages in a row below the window, each later than the one before: then the window starts again from it and
-it is delivered. `K` is the whole room's, so whoever knows the secret can seal one message in a member's name with a
-counter far ahead, which leaves that member's later messages below the window; the member's next four start it again,
-and the first three of them are lost.
+**What a receiver checks, in order:** the sender is in the roster and is not itself, the destination is it or everyone,
+the envelope's session is the one the roster lists for that sender, and the counter is new within a window of the last 64
+of that session; only then is the counter recorded and the message delivered. A counter older than the window is refused,
+unless it is the fourth of that sender's messages in a row below the window, each later than the one before: then the
+window starts again from it and it is delivered.
 
-**Replay.** A message recorded before a player joined again carries the old session, which the roster no longer
-lists: refused. Within a session the window refuses only what it still remembers: a message sent again within the
-last 64 it took is refused, and an older one alone is refused too. But four older ones in a row, each later than the
-one before, start the window again (that is how it recovers from a counter far ahead), and from then on the window
-has forgotten what it took: anyone who recorded a member's messages of its present session (the relay too, without
-the secret) can have every one of them delivered again, in order. Someone who knows the secret can also seal a
-recorded message again under a new counter. So the envelope does not make a message arrive once; a layer for which a
-repeat matters checks a counter of its own, and signs what only one player may make.
+**Replay.** A message recorded before a player joined again carries the old session, which the roster no longer lists:
+refused. Within a session the window refuses what it still remembers, and four older ones in a row start it again (that
+is how it recovers from a counter far ahead); from then on the window has forgotten what it took, so anyone who recorded a
+member's messages of its present session can have them delivered again, in order. So the envelope does not make a message
+arrive once: a layer for which a repeat matters checks a counter of its own, and signs what only one player may make
+(`coop_state.c` does this for progress, and `coop_oot.c` for what a player's game gained).
 
 **POS** (kind 2), where a player is and what Link plays, for showing the other players in the world: the area's name,
-child or adult, position, facing, and the node and frame of Link's first four animation slots, with a counter one
-higher for each POS sent (`coop_proto.h`). A POS with a name that is not printable ASCII or a number that is not finite
-is refused. A receiver takes a pose only above the last one it took from the same member in the same session, and,
-once none was taken for 3 s, the next whatever its counter (`coop_pos_fresh`).
+child or adult, position, facing, and the node and frame of Link's first four animation slots, with a counter one higher
+for each POS sent (`coop_proto.h`). A POS with a name that is not printable ASCII or a number that is not finite is
+refused. A receiver takes a pose only above the last one it took from the same member in the same session, and, once none
+was taken for 3 s, the next whatever its counter (`coop_pos_fresh`).
 
+**LINE** (kind 32) is `host/oot_coop.c`'s layer: one short line of text — a place, a hit, an enemy's life, an animation,
+what was found — as the room's message. The room gives it the sender's member id; the layer's own names, hits and hearts
+are in `host/oot_coop.c`'s header comment. **DIGEST**, **SECTION** and **SYNC_NEED** (3, 4, 5) are progress sync's
+(`host/coop_oot.c`), **NOTICE** (6) a line for the log, **EVENT** and **EVENT_ACK** (16, 17) the session's reliable
+delivery ("Reliable events"), and a kind of `0xF0` and above is free for tests, not for a layer.
 ## What joining a room means for your save
 
 Read this before you join a room.
@@ -466,8 +388,8 @@ Read this before you join a room.
   it is keeps the room from being accepted at all. Accepting every room without asking (`HOS_COOP_ACCEPT=always`, for
   tests) works only from the environment, never from `hookshot_env.txt`.
 - **Your game takes values only from players you accepted.** Every message that can change your save is signed by the
-  player who sent it, so someone who knows the room's secret and runs the relay can still make no message in another
-  player's name that changes your save. For story flags and items acceptance is passed along (a player you accepted
+  key of the player it came from, and the host stamps which member sent it, so neither another player nor the host can
+  make one in someone else's name that changes your save. For story flags and items acceptance is passed along (a player you accepted
   hands on what they took from the players they accepted); pools count only what you and the players you accepted
   brought, picked up and spent.
 - **Your save is copied first.** The moment you accept a room, the game copies your whole save folder (every slot) to
@@ -505,7 +427,7 @@ When one player gains progress, the others' games gain it too while they play; a
 everything the players in the room at that moment have, and they with what the joiner brings. Each player's own save
 keeps what it got: the game saves it as its own progress.
 
-**The relay keeps no progress.** A room is only its players: a player who joins while the others are away gets their
+**The host keeps no progress.** A room is only its players: a player who joins while the others are away gets their
 progress when one of them is in the room again (from that player's save, so only what their game had saved), not
 before. That player must bring the room's rules: the maker in the run of the game that made the room, or a player who
 accepted those rules. A maker whose game started again holds the room's key but brings no rules until such a player is
@@ -568,8 +490,8 @@ The rules belong to the room: every game in it merges the same way. They are the
 room (`coop_progress` ... `coop_ammo` in `hookshot_options.ini`, or `HOS_COOP_PROGRESS` ... `HOS_COOP_AMMO` =
 `shared`, `own` or `pool` over them), signed with that player's key: a game takes rules only signed by the key its
 player accepted. The key the maker's game signs with is kept in the user folder (`coop-keys/`, readable by your account
-only), so a maker whose game restarted is still the room's maker; that file, together with the room's secret, lets
-whoever has both act as the room's maker: never hand out a copy of your user folder. The maker can change a rule
+only), so a maker whose game restarted is still that room's maker; that file alone is what lets whoever has it act as
+the room's maker: never hand out a copy of your user folder. The maker can change a rule
 during the session (each player accepts the new offer), remove a player by their key's fingerprint (every game drops
 that key and what it took from the pools) and reset the pools.
 

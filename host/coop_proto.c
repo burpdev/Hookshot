@@ -1,76 +1,17 @@
-// The co-op wire format (coop_proto.h): room secrets and their keys, datagram tags, the datagram header, the client and
-// relay messages and the sealed player messages. Pure functions on bytes.
+// The co-op wire format (coop_proto.h): the frames between a hosting game and the games joined to it,
+// the roster, the player messages and their envelope, the reliable event parts, the signatures and POS.
+// Pure functions on bytes.
 #include "coop_proto.h"
 
 #include <string.h>
 
 #include "../third_party/monocypher/monocypher.h"
 
-static const char secret_alphabet[] = "23456789BCDFGHJKMNPRSTVWXYZ";
-
-static int secret_char(char c) { return c && strchr(secret_alphabet, c) != NULL; }
-
 // The length of the string at s, at most max.
 static size_t bounded_len(const char *s, size_t max) {
     size_t n = 0;
     while (n < max && s[n]) n++;
     return n;
-}
-
-int coop_secret_normalize(const char *text, char out[COOP_SECRET_LEN + 1]) {
-    size_t n = 0;
-    for (const char *p = text; *p; p++) {
-        char c = *p;
-        if (c == '-' || c == ' ') continue;
-        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
-        if (n == COOP_SECRET_LEN || !secret_char(c)) return 0;
-        out[n++] = c;
-    }
-    if (n != COOP_SECRET_LEN) return 0;
-    out[n] = 0;
-    return 1;
-}
-
-void coop_secret_format(const char secret[COOP_SECRET_LEN], char out[COOP_SECRET_TEXT + 1]) {
-    for (int g = 0, at = 0; g < 3; g++) {
-        if (g) out[at++] = '-';
-        memcpy(out + at, secret + 6 * g, 6);
-        at += 6;
-    }
-    out[COOP_SECRET_TEXT] = 0;
-}
-
-int coop_secret_from_random(const uint8_t random[32], char out[COOP_SECRET_LEN + 1]) {
-    int n = 0;
-    for (int i = 0; i < 32 && n < COOP_SECRET_LEN; i++)
-        if (random[i] < 243) out[n++] = secret_alphabet[random[i] % 27];   // 243 = 9 x 27: every symbol as likely
-    out[n] = 0;
-    return n == COOP_SECRET_LEN;
-}
-
-void coop_secret_short(const char secret[COOP_SECRET_LEN], char out[8]) {
-    memcpy(out, secret, 3);
-    memcpy(out + 3, "\xe2\x80\xa6", 4);   // U+2026 and the NUL
-}
-
-// ---- keys and tags
-
-void coop_room_keys(const char secret[COOP_SECRET_LEN], uint8_t locator[COOP_KEY_LEN], uint8_t msg_key[COOP_MSG_KEY_LEN]) {
-    static const char room[] = "hookshot-coop/2 room", messages[] = "hookshot-coop/2 messages";
-    if (locator) crypto_blake2b_keyed(locator, COOP_KEY_LEN, (const uint8_t *)secret, COOP_SECRET_LEN, (const uint8_t *)room, sizeof room - 1);
-    if (msg_key)
-        crypto_blake2b_keyed(msg_key, COOP_MSG_KEY_LEN, (const uint8_t *)secret, COOP_SECRET_LEN, (const uint8_t *)messages,
-                             sizeof messages - 1);
-}
-
-// BLAKE2b-64 keyed with the locator over the header's first 16 bytes and the payload.
-static void make_tag(const uint8_t key[COOP_KEY_LEN], const uint8_t *hdr16, const uint8_t *payload, size_t n,
-                     uint8_t tag[COOP_TAG_LEN]) {
-    crypto_blake2b_ctx ctx;
-    crypto_blake2b_keyed_init(&ctx, COOP_TAG_LEN, key, COOP_KEY_LEN);
-    crypto_blake2b_update(&ctx, hdr16, 16);
-    crypto_blake2b_update(&ctx, payload, n);
-    crypto_blake2b_final(&ctx, tag);
 }
 
 // ---- little-endian fields
@@ -139,50 +80,6 @@ int coop_event_ack_parse(const uint8_t *bytes, size_t n, CoopEventAck *out) {
     return 1;
 }
 
-// ---- datagrams
-
-size_t coop_dgram_pack(uint8_t *out, size_t cap, const CoopHdr *h, const void *payload, size_t n,
-                       const uint8_t key[COOP_KEY_LEN]) {
-    if (n > COOP_MAX_PAYLOAD || cap < COOP_HDR_LEN + n) return 0;
-    put16(out, COOP_MAGIC);
-    out[2] = h->ver, out[3] = h->type;
-    put32(out + 4, h->room);
-    out[8] = h->src, out[9] = h->dst;
-    put16(out + 10, (uint32_t)n);
-    put32(out + 12, h->seq);
-    if (n) memmove(out + COOP_HDR_LEN, payload, n);   // the payload may already sit where it goes
-    if (key) make_tag(key, out, out + COOP_HDR_LEN, n, out + 16);
-    else memset(out + 16, 0, COOP_TAG_LEN);
-    return COOP_HDR_LEN + n;
-}
-
-int coop_dgram_parse(const uint8_t *d, size_t n, CoopHdr *h, const uint8_t **payload) {
-    if (n < COOP_HDR_LEN || n > COOP_MAX_DGRAM || get16(d) != COOP_MAGIC) return 0;
-    uint32_t len = get16(d + 10);
-    if (len != n - COOP_HDR_LEN) return 0;
-    h->ver = d[2], h->type = d[3];
-    h->room = get32(d + 4);
-    h->src = d[8], h->dst = d[9];
-    h->len = (uint16_t)len;
-    h->seq = get32(d + 12);
-    *payload = d + COOP_HDR_LEN;
-    return 1;
-}
-
-int coop_dgram_verify(const uint8_t *d, size_t n, const uint8_t key[COOP_KEY_LEN]) {
-    uint8_t tag[COOP_TAG_LEN], diff = 0;
-    if (n < COOP_HDR_LEN) return 0;
-    make_tag(key, d, d + COOP_HDR_LEN, n - COOP_HDR_LEN, tag);
-    for (int i = 0; i < COOP_TAG_LEN; i++) diff |= (uint8_t)(tag[i] ^ d[16 + i]);
-    return diff == 0;
-}
-
-int coop_dgram_tag_zero(const uint8_t *d) {
-    uint8_t any = 0;
-    for (int i = 0; i < COOP_TAG_LEN; i++) any |= d[16 + i];
-    return any == 0;
-}
-
 // ---- names
 
 // The length of the valid UTF-8 character at p (n bytes left), 0 when the bytes there are not one: no overlong forms,
@@ -232,58 +129,6 @@ size_t coop_name_clean(char *out, size_t cap, const uint8_t *raw, size_t n) {
     return text_clean(out, cap, raw, n, COOP_NAME_MAX);
 }
 
-// ---- client and relay messages
-
-enum { CONNECT_FIXED = 43 };   // the fields before the name
-
-size_t coop_connect_pack(uint8_t *out, size_t cap, const CoopConnect *c) {
-    size_t nlen = bounded_len(c->name, COOP_NAME_MAX);
-    size_t len = CONNECT_FIXED + nlen + 2 * COOP_COOKIE_LEN;
-    size_t padded = len < COOP_CONNECT_MIN - COOP_HDR_LEN ? COOP_CONNECT_MIN - COOP_HDR_LEN : len;
-    if (cap < padded) return 0;
-    memset(out, 0, padded);
-    out[0] = c->intent, out[1] = c->flags;
-    memcpy(out + 2, c->locator, COOP_KEY_LEN);
-    put64(out + 18, c->client_id);
-    put64(out + 26, c->session);
-    put64(out + 34, c->nonce);
-    out[42] = (uint8_t)nlen;
-    memcpy(out + CONNECT_FIXED, c->name, nlen);
-    memcpy(out + CONNECT_FIXED + nlen, c->cookie, COOP_COOKIE_LEN);
-    memcpy(out + CONNECT_FIXED + nlen + COOP_COOKIE_LEN, c->token, COOP_COOKIE_LEN);
-    return padded;
-}
-
-int coop_connect_parse(const uint8_t *p, size_t n, CoopConnect *c) {
-    if (n < CONNECT_FIXED) return 0;
-    size_t nlen = p[42];
-    if (nlen > COOP_NAME_MAX || CONNECT_FIXED + nlen + 2 * COOP_COOKIE_LEN > n) return 0;
-    memset(c, 0, sizeof *c);
-    c->intent = p[0], c->flags = p[1];
-    memcpy(c->locator, p + 2, COOP_KEY_LEN);
-    c->client_id = get64(p + 18);
-    c->session = get64(p + 26);
-    c->nonce = get64(p + 34);
-    coop_name_clean(c->name, sizeof c->name, p + CONNECT_FIXED, nlen);
-    memcpy(c->cookie, p + CONNECT_FIXED + nlen, COOP_COOKIE_LEN);
-    memcpy(c->token, p + CONNECT_FIXED + nlen + COOP_COOKIE_LEN, COOP_COOKIE_LEN);
-    return 1;
-}
-
-size_t coop_challenge_pack(uint8_t *out, size_t cap, uint64_t nonce, const uint8_t cookie[COOP_COOKIE_LEN]) {
-    if (cap < 8 + COOP_COOKIE_LEN) return 0;
-    put64(out, nonce);
-    memcpy(out + 8, cookie, COOP_COOKIE_LEN);
-    return 8 + COOP_COOKIE_LEN;
-}
-
-int coop_challenge_parse(const uint8_t *p, size_t n, uint64_t *nonce, uint8_t cookie[COOP_COOKIE_LEN]) {
-    if (n != 8 + COOP_COOKIE_LEN) return 0;
-    *nonce = get64(p);
-    memcpy(cookie, p + 8, COOP_COOKIE_LEN);
-    return 1;
-}
-
 size_t coop_roster_pack(uint8_t *out, size_t cap, const CoopRoster *r) {
     size_t at = 1;
     if (!cap || r->n > COOP_MAX_MEMBERS) return 0;
@@ -318,40 +163,20 @@ int coop_roster_parse(const uint8_t *p, size_t n, CoopRoster *r, size_t *used) {
     return 1;
 }
 
-size_t coop_joined_pack(uint8_t *out, size_t cap, const CoopJoined *j) {
-    if (cap < 9 + COOP_COOKIE_LEN) return 0;
-    out[0] = j->member;
-    put64(out + 1, j->nonce);
-    memcpy(out + 9, j->token, COOP_COOKIE_LEN);
-    size_t k = coop_roster_pack(out + 9 + COOP_COOKIE_LEN, cap - 9 - COOP_COOKIE_LEN, &j->roster);
-    return k ? 9 + COOP_COOKIE_LEN + k : 0;
-}
-
-int coop_joined_parse(const uint8_t *p, size_t n, CoopJoined *j) {
-    if (n < 9 + COOP_COOKIE_LEN) return 0;
-    memset(j, 0, sizeof *j);
-    j->member = p[0];
-    j->nonce = get64(p + 1);
-    memcpy(j->token, p + 9, COOP_COOKIE_LEN);
-    return coop_roster_parse(p + 9 + COOP_COOKIE_LEN, n - 9 - COOP_COOKIE_LEN, &j->roster, NULL);
-}
-
 size_t coop_error_pack(uint8_t *out, size_t cap, const CoopError *e) {
     size_t tlen = bounded_len(e->text, sizeof e->text - 1);
-    if (cap < 10 + tlen) return 0;
+    if (cap < 2 + tlen) return 0;
     out[0] = e->reason;
-    put64(out + 1, e->nonce);
-    out[9] = (uint8_t)tlen;
-    memcpy(out + 10, e->text, tlen);
-    return 10 + tlen;
+    out[1] = (uint8_t)tlen;
+    memcpy(out + 2, e->text, tlen);
+    return 2 + tlen;
 }
 
 int coop_error_parse(const uint8_t *p, size_t n, CoopError *e) {
-    if (n < 10 || 10u + p[9] > n) return 0;
+    if (n < 2 || 2u + p[1] > n) return 0;
     memset(e, 0, sizeof *e);
     e->reason = p[0];
-    e->nonce = get64(p + 1);
-    text_clean(e->text, sizeof e->text, p + 10, p[9], sizeof e->text - 1);   // for the log: printable UTF-8 only
+    text_clean(e->text, sizeof e->text, p + 2, p[1], sizeof e->text - 1);   // for the log: printable UTF-8 only
     return 1;
 }
 
@@ -381,52 +206,99 @@ int coop_u32_parse(const uint8_t *p, size_t n, uint32_t *v) {
     return 1;
 }
 
-// ---- sealed player messages
+// ---- frames between a hosting game and the games joined to it
 
-static void env_nonce(uint8_t nonce[24], uint64_t session, uint32_t counter, uint8_t src) {
-    memset(nonce, 0, 24);
-    put64(nonce, session);
-    put32(nonce + 8, counter);
-    nonce[12] = src;
+size_t coop_frame_pack(uint8_t *out, size_t cap, const CoopFrame *f, const void *payload, size_t n) {
+    if (n > COOP_MAX_PAYLOAD || cap < COOP_FRAME_HDR + n) return 0;
+    out[0] = f->type, out[1] = f->src, out[2] = f->dst, out[3] = f->kind;
+    put32(out + 4, (uint32_t)n);
+    if (n) memmove(out + COOP_FRAME_HDR, payload, n);   // (the payload may already sit where it goes)
+    return COOP_FRAME_HDR + n;
 }
 
-size_t coop_seal(uint8_t *out, size_t cap, const uint8_t key[COOP_MSG_KEY_LEN], uint8_t src, uint8_t dst, uint64_t session,
-                 uint32_t counter, uint8_t kind, const void *bytes, size_t n) {
-    size_t total = COOP_ENV_OVERHEAD + 1 + n;
-    if (n > COOP_MAX_MESSAGE || cap < total) return 0;
-    uint8_t nonce[24], ad[2] = {dst, COOP_ENV_V1};
-    out[0] = COOP_ENV_V1;
-    put64(out + 1, session);
-    put32(out + 9, counter);
-    uint8_t *plain = out + COOP_ENV_HDR;
-    if (n) memmove(plain + 1, bytes, n);
-    plain[0] = kind;
-    env_nonce(nonce, session, counter, src);
-    crypto_aead_lock(plain, out + COOP_ENV_HDR + 1 + n, key, nonce, ad, sizeof ad, plain, 1 + n);
-    return total;
-}
-
-int coop_envelope_peek(const uint8_t *p, size_t n, uint64_t *session, uint32_t *counter) {
-    if (n < COOP_ENV_OVERHEAD + 1 || p[0] != COOP_ENV_V1) return 0;
-    *session = get64(p + 1);
-    *counter = get32(p + 9);
+int coop_frame_parse(const uint8_t *d, size_t n, CoopFrame *f, const uint8_t **payload) {
+    if (n < COOP_FRAME_HDR || n > COOP_FRAME_HDR + COOP_MAX_PAYLOAD) return 0;
+    uint32_t len = get32(d + 4);
+    if (len != n - COOP_FRAME_HDR) return 0;
+    f->type = d[0], f->src = d[1], f->dst = d[2], f->kind = d[3];
+    f->len = len;
+    *payload = d + COOP_FRAME_HDR;
     return 1;
 }
 
-int coop_open(const uint8_t *p, size_t n, const uint8_t key[COOP_MSG_KEY_LEN], uint8_t src, uint8_t dst, uint8_t *kind,
-              uint8_t *out, size_t cap, size_t *nout) {
-    uint64_t session;
-    uint32_t counter;
-    if (!coop_envelope_peek(p, n, &session, &counter)) return 0;
-    size_t len = n - COOP_ENV_OVERHEAD;   // kind and bytes
-    uint8_t plain[COOP_MAX_PAYLOAD], nonce[24], ad[2] = {dst, COOP_ENV_V1};
-    if (len > sizeof plain || cap < len - 1) return 0;
-    env_nonce(nonce, session, counter, src);
-    if (crypto_aead_unlock(plain, p + n - COOP_ENV_MAC, key, nonce, ad, sizeof ad, p + COOP_ENV_HDR, len)) return 0;
-    *kind = plain[0];
-    if (len > 1) memcpy(out, plain + 1, len - 1);
-    *nout = len - 1;
-    crypto_wipe(plain, len);
+// HELLO: u8 protocol major, u64 session, u8 name length, name. WELCOME: u8 member, u8[16] room id, u8 protocol, roster.
+size_t coop_hello_pack(uint8_t *out, size_t cap, const CoopHello *h) {
+    size_t nlen = bounded_len(h->name, COOP_NAME_MAX);
+    if (cap < 10 + nlen) return 0;
+    out[0] = h->proto;
+    put64(out + 1, h->session);
+    out[9] = (uint8_t)nlen;
+    memcpy(out + 10, h->name, nlen);
+    return 10 + nlen;
+}
+
+int coop_hello_parse(const uint8_t *p, size_t n, CoopHello *h) {
+    if (n < 10) return 0;
+    size_t nlen = p[9];
+    if (nlen > COOP_NAME_MAX || 10 + nlen > n) return 0;
+    memset(h, 0, sizeof *h);
+    h->proto = p[0];
+    h->session = get64(p + 1);
+    coop_name_clean(h->name, sizeof h->name, p + 10, nlen);
+    return 1;
+}
+
+size_t coop_welcome_pack(uint8_t *out, size_t cap, const CoopWelcome *w) {
+    if (cap < 18) return 0;
+    out[0] = w->member;
+    memcpy(out + 1, w->room_id, COOP_ROOM_ID_LEN);
+    out[17] = w->proto;
+    size_t k = coop_roster_pack(out + 18, cap - 18, &w->roster);
+    return k ? 18 + k : 0;
+}
+
+int coop_welcome_parse(const uint8_t *p, size_t n, CoopWelcome *w) {
+    if (n < 18) return 0;
+    memset(w, 0, sizeof *w);
+    w->member = p[0];
+    memcpy(w->room_id, p + 1, COOP_ROOM_ID_LEN);
+    w->proto = p[17];
+    return coop_roster_parse(p + 18, n - 18, &w->roster, NULL);
+}
+
+// The room's 16 bytes, shown in the log as 8 hex characters: never a secret, only what says which room a signature
+// was made for.
+void coop_room_id_hex(const uint8_t id[COOP_ROOM_ID_LEN], char out[COOP_ROOM_TEXT + 1]) {
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 8; i++) out[2 * i] = hex[id[i] >> 4], out[2 * i + 1] = hex[id[i] & 15];
+    out[16] = 0;
+}
+
+// ---- player messages: the payload of a DATA frame
+//   u8 envelope version (COOP_MSG_V1), u64 sender's session, u32 counter, u8 kind, bytes
+// The hosting game stamps the sender's member id into the frame it forwards, so a member's session and counter are
+// what says which join of the sender's a message is of, and a new join (a new session, the counter from 1) starts a
+// new window of them. A message of a kind this build does not know is passed to no one; a later envelope version can
+// carry other fields, and a new kind (a pose, say) only needs a number.
+
+size_t coop_msg_pack(uint8_t *out, size_t cap, uint64_t session, uint32_t counter, uint8_t kind, const void *bytes, size_t n) {
+    if (n > COOP_MAX_MESSAGE || cap < COOP_MSG_HDR + 1 + n) return 0;
+    out[0] = COOP_MSG_V1;
+    put64(out + 1, session);
+    put32(out + 9, counter);
+    out[COOP_MSG_HDR] = kind;
+    if (n) memcpy(out + COOP_MSG_HDR + 1, bytes, n);
+    return COOP_MSG_HDR + 1 + n;
+}
+
+int coop_msg_parse(const uint8_t *p, size_t n, uint64_t *session, uint32_t *counter, uint8_t *kind,
+                   const uint8_t **bytes, size_t *nout) {
+    if (n < COOP_MSG_HDR + 1 || p[0] != COOP_MSG_V1) return 0;
+    *session = get64(p + 1);
+    *counter = get32(p + 9);
+    *kind = p[COOP_MSG_HDR];
+    *bytes = p + COOP_MSG_HDR + 1;
+    *nout = n - COOP_MSG_HDR - 1;
     return 1;
 }
 

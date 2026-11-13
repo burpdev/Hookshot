@@ -1,7 +1,7 @@
 """hookshot_env.txt sets none of co-op's switches.
 
 hookshot_env.txt is a file beside the game that players pass around and packs bring. One that could set HOS_COOP,
-HOS_COOP_SERVER or HOS_COOP_AUTO with HOS_COOP_ROOM would switch co-op on, name its author's relay and put whoever
+HOS_COOP_SERVER or HOS_COOP_AUTO would switch co-op on, name its author's host and put whoever
 uses it into its author's room. So no name that begins HOS_COOP is taken from it (env_line_allowed in host/hos_main.c):
 co-op is switched on in hookshot_options.ini or the menu, and the variables are for the player's own environment and
 for tests. The file HOS_ENV_FILE names, a test run's own, still sets them.
@@ -38,12 +38,12 @@ def main():
     names = set()
     for source in sorted((ROOT / "host").glob("*.c")):
         names.update(re.findall(r'"(HOS_COOP[A-Z0-9_]*)"', source.read_text(encoding="utf-8")))
-    session = {"HOS_COOP", "HOS_COOP_NAME", "HOS_COOP_SERVER", "HOS_COOP_PORT", "HOS_COOP_AUTO", "HOS_COOP_ROOM",
-               "HOS_COOP_DROP", "HOS_COOP_TRACE"}
+    session = {"HOS_COOP", "HOS_COOP_NAME", "HOS_COOP_SERVER", "HOS_COOP_PORT", "HOS_COOP_AUTO",
+               "HOS_COOP_DROP", "HOS_COOP_TRACE"}   # (host/coop.c: the room's settings; the rest are the layers' own)
     if not session <= names:
         raise SystemExit("FAIL: host/*.c no longer names %s: this test's list is out of date" % ", ".join(sorted(session - names)))
     names = sorted(names | {"HOS_COOP_ANYTHING_LATER"})
-    values = {"HOS_COOP_SERVER": "relay.example:24680", "HOS_COOP_AUTO": "join", "HOS_COOP_ROOM": "H7K3WM-BCDFGH-234567",
+    values = {"HOS_COOP_SERVER": "host.example:43400", "HOS_COOP_AUTO": "join",
               "HOS_COOP_NAME": "Link", "HOS_COOP_PORT": "4000", "HOS_COOP_DROP": "30"}
     lines = "".join("%s=%s\n" % (n, values.get(n, "1")) for n in names)
 
@@ -98,7 +98,7 @@ int main(int argc, char **argv) {
     setenv("HOS_ENV_FILE", argv[1], 1);            /* a test run's own file sets them, as it sets anything */
     load_hookshot_env();
     for (int i = 0; i < NAMES; i++) CHECK(getenv(names[i]) != NULL, "the file HOS_ENV_FILE names did not set %s", names[i]);
-    CHECK(getenv("HOS_COOP_ROOM") && !strcmp(getenv("HOS_COOP_ROOM"), "H7K3WM-BCDFGH-234567"), "with its value");
+    CHECK(getenv("HOS_COOP_SERVER") && !strcmp(getenv("HOS_COOP_SERVER"), "host.example:43400"), "with its value");
     if (!fails) printf("PASS: hookshot_env.txt sets none of the %d HOS_COOP names; the environment and HOS_ENV_FILE's file do\n", NAMES);
     return fails != 0;
 }

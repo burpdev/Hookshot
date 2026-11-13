@@ -141,6 +141,7 @@ int main(void) {
 enum MenuTab { TAB_CONTROLS };
 struct Options { int output_res = 0, vsync = 0, resolution = 0, fps_cap = 0, upscale = 0, dlss = 0, handheld = 0, ultrawide = 0, stick_dead_zone = 0, game_lang = 0; } opts;   // (ultrawide: the Aspect ratio row's key)
 static int parse_output(const char* text) { return atoi(text); }   // (the Output row's own parse: not what this checks)
+static int coop_port = 43400;   // (the Co-op tab's Port row: ini_key's key for it; no room here)
 ''' + block(menu, "struct Row {") + ";\n" + block(menu, "const char* tx_stick_dead_zone(") + "\n" + \
         "Row rows[] = {" + row.group(0) + "};\n" + block(menu, "const char* ini_key(") + r'''
 static int parse(const char* text) {

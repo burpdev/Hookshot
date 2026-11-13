@@ -986,39 +986,26 @@ void apply_auto(bool keep_own) {
     auto_for = auto_fp;          // (chosen for this PC, whether at a start or on the menu's row)
 }
 
-/* (hookshot) The Co-op tab's direct link: co-op (host/oot_coop.c reads the mode, the port and PvP: HOS_OPT_COOP_MODE, _PORT, _PVP,
-   oot_coop_opts.h). The name, the address row's text and the status line are the host's, sent a letter at a time
-   (menu_option_set). Enter on the name or the address row starts typing there (coop_edit: the keyboard's letters and
-   digits, Backspace, Ctrl+V pastes, Enter keeps it, Esc leaves it as it was); what was typed goes to the host the same way
-   back (HOS_OPT_COOP_ACTION, _OUT). The notes are what just happened ("Ryan found Hookshot"), shown with the status in the
-   screen's top left corner for a few seconds: draw_coop. Play as, Port and PvP are kept in hookshot_options.ini as the other
-   rows are (by their names: play_as, port, pvp); the name and the address are the host's to keep (coop.txt), and a game
-   starts not connected. */
-int coop_role = 0, coop_port = 43400, coop_pvp = 0;   // (role: 0 host, 1 join)
-bool coop_connect = false;   // (the Connection row's button: pressed each time the game is started, not kept)
-/// What the host is asked for (HOS_OPT_COOP_MODE): 0 not connected, 1 host, 2 join
-int coop_mode_now() {
-    // (test runs, HOS_COOP_AUTO=host|join: connected from the start, without the menu's Connection row)
-    static const int forced = [] { const char* e = getenv("HOS_COOP_AUTO"); return !e ? 0 : !strcmp(e, "host") ? 1 : !strcmp(e, "join") ? 2 : 0; }();
-    return forced ? forced : !coop_connect ? 0 : coop_role ? 2 : 1;
-}
-std::atomic<int> coop_action{0};
-int coop_edit = 0;                   // (the row being typed in: 1 Your name, 2 Host address; 0 none)
-std::string coop_edit_text;          // (what has been typed so far)
-std::string coop_out;                // (a typed text on its way to the host, a letter at a time: menu_coop_option)
-size_t coop_out_at = 0;
+/* (hookshot) The Co-op tab's presence rows and the screen's corner: co-op's other layer (host/oot_coop.c) sends the notes,
+   the players in the room and their labels (HOS_OPT_COOP_TEXT, _CHAR, _LABEL, _HIDE: oot_coop_opts.h) and takes PvP and
+   "go to player n" (HOS_OPT_COOP_PVP, _ACTION). The room itself — Host, Join, the player's name, the host's address, the
+   port, the status and who is in it — is one way in and one way out (host/coop.c through host/coop_menu.c): the tab reads
+   it at every frame of the open menu (MkwVkHost.coop_view) and asks for what its rows say (coop_command), in its own part
+   below. PvP is kept in hookshot_options.ini as the other rows are; the name, the host's address and the port are
+   hookshot_options.ini's coop_name=, coop_server= and coop_port=, which host/coop.c reads at the next start. */
+int coop_port = 43400, coop_pvp = 0;
+std::atomic<int> coop_action{0};   // (10 + n: travel to the n-th of the others; taken once by the host)
 std::mutex coop_mu;   // (the texts below: the host's threads write them)
-std::string coop_pending, coop_status, coop_name = "Player", coop_addr = "Set (kept off the screen)";
+std::string coop_pending;   // (HOS_OPT_COOP_CHAR, a letter at a time; HOS_OPT_COOP_TEXT says what the whole text is)
 struct CoopNote { std::string text; int64_t until; };
 std::vector<CoopNote> coop_notes;
 std::vector<std::string> coop_players;   // (the others, "Name: where" each, in the host's order: the corner's list and the Go to player rows)
 std::atomic<int> coop_player_n{0};
 std::atomic<int> coop_note_n{0};         // (the notes there are: whether the corner has anything to show with co-op off)
-std::atomic<int> coop_hidden{0};         // (host -> menu, HOS_OPT_COOP_HIDE: one of the game's own menus is open)
+std::atomic<int> coop_hidden{0};         // (host -> menu, HOS_OPT_COOP_HIDE: one of the game's own menus is in front)
 // (the name over each of the others: where the host says it goes, HOS_OPT_COOP_LABEL, and when it last said so)
 std::atomic<int> coop_label[8];
 std::atomic<int64_t> coop_label_at[8];
-const char* tx_coop(int v) { return v ? "Join" : "Host"; }
 const char* tx_port(int v) {
     static char text[16];
     snprintf(text, sizeof text, "%d", v);
@@ -1534,55 +1521,46 @@ Row rows[] = {
     {TAB_RULES, "Co-op at start", &opts.coop, 0, 1, 1, tx_onoff,
      "On: co-op is switched on when the game starts, in no room: you make or join one on the Co-op tab. Off: making or "
      "joining a room switches it on for that run.", nullptr, false, true},
-    // (hookshot) Co-op (host/coop_menu.c): the name and the relay, which are text fields (field_rows), then what can be done in
-    // the room's state (coop_row_shown); its own layout (draw_coop_rows) puts the room's status above them and its members below
-    {TAB_COOP, "Your name", nullptr, 0, 0, 0, nullptr,
-     "The name the others in the room see, up to 24 characters. Empty: Player- and four random digits. Changed while in a room, "
-     "you join it again under the new name."},
-    {TAB_COOP, "Relay", nullptr, 0, 0, 0, nullptr,
-     "The relay the room goes through, as host or host:port. One of you runs scripts/coop_relay.py and gives the others its "
-     "address; there is no public one. Changed while in a room, you leave it."},
-    {TAB_COOP, "Make a room", nullptr, 0, 0, 0, nullptr,
-     "Makes a new room on the relay and shows its secret. Tell the others the secret by voice or a private message: whoever "
-     "has it can join."},
-    {TAB_COOP, "Join a room", nullptr, 0, 0, 0, nullptr,
-     "The secret the room's maker gave you, typed or pasted: XXXXXX-XXXXXX-XXXXXX, any case, the dashes and spaces left out "
-     "or not. Enter joins."},
-    {TAB_COOP, "Room secret", nullptr, 0, 0, 0, nullptr,
-     "Whoever has it can join this room: give it only to those you play with. Enter shows or hides it."},
+    // (hookshot) Co-op (host/coop_menu.c): one way in. Host makes this game the room the others join; Join joins the room at
+    // the Host address. Pressing the row again leaves the room it is in. Player name and Host address are text fields
+    // (field_rows); what can be done depends on the room's state (coop_row_shown). draw_coop_rows puts the room's state and
+    // its members above the rows
+    {TAB_COOP, "Host", nullptr, 0, 0, 0, nullptr,
+     "Co-op: one adventure with friends, each in their own game. This game holds the room: the others type its address in "
+     "the Host address row and Join. Everyone needs the same version of Hookshot, and the same Port. Across the internet the "
+     "host forwards that port, or everyone joins one virtual network (Tailscale, ZeroTier, Radmin). Press again to stop "
+     "hosting: everyone else leaves the room."},
+    {TAB_COOP, "Join", nullptr, 0, 0, 0, nullptr,
+     "Joins the room at the Host address, on the Port. Ask whoever hosts what to type. Press again to leave the room; the "
+     "others play on in it."},
+    {TAB_COOP, "Host address", nullptr, 0, 0, 0, nullptr,
+     "For Join: press Enter, type the host's address (or paste it with Ctrl+V), then Enter again: 192.168.1.20, "
+     "coop.example.org, [2001:db8::7], or any of those with :port. While this game hosts, the row shows what the others "
+     "type to reach it. Changed while in a room, you leave it."},
+    {TAB_COOP, "Port", &coop_port, 1024, 65535, 1, tx_port,
+     "The port the host listens on and the others connect to. The same number for everyone: 43400 is where it starts.",
+     nullptr, false, true},
+    {TAB_COOP, "Player name", nullptr, 0, 0, 0, nullptr,
+     "What the others see, up to 24 characters. Press Enter, type a name (what you can type on the keyboard), then Enter "
+     "again to keep it. "
+     "Esc leaves it as it was. Empty: Player- and four random digits. Changed while in a room, the room is told the new one."},
+    {TAB_COOP, "Status", nullptr, 0, 0, 0, nullptr,
+     "Hosting, Joined, Connecting, or In no room and why. It also shows in the top left corner of the screen while in a room, "
+     "with a longer note when something is wrong."},
     {TAB_COOP, "Accept the room", nullptr, 0, 0, 0, nullptr,
-     "Shares your progress with the players below, under the rules the maker's key signed. Your save is copied first. Read "
+     "Shares your progress with the players below, under the rules the host's key signed. Your save is copied first. Read "
      "your key fingerprints aloud to each other before: a name can be anyone's. Press twice."},
     {TAB_COOP, "Remove a player", nullptr, 0, 0, 0, nullptr,
-     "The maker's remedy: the player chosen with Left and Right is dropped from the room, and every game forgets its key and "
+     "The host's remedy: the player chosen with Left and Right is dropped from the room, and every game forgets its key and "
      "what it took from the pools. Press twice."},
     {TAB_COOP, "Reset the pools", nullptr, 0, 0, 0, nullptr,
-     "The maker's remedy after a drain: the shared keys, rupees and ammunition start again from what each player in the room "
+     "The host's remedy after a drain: the shared keys, rupees and ammunition start again from what each player in the room "
      "holds now. Press twice."},
-    {TAB_COOP, "Leave the room", nullptr, 0, 0, 0, nullptr, "Leaves the room; the others play on in it. Press twice."},
     {TAB_COOP, "Room rules", nullptr, 0, 0, 0, nullptr,
-     "What a room you make shares: progress, items, songs and quest items shared or per player; small keys, rupees and "
-     "ammunition in one pool or per player. The rules are the maker's: in a room another player made, theirs apply."},
-    // (hookshot: the Co-op tab's rows for the direct link (host/oot_coop.c). Player name, Host address, Connection,
-    // Status and Go to player have no value of their own: coop_row_kind. A Go to player row for each of the seven others
-    {TAB_COOP, "Play as", &coop_role, 0, 1, 1, tx_coop,
-     "Co-op: one adventure with friends, each in their own game, items and progress shared. One player is the Host, the "
-     "others Join with the host's address. Everyone needs the same version of Hookshot.", nullptr, false, true},
-    {TAB_COOP, "Host address", nullptr, 0, 0, 0, nullptr,
-     "For Join: press Enter, type the host's address (or paste it with Ctrl+V), then Enter again. It is kept off the "
-     "screen: each letter shows only while it is the last one typed."},
-    {TAB_COOP, "Port", &coop_port, 1024, 65535, 1, tx_port,
-     "The port the host listens on and the others connect to. The same number for everyone. Across the internet the host "
-     "forwards it, or everyone joins one virtual network (Tailscale, ZeroTier, Radmin).", nullptr, false, true},
-    {TAB_COOP, "Player name", nullptr, 0, 0, 0, nullptr,
-     "What the others see. Press Enter, type a name on the keyboard (letters and digits, up to 16), then Enter again to "
-     "keep it. Esc leaves it as it was."},
-    {TAB_COOP, "Connection", nullptr, 0, 0, 0, nullptr,
-     "Press Enter to connect: a Host starts waiting for the others, a Join looks for the host. Press Enter again to "
-     "disconnect. The Status row says how it went."},
-    {TAB_COOP, "Status", nullptr, 0, 0, 0, nullptr,
-     "Connecting, Connected (who, and where they are), or Not connected and why. It also shows in the top left corner "
-     "of the screen while connecting or connected, with a longer note when something is wrong."},
+     "What a room you host shares: progress, items, songs and quest items shared or per player; small keys, rupees and "
+     "ammunition in one pool or per player. The rules are the host's: in a room another player hosts, theirs apply."},
+    // (hookshot: co-op's presence (host/oot_coop.c). Go to player has no value of its own: coop_row_kind. A Go to player
+    // row for each of the seven others
     {TAB_COOP, "Go to player", nullptr, 0, 0, 0, nullptr,
      "Press Enter to travel to this player. In the same map you are stood beside them at once; in another map the game "
      "loads theirs first. It waits for a cutscene or a conversation to end."},
@@ -1814,8 +1792,9 @@ void outputs_sync() {
 
 int cur_tab = TAB_GRAPHICS;
 int tab_selected[TAB_RULES + 1] = {};   // (and the Motion page's and the Room rules page's; TAB_PAGE's is not used)
-/// (hookshot) the Co-op tab's direct-link rows that show a text of the host's: 1 Player name, 2 Host address,
-/// 3 Status, 4 Connection, 5 and up a Go to player row (the first such row is the first player listed); 0 any other row
+/// (hookshot) the Co-op tab's rows that show a text of the host's presence layer: 5 and up a Go to player row (the first
+/// such row is the first player listed); 0 any other row (the room's own rows are coop_kind's, and its Status row is the
+/// session's own words)
 int coop_row_kind(const Row& r) {
     if (r.tab != TAB_COOP || r.value) return 0;
     if (!strcmp(r.name, "Go to player")) {
@@ -1823,37 +1802,25 @@ int coop_row_kind(const Row& r) {
         for (const Row* x = &r; x > rows && !strcmp((x - 1)->name, "Go to player"); x--) n++;
         return 5 + n;
     }
-    return !strcmp(r.name, "Player name") ? 1 : !strcmp(r.name, "Host address") ? 2 : !strcmp(r.name, "Connection") ? 4
-           : !strcmp(r.name, "Status") ? 3 : 0;   // (the room's own rows are coop_kind's, not these)
+    return 0;
 }
 /// What such a row shows in its value cell
 std::string coop_row_text(int kind) {
-    if (coop_edit == kind) {   // (being typed: the name as it is, the address with only its last letter showing)
-        std::string shown = coop_edit_text;
-        if (kind == 2 && shown.size() > 1) shown = std::string(shown.size() - 1, '*') + shown.back();
-        return shown + "_";
-    }
     std::lock_guard lk(coop_mu);
-    if (kind >= 5) return (size_t)(kind - 5) < coop_players.size() ? coop_players[(size_t)(kind - 5)] + "     Go  >" : std::string();
-    if (kind == 1) return coop_name;
-    if (kind == 2) return coop_addr;
-    if (kind == 4) return coop_connect ? "Disconnect  >" : "Connect  >";
-    return !coop_connect ? "Not connected" : coop_status.empty() ? "Connecting..." : coop_status;
+    return (size_t)(kind - 5) < coop_players.size() ? coop_players[(size_t)(kind - 5)] + "     Go  >" : std::string();
 }
 /// What Enter or A does on such a row, for the prompts
-const char* coop_row_confirm(int kind) { return kind >= 5 ? "Go" : kind == 4 ? (coop_connect ? "Disconnect" : "Connect") : kind == 3 ? "Status" : "Type"; }
+const char* coop_row_confirm(int kind) { return kind >= 5 ? "Go" : "Open"; }
 bool is_motion_row(const Row& r) { return r.tab == TAB_CONTROLS && !r.value && !strcmp(r.name, "Motion"); }
 
 // ---- (hookshot) the Co-op tab: the room as host/coop_menu.c says it is (read at every frame while the menu is open:
 // coop_refresh), its rows known by their names (as is_motion_row), its three text fields ----
 MkwVkCoopView coop_now{};
-bool coop_secret_shown = false;   // (Room secret: masked until Enter shows it; masked again at every opening of the menu)
-enum { kCoopName, kCoopRelay, kCoopMake, kCoopJoin, kCoopSecret, kCoopAccept, kCoopRemove, kCoopReset, kCoopLeave, kCoopRules, kCoopRows };
-const char* const coop_row_names[kCoopRows] = {"Your name",       "Relay",           "Make a room",     "Join a room",
-                                               "Room secret",     "Accept the room", "Remove a player", "Reset the pools",
-                                               "Leave the room",  "Room rules"};
+enum { kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus, kCoopAccept, kCoopRemove, kCoopReset, kCoopRules, kCoopRows };
+const char* const coop_row_names[kCoopRows] = {"Host",   "Join",   "Host address", "Player name", "Status",
+                                                "Accept the room", "Remove a player", "Reset the pools", "Room rules"};
 int coop_remove_at = 0;   // (Remove a player: which of the others with a key, Left and Right choose)
-/// The other members with a key (those the maker can remove): their count, and the one coop_remove_at chooses (*chosen)
+/// The other members with a key (those the room's maker can remove): their count, and the one coop_remove_at chooses (*chosen)
 int coop_removable(const MkwVkCoopView& v, const MkwVkCoopMember** chosen) {
     int n = 0;
     for (int i = 0; i < v.n && i < HOS_COOP_MEMBERS; i++) n += !v.member[i].self && v.member[i].key[0];
@@ -1872,35 +1839,28 @@ int coop_kind(const Row& r) {
 bool coop_in_room(const MkwVkCoopView& v) {
     return v.state == HOS_COOP_STATE_CONNECTING || v.state == HOS_COOP_STATE_JOINED || v.state == HOS_COOP_STATE_RECONNECTING;
 }
-/// A Co-op row in the room's state v: the name and the relay always; Make and Join outside a room; the room's secret and
-/// Leave in one; Accept while the room is offered and not yet accepted; the maker's remedies to the game that holds the
-/// maker's key (Remove a player while another has a key); Room rules outside a room and to that game. While the room waits
-/// to be accepted, the remedies and Room rules stand back: the members and their keys, which are what is being accepted,
-/// get the room under the rows (draw_coop_rows)
+/// A Co-op row in the room's state v: Host, Join, the two fields, Status and Go to player are always there, so the tab does
+/// not move under the player's hands; Accept while the room is offered and not yet accepted; the host's remedies to the game
+/// that holds the room's key (Remove a player while another has a key); Room rules outside a room and to that game. While the
+/// room waits to be accepted, the remedies and Room rules stand back: the members and their keys, which are what is being
+/// accepted, get the room under the rows (draw_coop_rows)
 bool coop_row_shown(const Row& r, const MkwVkCoopView& v) {
     const MkwVkCoopMember* chosen;
     const bool makers = v.state == HOS_COOP_STATE_JOINED && v.remedies && !(v.offer && !v.accepted);
     switch (coop_kind(r)) {
-    case kCoopMake:
-    case kCoopJoin: return !coop_in_room(v);
-    case kCoopSecret: return coop_in_room(v) && v.code[0];
     case kCoopAccept: return v.state == HOS_COOP_STATE_JOINED && v.offer && !v.accepted;
     case kCoopRemove: return makers && coop_removable(v, &chosen) > 0;
     case kCoopReset: return makers;
-    case kCoopLeave: return coop_in_room(v);
     case kCoopRules: return makers || !coop_in_room(v);
     default: return true;
     }
 }
-/// (the name: any printable ASCII, the session cleans it; the relay: a host name, an IPv4 or [IPv6] address, a port; a room's
-/// secret: letters and digits, the dashes and spaces it may be typed with)
-bool relay_char(char c) { return isalnum((unsigned char)c) || c == '.' || c == '-' || c == ':' || c == '[' || c == ']' || c == '_'; }
-bool secret_char(char c) { return isalnum((unsigned char)c) || c == '-' || c == ' '; }
+/// (the name: any printable ASCII, the session cleans it; the host's address: a host name, an IPv4 or [IPv6] address, a port)
+bool addr_char(char c) { return isalnum((unsigned char)c) || c == '.' || c == '-' || c == ':' || c == '[' || c == ']' || c == '_'; }
 TextField coop_name_field{{}, 0, 0, 24, nullptr};
-TextField coop_relay_field{{}, 0, 0, 63, relay_char};
-TextField coop_join_field{{}, 0, 0, 26, secret_char};
-bool coop_relay_whole = true;   // (the file's coop_server= fits the field: a longer one, hand-written, is kept as it is until the
-                                // Relay is set in the menu)
+TextField coop_addr_field{{}, 0, 0, 63, addr_char};
+bool coop_addr_whole = true;   // (the file's coop_server= fits the field: a longer one, hand-written, is kept as it is until
+                               // the Host address is set in the menu)
 
 // ---- the rows that take a restart: their values at the start (menu_init, the GPU's at menu_set_gpu_count) ----
 namespace mr = menu_restart;
@@ -2067,6 +2027,7 @@ const char* ini_key(const Row& r) {
     if (r.value == &opts.dlss) return "dlss";   // (as opts.dlss and RX_VK_DLSS)
     if (r.value == &opts.handheld) return "handheld_profile";   // (the Profile row; host/nn_applet.c reads it at the start)
     if (r.value == &opts.ultrawide) return "ultrawide";   // (the Aspect ratio row; host/hos_main.c reads it at the start)
+    if (r.value == &coop_port) return "coop_port";   // (the Co-op tab's Port row; host/coop.c reads it at the start)
     static char k[32];
     size_t n = 0;
     for (const char* p = r.name; *p && n + 1 < sizeof k; p++) k[n++] = *p == ' ' ? '_' : (char)tolower(*p);
@@ -2200,7 +2161,8 @@ void save() {
             const std::string key(line, (size_t)(eq - line));
             // (memory_budget and auto_for too: save() writes them, and the file's old line, kept after it, won at the next start)
             bool mine = key == "microphone_device" || key == "options_version" || key == "coop_name" ||
-                        (key == "coop_server" && coop_relay_whole)   // (hookshot: the Co-op tab's name and relay: host/coop.c reads them at the start)
+                        (key == "coop_server" && coop_addr_whole)   // (hookshot: the Co-op tab's name and host address:
+                                                                     // host/coop.c reads them at the start)
                         || key == "memory_budget" || key == "auto_for" ||
                         key == "auto_tuned" || key == "auto_output" || key == "auto_steps";
             // (and the Mesh shaders row's line, no longer read (gpu/vk/mesh_mode.h): dropped, not kept for nothing)
@@ -2236,9 +2198,9 @@ void save() {
             fprintf(f, "auto_output=%ux%u\n", (unsigned)auto_output.w, (unsigned)auto_output.h);
         // (the tuning's steps so far and whether one went down: the no-seesaw rule and the two steps hold across restarts)
         if (auto_for && auto_tuning.steps) fprintf(f, "auto_steps=%d,%d\n", auto_tuning.steps, auto_tuning.went_down ? 1 : 0);
-        // (hookshot: the Co-op tab's name and relay, which host/coop.c reads at the start; emptied, the line goes)
+        // (hookshot: the Co-op tab's Player name and Host address, which host/coop.c reads at the start; emptied, the line goes)
         if (coop_name_field.len) fprintf(f, "coop_name=%s\n", coop_name_field.text);
-        if (coop_relay_field.len && coop_relay_whole) fprintf(f, "coop_server=%s\n", coop_relay_field.text);
+        if (coop_addr_field.len && coop_addr_whole) fprintf(f, "coop_server=%s\n", coop_addr_field.text);
         // (2: game_speed below 2 was only ever the old default, see menu_init; 3: the mouse's buttons are bindings, see
         // host/nn_hid.c binds_load; 4: Descriptor reuse on by default, see menu_init and vk_draw.cpp desc_slotgen_on; 5: the
         // Menu shortcut "Insert, F1 or Esc" by default, see menu_init; 6: the Aspect ratio's 16:9 from before moves on a
@@ -2709,6 +2671,8 @@ void set_row(Row& r, int v, int dir, bool keep = true) {
     if (r.value == &opts.dlss || r.value == &opts.resolution || r.value == &opts.dlss_model)
         temporal_reset_failure();
     prompts_at_once(r);   // (hookshot)
+    if (r.value == &coop_port && host && host->coop_command)
+        host->coop_command(HOS_COOP_CMD_PORT, tx_port(coop_port), 0);   // (the room is hosted on it, or joined there)
     {   // (a row that takes a restart, or a preset that sets one: asked again at the next close)
         int now[mr::kMax];
         restart_values(now);
@@ -2718,26 +2682,19 @@ void set_row(Row& r, int v, int dir, bool keep = true) {
 }
 
 // ---- (hookshot) the rows that are text fields (text_edit): their fields, what Enter on each sets, the one being edited ----
-/// (hookshot) Enter on the Co-op tab's Your name: kept in the file, and a room the player is in joined again under it
+/// (hookshot) Enter on the Co-op tab's Player name: kept in the file, and told to the room this game is in
 const char* coop_name_apply() {
     if (host && host->coop_command) host->coop_command(HOS_COOP_CMD_NAME, coop_name_field.text, 1);
     save();
     return nullptr;
 }
-/// Enter on Relay: host or host:port (as the session reads it: host/coop_menu.c), kept in the file; a room it ends is left
-const char* coop_relay_apply() {
-    if (host && host->coop_command && !host->coop_command(HOS_COOP_CMD_SERVER, coop_relay_field.text, 1))
-        return "Type the relay's address as host or host:port: relay.example.org:24680, 192.168.1.20, [2001:db8::7]:24680.";
-    coop_relay_whole = true;
+/// Enter on Host address: host or host:port (as the room reads it: host/coop_menu.c), kept in the file; a room this game is
+/// in is left, since it is no longer the room asked for
+const char* coop_addr_apply() {
+    if (host && host->coop_command && !host->coop_command(HOS_COOP_CMD_ADDRESS, coop_addr_field.text, 1))
+        return "Type the host's address as host or host:port: 192.168.1.20, coop.example.org, [2001:db8::7]:43400.";
+    coop_addr_whole = true;
     save();
-    return nullptr;
-}
-/// Enter on Join a room: the room of the secret typed joined (co-op switched on for it) and the field emptied, or why not
-const char* coop_join_apply() {
-    if (!coop_join_field.len) return "Type the room's secret first: XXXXXX-XXXXXX-XXXXXX.";
-    if (!host || !host->coop_command || !host->coop_command(HOS_COOP_CMD_JOIN, coop_join_field.text, 0))
-        return "Not a room's secret: 18 letters and digits, as XXXXXX-XXXXXX-XXXXXX.";
-    text_set(coop_join_field, "");   // (the room's secret shows on its own row once in the room)
     return nullptr;
 }
 /// Custom output size: the Output resolution's size of the player's own (custom_output), typed, as output_res= in
@@ -2817,9 +2774,8 @@ struct FieldRow {
     const char* (*apply)();
 };
 const FieldRow field_rows[] = {{"Custom output size", &output_field, output_field_apply},
-                               {"Your name", &coop_name_field, coop_name_apply},
-                               {"Relay", &coop_relay_field, coop_relay_apply},
-                               {"Join a room", &coop_join_field, coop_join_apply}};
+                               {"Player name", &coop_name_field, coop_name_apply},
+                               {"Host address", &coop_addr_field, coop_addr_apply}};
 /// A row that is a text field (a row with no value, by its name, as is_motion_row): its field and apply; nullptr any other
 const FieldRow* field_row(const Row& r) {
     for (const FieldRow& f : field_rows)
@@ -2847,22 +2803,24 @@ void edit_end(bool done) {
 /// maker's remedies and Leave at their second press, the first arming them (pending, as Restart and Quit)
 void coop_press(const Row& r) {
     const int k = coop_kind(r);
-    if (k == kCoopSecret) {
-        coop_secret_shown = !coop_secret_shown;
-        return;
+    const int in_room = coop_in_room(coop_now);
+    const bool toggle = k == kCoopHost || k == kCoopJoin;
+    /* (Host while hosting, Join while joined: the row again leaves the room, which is what everyone else is playing in, so
+       it is asked for twice. Accept, Remove and Reset the same.) */
+    if ((toggle && in_room) || k == kCoopAccept || k == kCoopRemove || k == kCoopReset) {
+        if (pending != &r) {
+            pending = &r;
+            return;
+        }
+        pending = nullptr;
     }
-    if ((k == kCoopAccept || k == kCoopRemove || k == kCoopReset || k == kCoopLeave) && pending != &r) {
-        pending = &r;
-        return;
-    }
-    pending = nullptr;
     if (!host || !host->coop_command) return;
     const MkwVkCoopMember* chosen = nullptr;
-    if (k == kCoopMake) host->coop_command(HOS_COOP_CMD_MAKE, nullptr, 0);
+    if (k == kCoopHost) host->coop_command(HOS_COOP_CMD_HOST, nullptr, 0);
+    else if (k == kCoopJoin) host->coop_command(HOS_COOP_CMD_JOIN, coop_addr_field.text, 0);
     else if (k == kCoopAccept) host->coop_command(HOS_COOP_CMD_ACCEPT, nullptr, coop_now.offer);
     else if (k == kCoopRemove && coop_removable(coop_now, &chosen) && chosen) host->coop_command(HOS_COOP_CMD_REMOVE, chosen->key, 0);
     else if (k == kCoopReset) host->coop_command(HOS_COOP_CMD_RESET_POOLS, nullptr, 0);
-    else if (k == kCoopLeave) host->coop_command(HOS_COOP_CMD_LEAVE, nullptr, 0);
 }
 /// (hookshot) The room as it is now, at every frame of the open menu: a change shows (*changed). The Co-op tab's selection stays
 /// on its row while rows come and go; when its own row went (Make a room, once in the room), on the first after the two fields
@@ -2873,8 +2831,10 @@ void coop_refresh(bool* changed) {
     memset(&now, 0, sizeof now);
     host->coop_view(&now);
     if (!memcmp(&now, &coop_now, sizeof now)) return;
+    const int was_state = coop_now.state;
     coop_now = now;
     *changed = true;
+    if (was_state != now.state) pending = nullptr;   // (the room moved under the player's hands: what was armed for it is not what the row does now)
     int shown = 0, at = -1;
     for (int i = 0; i < kRows; i++) {
         if (rows[i].tab != TAB_COOP || !row_shown(i)) continue;
@@ -3558,24 +3518,25 @@ void row_value_cell(ui::Ctx& c, const Row& r, ImVec2 va, ImVec2 vb, bool selecte
     }
 }
 
-/// (hookshot) The Co-op tab from the top down: the room's state, its players and the relay's round trip, with the session's
+/// (hookshot) The Co-op tab from the top down: the room's state, its players and the host's round trip, with the session's
 /// own words under them (or, when it has none, what the state means), in a box of a fixed height, so the rows never move; the
-/// rows (sel selected): the name's and the relay's fields, then what can be done now; then "In the room", a line a member:
-/// its number, its name, you, the maker, away, and its key's fingerprint at the right (gold once accepted; "not identified
-/// yet" while the room waits for it). The hits are the tab's row numbers, as the list's
+/// rows (sel selected): Host and Join, the host's address, the port, the name, then what can be done now; then "In the room",
+/// a line a member: its number, its name, you, the maker, away, and its key's fingerprint at the right (gold once accepted;
+/// "not identified yet" while the room waits for it). The hits are the tab's row numbers, as the list's
 void draw_coop_rows(ui::Ctx& c, float cx0, float cx1, float top, float bottom, int sel) {
     const float s = c.s, pitch = 48 * s, rh = 40 * s, box_h = 70 * s;
     const float left = cx0 + 44 * s, right = cx1 - 44 * s, split = left + (right - left) * 0.45f;
     const MkwVkCoopView& v = coop_now;
     static const char* const states[] = {"Co-op is off", "In no room", "Connecting", "In a room", "Reconnecting"};
-    static const char* const meaning[] = {"Make a room or join one: co-op starts for this run.", "Make a room or join one.",
-                                          "Reaching the relay.", "Give the room's secret to those you play with.",
-                                          "The relay went silent: joining the room again."};
+    static const char* const meaning[] = {"Host a room, or join one at an address.", "Host a room, or type the host's address "
+                                          "and Join.", "Reaching the room.", "Hosting on this PC, or joined to the host.",
+                                          "The host went silent: reaching it again."};
     const bool known = v.state >= 0 && v.state <= HOS_COOP_STATE_RECONNECTING;
     c.d->PushClipRect(ImVec2(cx0, top - 8 * s), ImVec2(cx1, std::max(top, bottom) + 8 * s), true);
     ui::box(c, ImVec2(left, top), ImVec2(right, top + box_h));
     std::string head = known ? states[v.state] : "";
-    if (v.state == HOS_COOP_STATE_JOINED) head += ", " + std::to_string(v.n) + (v.n == 1 ? " player" : " players");
+    if (v.state == HOS_COOP_STATE_JOINED)
+        head = std::string(v.hosting ? "Hosting" : "In a room") + ", " + std::to_string(v.n) + (v.n == 1 ? " player" : " players");
     ui::text_mid(c, c.f.strong, 19 * s, left + 20 * s, top + 22 * s, coop_in_room(v) ? ui::kGoldHi : ui::kInk, head.c_str());
     if (v.ping_ms && v.state == HOS_COOP_STATE_JOINED)
         ui::text_mid_right(c, c.f.body, 16 * s, right - 20 * s, top + 22 * s, ui::kSoft, (std::to_string(v.ping_ms) + " ms").c_str());
@@ -3590,25 +3551,33 @@ void draw_coop_rows(ui::Ctx& c, float cx0, float cx1, float top, float bottom, i
         name_cell(c, ImVec2(left, y), ImVec2(split, y + rh), r.name, selected);
         const ImVec2 va(split, y), vb(right, y + rh);
         if (const FieldRow* f = field_row(r)) {
-            text_cell(c, va, vb, *f->field, selected, editing == f->field,
-                      k == kCoopName ? "Random" : k == kCoopRelay ? "None" : "Type or paste the secret");
-        } else if (k == kCoopSecret) {   // (masked until Enter shows it: a stream or a screenshot would give the room away)
-            choice_cell(c, va, vb, coop_secret_shown ? v.code : "******-******-******", selected, false, false);
-        } else if (k == kCoopRemove) {   // (the player chosen, by name and key: Left and Right choose)
+            if (k == kCoopAddress && v.hosting && editing != f->field)
+                choice_cell(c, va, vb, v.addr[0] ? v.addr : "This PC's address", selected, false, false);   // (what the others
+                // type to reach this game)
+            else
+                text_cell(c, va, vb, *f->field, selected, editing == f->field,
+                          k == kCoopName ? "Random" : k == kCoopAddress ? "Type or paste" : "Type");
+        } else if (k == kCoopHost || k == kCoopJoin) {
+            const bool mine = k == kCoopHost ? v.hosting != 0 : !v.hosting;
+            const char* says = k == kCoopHost ? (coop_in_room(v) && mine ? "Stop hosting" : "Host")
+                                              : (coop_in_room(v) && mine ? "Leave the room" : "Join");
+            choice_cell(c, va, vb, coop_in_room(v) && mine && pending == &r ? "Press again to confirm" : says, selected, false, false);
+        } else if (k == kCoopStatus) {
+            choice_cell(c, va, vb, v.status[0] ? v.status : known ? meaning[v.state] : "", selected, false, false);
+        } else if (k == kCoopRemove) {
             const MkwVkCoopMember* chosen = nullptr;
-            const int n = coop_removable(v, &chosen);
-            const std::string who = chosen ? std::string(chosen->name) + "  " + chosen->key : "";
-            choice_cell(c, va, vb, pending == &r ? "Press again to confirm" : who, selected, n > 1, n > 1);
-        } else if (k == kCoopRules) {   // (opens its page, as the tabs' page rows)
+            coop_removable(v, &chosen);
+            choice_cell(c, va, vb, (chosen ? chosen->name : std::string()) + "     Remove  >", selected, false, false);
+        } else if (k == kCoopRules) {
             choice_cell(c, va, vb, "", selected, false, false);
             ui::triangle(c, ImVec2(vb.x - 15 * s, y + rh * 0.5f), 10 * s, 1, selected ? ui::kGoldInk : ui::kInk);
-        } else if (r.value) {   // (hookshot: the direct link's rows with a value of their own: Play as, Port, PvP)
+        } else if (r.value) {   // (Port and PvP have values of their own)
             float t0 = 0, t1 = 0;
             row_value_cell(c, r, va, vb, selected, &t0, &t1);
-        } else if (const int link = coop_row_kind(r)) {   // (hookshot: the direct link's rows: what the host sends back)
+        } else if (const int link = coop_row_kind(r)) {   // (Go to player: what the host's presence layer sends back)
             choice_cell(c, va, vb, coop_row_text(link), selected, false, false);
         } else {
-            const char* says = k == kCoopMake ? "Make" : k == kCoopAccept ? "Accept" : k == kCoopReset ? "Reset" : "Leave";
+            const char* says = k == kCoopAccept ? "Accept" : k == kCoopReset ? "Reset" : "Press";
             choice_cell(c, va, vb, pending == &r ? "Press again to confirm" : says, selected, false, false);
         }
         hits.add(left, y, right, std::min(y + rh, bottom + 8 * s), menu_hit::kRow, i, va.x, vb.x);
@@ -3617,22 +3586,23 @@ void draw_coop_rows(ui::Ctx& c, float cx0, float cx1, float top, float bottom, i
         const float ty = y + 20 * s, tw = ui::size_of(c.f.heading, 19 * s, "In the room").x;
         ui::text_mid(c, c.f.heading, 19 * s, left + 2 * s, ty, ui::kGoldHi, "In the room");
         c.d->AddLine(ImVec2(left + tw + 16 * s, ty), ImVec2(right, ty), ui::alpha(ui::kEdge, 0.9f), std::max(1.0f, s));
-        y = ty + 34 * s;
-        // (a line a member, closer together when the room is full, so that every key shows above the prompts where it can)
-        const int lines = std::min(v.n, (int)HOS_COOP_MEMBERS);
-        const float step = std::min(32 * s, std::max(22 * s, (bottom - y) / lines));
-        for (int m = 0; m < lines; m++, y += step) {
+        y += 40 * s;
+        const float key_x = right - 8 * s;
+        for (int m = 0; m < v.n; m++, y += 36 * s) {
             const MkwVkCoopMember& p = v.member[m];
-            std::string tags = p.self ? "you" : "";
-            if (p.maker) tags += (tags.empty() ? "" : ", ") + std::string("maker");
-            if (p.away) tags += (tags.empty() ? "" : ", ") + std::string("away");
-            const std::string who = std::to_string(p.id) + "   " + p.name + (tags.empty() ? "" : "  (" + tags + ")");
-            const char* key = p.key[0] ? p.key : v.unidentified && !p.self ? "not identified yet" : "";
-            const float key_w = ui::size_of(c.f.body, 16 * s, key).x;
-            ui::text_mid_right(c, c.f.body, 16 * s, right - 4 * s, y, p.accepted ? ui::kGoldHi : p.key[0] ? ui::kInk : ui::kDim, key);
-            ImFont* f = p.self ? c.f.strong : c.f.body;
-            ui::text_mid(c, f, 17 * s, left + 8 * s, y, p.away ? ui::kDim : ui::kInk, fit(c, f, 17 * s, right - left - key_w - 32 * s, who, false).c_str());
+            const int col = 0;
+            const float x = left + 2 * s + col * (right - left) / 2;
+            std::string who = std::to_string(p.id) + ".  " + p.name;
+            if (p.self) who += "  (you)";
+            if (p.maker) who += "  (the room)";
+            if (p.away) who += "  (away)";
+            ui::text_mid(c, c.f.body, 17 * s, x, y + 8 * s, p.self ? ui::kGoldHi : ui::kInk, fit(c, c.f.body, 17 * s, right - left - 220 * s, who.c_str(), false).c_str());
+            if (p.self || !p.key[0]) continue;
+            ui::text_mid_right(c, c.f.body, 16 * s, key_x, y + 8 * s, p.accepted ? ui::kGoldHi : ui::kSoft, p.key);
         }
+        if (v.unidentified)
+            ui::text_mid(c, c.f.body, 16 * s, left + 2 * s, y + 8 * s, ui::kGoldHi,
+                         "Not identified yet: Accept is held until every player has a key.");
     }
     c.d->PopClipRect();
 }
@@ -3716,9 +3686,13 @@ void draw_options(ui::Ctx& c) {
         if (field) {
             prompt_list[prompts_n++] = {ui::kConfirm, "Edit"};
         } else if (const int k = coop_kind(selr); k >= 0 && k != kCoopRules) {
-            prompt_list[prompts_n++] = {ui::kConfirm, k == kCoopMake ? "Make" : k == kCoopSecret ? (coop_secret_shown ? "Hide" : "Show")
-                                                    : pending == &selr ? "Confirm" : k == kCoopAccept ? "Accept" : k == kCoopRemove ? "Remove"
-                                                    : k == kCoopReset ? "Reset" : "Leave"};
+            const bool mine = coop_in_room(coop_now) && (k == kCoopHost ? coop_now.hosting != 0 : !coop_now.hosting);
+            std::string says;
+            if (k == kCoopHost) says = mine ? "Stop hosting" : "Host";
+            else if (k == kCoopJoin) says = mine ? "Leave the room" : "Join";
+            else says = k == kCoopAccept ? "Accept" : k == kCoopRemove ? "Remove" : "Reset";
+            prompt_list[prompts_n++] = {ui::kConfirm, (coop_in_room(coop_now) && mine) || k == kCoopAccept || k == kCoopRemove ||
+                                                  k == kCoopReset ? (pending == &selr ? "Confirm" : says.c_str()) : says.c_str()};
             if (k == kCoopRemove) prompt_list[prompts_n++] = {ui::kLeftRight, "Player"};
         } else if (selr.value || (selr.cheat >= 0 && (selr.cheat <= 1 || selr.cheat == 7 || cheat_chooses(selr.cheat) || age_shown(selr.cheat)))) {
             prompt_list[prompts_n++] = {ui::kLeftRight, "Change"};
@@ -4576,7 +4550,8 @@ void draw_fps(ui::Ctx& c, bool under_banner) {
 
 /// (hookshot) whether co-op has anything on the screen: it is on, or a note is still showing; not over the game's own menus
 bool coop_on_screen() {
-    return !coop_hidden.load(std::memory_order_relaxed) && (coop_mode_now() != 0 || coop_note_n.load(std::memory_order_relaxed) > 0);
+    return !coop_hidden.load(std::memory_order_relaxed) &&
+           (coop_in_room(coop_now) || coop_note_n.load(std::memory_order_relaxed) > 0);
 }
 void outlined_left(ui::Ctx& c, ImFont* font, float px, float x, float top, ImU32 col, const char* t) {
     const float o = std::max(1.0f, c.s);
@@ -4590,7 +4565,7 @@ void outlined_left(ui::Ctx& c, ImFont* font, float px, float x, float top, ImU32
 void draw_coop(ui::Ctx& c) {
     const float s = c.s, big = 15 * s, small = 12 * s, x = 12 * s;
     const int64_t now = prof_now();
-    const int mode = coop_mode_now();
+    const std::string room = coop_now.status;
     std::string status;
     std::vector<std::string> names, notes;
     {
@@ -4600,10 +4575,11 @@ void draw_coop(ui::Ctx& c) {
             else i++;
         }
         coop_note_n.store((int)coop_notes.size(), std::memory_order_relaxed);
-        if (mode && !coop_status.empty()) {   // (alone: the status as it is. With others: the names in rows under the line)
-            if (coop_players.empty()) status = "CO-OP   " + coop_status;
+        if (coop_in_room(coop_now) && !room.empty()) {   // (alone: the room's line as it is. With others: the names in rows
+                                                         // under it)
+            if (coop_players.empty()) status = "CO-OP   " + room;
             else {
-                status = mode == 1 ? "CO-OP   Connected (hosting)" : "CO-OP   Connected";
+                status = coop_now.hosting ? "CO-OP   Hosting" : "CO-OP   Joined";
                 std::string row;
                 for (const std::string& p : coop_players) {
                     if (!row.empty() && row.size() + p.size() > 84) names.push_back(row), row.clear();
@@ -4623,7 +4599,7 @@ void draw_coop(ui::Ctx& c) {
 /// (hookshot) the names over the other players: a small bubble each, its tail at the bottom middle, where the host last said
 /// that player is on the screen (HOS_OPT_COOP_LABEL: the list's place << 28, shown << 26, x << 13, y; x and y of 8191)
 void draw_coop_labels(ui::Ctx& c) {
-    if (!coop_mode_now()) return;
+    if (!coop_in_room(coop_now)) return;
     const float s = c.s, px = 15 * s;
     const int64_t now = prof_now();
     std::string names[8];
@@ -4800,10 +4776,14 @@ void menu_init() {
                 std::string v = eq + 1;
                 const bool cut = (v.empty() || v.back() != '\n') && !feof(f);   // (longer than the line: fgets left the rest)
                 while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
-                TextField& field = !strcmp(line, "coop_name") ? coop_name_field : coop_relay_field;
+                TextField& field = !strcmp(line, "coop_name") ? coop_name_field : coop_addr_field;
                 text_set(field, v.c_str());
-                if (&field == &coop_relay_field) coop_relay_whole = !cut && (int)v.size() <= field.max;
-                if (!coop_relay_whole && &field == &coop_relay_field) text_set(field, "");   // (kept in the file as it is)
+                if (&field == &coop_addr_field) coop_addr_whole = !cut && (int)v.size() <= field.max;
+                if (!coop_addr_whole && &field == &coop_addr_field) text_set(field, "");   // (kept in the file as it is)
+            }
+            if (!strcmp(line, "coop_port")) {   // (the Co-op tab's Port row: host/coop.c hosts on it, or joins the host there)
+                const int port = atoi(eq + 1);
+                if (port >= 1024 && port <= 65535) coop_port = port;
             }
         }
         fclose(f);
@@ -4858,9 +4838,11 @@ void menu_init() {
     fps_cap_started = opts.fps_cap;   // (the FPS counter's graph: the cap applies from the start, host/nn_vi.c)
     fps_level_now.store(fps_stats::level_of(opts.show_fps), std::memory_order_relaxed);
     output_field_show();   // (hookshot: Custom output size, the size of the player's own, as the file has it)
-    if (host && host->coop_command) {   // (hookshot: the Co-op tab's name and relay, for its next Make or Join: host/coop_menu.c)
+    if (host && host->coop_command) {   // (hookshot: the Co-op tab's name, host address and port, for its next Host or Join:
+                                        // host/coop_menu.c, and the room this game reaches at once)
         host->coop_command(HOS_COOP_CMD_NAME, coop_name_field.text, 0);
-        host->coop_command(HOS_COOP_CMD_SERVER, coop_relay_field.text, 0);
+        host->coop_command(HOS_COOP_CMD_ADDRESS, coop_addr_field.text, 0);
+        host->coop_command(HOS_COOP_CMD_PORT, tx_port(coop_port), 0);
     }
     // (the environment over the saved rows, for this run only: env_override, save)
     if (const char* e = getenv("RX_VK_FRAMEGEN_MULT")) env_override(&opts.framegen, std::min(std::max(atoi(e), 2), 8));
@@ -4947,16 +4929,12 @@ int menu_player_flight() { return cheats_on() ? player_flight.load(std::memory_o
 int menu_free_camera() { return cheats_on() ? free_camera.load(std::memory_order_relaxed) : 0; }
 int menu_link_speed() { return cheats_on() ? link_speeds[std::clamp(link_speed.load(std::memory_order_relaxed), 0, kLinkSpeeds - 1)] : 100; }
 int menu_take_cheat_action() { return cheat_action.exchange(0, std::memory_order_relaxed); }
-/// What the host asks of the Co-op tab (HOS_OPT_COOP_*): the mode, the port, what was done there (taken once), the next
-/// letter of what was typed, PvP. 0 for the ids that are the host's to set
+/// What the host asks of the Co-op tab (HOS_OPT_COOP_*): the room this game is in (1 it hosts, 2 it joined, 0 none), the
+/// port, what was done in the tab (taken once), PvP. 0 for the ids that are the host's to set
 int menu_coop_option(int id) {
-    if (id == HOS_OPT_COOP_OUT) {   // (the next letter of what was typed; 0: no more)
-        std::lock_guard lk(coop_mu);
-        return coop_out_at < coop_out.size() ? (unsigned char)coop_out[coop_out_at++] : 0;
-    }
-    static const int test_port = getenv("HOS_COOP_PORT") ? atoi(getenv("HOS_COOP_PORT")) : 0;   // (test runs)
-    return id == HOS_OPT_COOP_MODE ? coop_mode_now() : id == HOS_OPT_COOP_PORT ? (test_port ? test_port : coop_port)
-         : id == HOS_OPT_COOP_ACTION ? coop_action.exchange(0, std::memory_order_relaxed) : id == HOS_OPT_COOP_PVP ? coop_pvp : 0;
+    // (what the host asks the tab about. The room itself is not asked this way: its rows reach host/coop_menu.c by
+    // MkwVkHost.coop_command, and what the room is comes back each frame in MkwVkHost.coop_view.)
+    return id == HOS_OPT_COOP_ACTION ? coop_action.exchange(0, std::memory_order_relaxed) : id == HOS_OPT_COOP_PVP ? coop_pvp : 0;
 }
 
 void menu_note_present_sizes(uint32_t picture_w, uint32_t picture_h, uint32_t window_w, uint32_t window_h) {
@@ -5065,17 +5043,14 @@ void menu_option_set(int id, int value) {
         else if (coop_pending.size() < 700) coop_pending.push_back((char)value);
         return;
     }
-    if (id == HOS_OPT_COOP_TEXT) {   // (the text is whole: 0 the status line, 1 a note, 2 the name, 3 the address row's, 4 the others)
+    if (id == HOS_OPT_COOP_TEXT) {   // (the text is whole: 1 a note for the corner, 4 the others, a line each)
         {
             std::lock_guard lk(coop_mu);
-            if (value == 0) coop_status = coop_pending;
-            else if (value == 1) {
+            if (value == 1) {
                 if (coop_notes.size() >= 5) coop_notes.erase(coop_notes.begin());
                 coop_notes.push_back({coop_pending, prof_now() + 7000000000LL});
                 coop_note_n.store((int)coop_notes.size(), std::memory_order_relaxed);
-            } else if (value == 2) coop_name = coop_pending;
-            else if (value == 3) coop_addr = coop_pending;
-            else if (value == 4) {   // (the others: a line each)
+            } else if (value == 4) {   // (the others: a line each)
                 coop_players.clear();
                 for (size_t at = 0; at < coop_pending.size();) {
                     size_t end = coop_pending.find('\n', at);
@@ -5554,56 +5529,6 @@ void menu_tick() {
             next = next[n] == ',' ? next + n + 1 : nullptr;
         }
     }
-    if (coop_edit && !open_now.load()) coop_edit = 0;
-    const bool typing = coop_edit != 0;
-    if (typing) {   // (hookshot) typing in the direct link's name or address row: the keyboard is the text's
-        static bool key_held[256];
-        const bool shift = mine && (GetAsyncKeyState(VK_SHIFT) & 0x8000), ctrl = mine && (GetAsyncKeyState(VK_CONTROL) & 0x8000);
-        const size_t most = coop_edit == 1 ? 16 : 120;
-        auto typed = [&](char ch) {
-            const bool letter = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-';
-            if ((letter || (coop_edit == 2 && (ch == '.' || ch == ':'))) && coop_edit_text.size() < most) coop_edit_text.push_back(ch);
-        };
-        for (int vk = 0x08; vk < 0xc0; vk++) {
-            const bool text_key = (vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z') || (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD0 + 9) ||
-                                  vk == VK_OEM_MINUS || vk == VK_OEM_PERIOD || vk == VK_DECIMAL || vk == VK_OEM_1 || vk == VK_SUBTRACT;
-            if (!text_key) continue;
-            const bool down = mine && (GetAsyncKeyState(vk) & 0x8000) != 0, hit = down && !key_held[vk];
-            key_held[vk] = down;
-            if (!hit) continue;
-            if (ctrl && vk == 'V') {   // (the clipboard's text, what of it a name or an address can hold)
-#ifdef _WIN32
-                if (OpenClipboard(nullptr)) {
-                    if (HANDLE h = GetClipboardData(CF_TEXT)) {
-                        if (const char* text = (const char*)GlobalLock(h)) {
-                            for (const char* ch = text; *ch && *ch != 13 && *ch != 10; ch++) typed(*ch);
-                            GlobalUnlock(h);
-                        }
-                    }
-                    CloseClipboard();
-                }
-#endif
-            } else if (ctrl) {
-            } else if (vk >= 'A' && vk <= 'Z') typed((char)(shift ? vk : vk + 32));
-            else if (vk >= '0' && vk <= '9') typed((char)vk);
-            else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD0 + 9) typed((char)('0' + vk - VK_NUMPAD0));
-            else if (vk == VK_OEM_MINUS || vk == VK_SUBTRACT) typed(shift && vk == VK_OEM_MINUS ? '_' : '-');
-            else if (vk == VK_OEM_PERIOD || vk == VK_DECIMAL) typed('.');
-            else if (vk == VK_OEM_1 && shift) typed(':');
-            menu_refresh = true;
-        }
-        if (press[9] && !coop_edit_text.empty()) coop_edit_text.pop_back(), menu_refresh = true;   // (Backspace)
-        if (press[7]) {   // (Enter keeps it: on its way to the host)
-            {
-                std::lock_guard lk(coop_mu);
-                coop_out = coop_edit_text, coop_out_at = 0;
-                if (coop_edit == 1 && !coop_edit_text.empty()) coop_name = coop_edit_text;   // (shown at once: the host says the same a moment later)
-            }
-            coop_action.store(coop_edit + 2);
-            coop_edit = 0, menu_refresh = true;
-        } else if (press[5] || press[0] || press[6]) coop_edit = 0, menu_refresh = true;   // (Esc: as it was)
-        for (bool& p : press) p = false;   // (nothing typed moves the menu: Q and E are letters here)
-    }
     // (hookshot) the text field that has the keyboard (editing): what was typed since the last frame, in order, and a paste asked
     // with the controller's paste button; the host is told whether one has it, so that the window takes text only then
     uint32_t typed[64];
@@ -5618,8 +5543,8 @@ void menu_tick() {
     if (edit_keys_until && (prof_now() < edit_keys_until || ((GetAsyncKeyState(VK_RETURN) | GetAsyncKeyState(VK_ESCAPE)) & 0x8000)))
         press[5] = press[7] = false;
     else edit_keys_until = 0;
-    bool tab_left = !typing && (press[10] || pad(HOS_PAD_LSHOULDER) || pad(HOS_PAD_LTRIGGER));
-    bool tab_right = !typing && (press[11] || press[12] || pad(HOS_PAD_RSHOULDER) || pad(HOS_PAD_RTRIGGER));
+    bool tab_left = !editing && (press[10] || pad(HOS_PAD_LSHOULDER) || pad(HOS_PAD_LTRIGGER));
+    bool tab_right = !editing && (press[11] || press[12] || pad(HOS_PAD_RSHOULDER) || pad(HOS_PAD_RTRIGGER));
     if (press[12] && (GetAsyncKeyState(VK_SHIFT) & 0x8000)) tab_left = true, tab_right = false;
     bool changed = menu_refresh;
     menu_refresh = false;
@@ -5640,7 +5565,7 @@ void menu_tick() {
         last_x = mx, last_y = my, mouse_read = true;                     // menu as it opens leaves the selection alone)
         if (moved) pad_last = false;
         if (!mouse) ptr.pressed = 0, ptr.wheel = 0;
-        if (typing) mouse = false, ptr.pressed = 0, ptr.wheel = 0;   // (hookshot: a name or an address being typed has the menu)
+        if (editing) mouse = false, ptr.pressed = 0, ptr.wheel = 0;   // (hookshot: a name or an address being typed has the menu)
     }
     // (closing with a setting that takes a restart changed: the restart question first, Later already chosen on it)
     auto later = [&] {
@@ -5669,7 +5594,7 @@ void menu_tick() {
         if (open_now.load()) opts.pad_layout = detect_pad_layout();
         if (open_now.load()) dlss_probe(), fsr4_probe();   // (whether the Upscaler row can offer DLSS and FSR here: asked once)
         if (open_now.load()) refresh_mics();   // (the microphones as they are now)
-        if (open_now.load()) coop_secret_shown = false, coop_refresh(&changed);   // (hookshot: the room's secret masked again)
+        if (open_now.load()) coop_refresh(&changed);   // (hookshot: the room as it is now, at the menu's opening too)
     }
     if (open_now.load() && editing) {   // (hookshot) a text field has the keyboard: the keys type into it (text_edit), nothing else
         int done = kTextGoOn;
@@ -5957,17 +5882,8 @@ void menu_tick() {
                 }
             }
         } else if (r.cheat >= 0) cheat_press(r.cheat, press, changed);   // (a debug tool: on the Debug tab itself)
-        else if (press[7] && coop_row_kind(r)) {   // (hookshot: the Co-op tab's rows without a value)
-            const int kind = coop_row_kind(r);
-            if (kind < 3) {   // (typing starts in the name's or the address's row)
-                coop_edit = kind;
-                std::lock_guard lk(coop_mu);
-                coop_edit_text = kind == 1 ? coop_name : "";
-            } else if (kind == 4) {   // (the Connect button)
-                coop_connect = !coop_connect;
-                std::lock_guard lk(coop_mu);
-                coop_status.clear();
-            } else if (kind >= 5) coop_action.store(10 + kind - 5);   // (Go to player)
+        else if (press[7] && coop_row_kind(r)) {   // (hookshot: Go to player, the Co-op tab's row without a value)
+            coop_action.store(10 + coop_row_kind(r) - 5);
             press[7] = false, changed = true;
         }
         else if (press[7] && is_motion_row(r)) cur_tab = TAB_MOTION, tab_selected[TAB_MOTION] = 0, press[7] = false, changed = true;

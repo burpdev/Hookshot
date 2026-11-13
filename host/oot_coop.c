@@ -1,82 +1,60 @@
-/* Co-op for Ocarina of Time.
+/* Co-op for Ocarina of Time: the presence layer of a room.
  *
- * Two to four players, each in their own copy of the game, sharing one adventure: what one
- * finds, all hold; what one has done, is done for all. The F1 menu's Co-op tab turns it on.
+ * Two to eight players, each in their own copy of the game, sharing one adventure: what one finds, all hold; what one
+ * has done, is done for all. The F1 menu's Co-op tab turns it on with two rows: Host, or Join at an address.
  * docs/coop.md is the players' page.
  *
- * ONE PLAYER HOSTS, THE OTHERS JOIN. The host's game listens on a port (43400 unless the tab
- * says otherwise); the others connect to the host's address. The host passes every message on,
- * so three or four players need nothing more. On one network that works as it is; across the
- * internet the host forwards the port, or everyone is on one virtual network (Tailscale,
- * ZeroTier, Radmin): the address is then the host's address there.
+ * ONE ROOM, ONE WAY INTO IT (host/coop.c). The room is the host's listening socket: the game that hosts holds it, the
+ * others reach it at the host's address and its port (43400 unless the tab says otherwise), and it ends when the host's
+ * game closes. That session is Hookshot's own — its wire, its members and its round trip are in host/coop.h,
+ * host/coop_net.c and host/coop_proto.h; what a room shares and what stays each player's own is its rules engine
+ * (host/coop_state.c, host/coop_oot.c) under the tab's Room rules page. This file adds no link of its own, on Windows or
+ * on Linux: what it says goes out as the room's messages (coop_send, COOP_K_LINE) and what the others say comes to it on
+ * the room's thread.
  *
- * WHAT IS SHARED
- *   items      Every pickup enters the pouch by name through f_8112d570 (oot_coop_pouch_add
- *              below, hooked in by nx2/oot_patches.py). A lasting item (a weapon, a tunic, a
- *              song, a stone, a medallion, an upgrade, a trade item) is told to the others, who
- *              are given it the way the Inventory page gives it; so is each heart container,
- *              heart piece, empty bottle and Gold Skulltula token, one for one, and the rupees
- *              and ammunition picked up off the ground. What a bottle holds and the hearts a
- *              player has left are each player's own.
- *   flags      The game's save flags (GameDataMgr's bools) that are lasting progress: which
- *              ones is decided from the game's own flag list by nx2/coop_flags.py
- *              (<game>\coop\flags.bin). Twice a second the shared ones are compared with what
- *              they were; one that left the value a new file starts it with (most start off,
- *              some on) is told to the others, where it leaves it too. Nothing is ever put
- *              back to its start for anyone: progress only adds up.
- *   objects    The flags the game keeps by a placed object's own number (Bool64bitKey: a chest
- *              opened, a rupee or a heart piece taken, a Gold Skulltula killed, a rock blown
- *              up): the lasting kind, reset type 24. The kinds the game itself puts back (pots
- *              and grass, 88; enemies, 280; shop stock, 25) are left to each player. A chest
- *              another player opened shows open the next time its map is loaded.
- *   keys       Each dungeon's small-key count (DungeonInfo.<dungeon>.SmallKeyNum): a key found
- *              or used by one is one more or one less for all.
- *   where      Thirty times a second each player says which map they are on, where they stand
- *              and which way they face; the menu and the corner of the screen show it, and
- *              each other player is drawn there as a Link of their age (co_bodies_step).
- *   enemies    An enemy's life is one for all, and it stands in one place for all: the game of
- *              the player nearest to it leads it, the others' copies follow ("one enemy for
- *              everyone", further down).
- * A player who joins later is told everything the others hold and have done, and tells them the
- * same: after a moment all are level. Key counts are then the host's.
+ * WHAT THIS LAYER SHARES
+ *   where      Thirty times a second each player says which map they are on, where they stand, which way they face and
+ *              what Link plays; the menu and the corner of the screen show it, and each other player is drawn there as a
+ *              Link of their age (co_bodies_step). A Go to player row travels to one of them.
+ *   enemies    An enemy's life is one for all, and it stands in one place for all: the game of the player nearest to it
+ *              leads it, the others' copies follow ("one enemy for everyone", further down).
+ *   PvP        A hit that reaches another player takes hearts from them, between players who both have the row on.
+ *   hearts     Each heart container, each Piece of Heart and each Gold Skulltula token is one for one: what one finds,
+ *              all hold, once. Those three are what the room's rules leave to this layer.
+ * Everything else of what a room shares — the game's save flags, items, songs, quest items, small keys, rupees and
+ * ammunition — is the room's rules engine's, with its pools, its acceptance and its signed rules. A room does not have two
+ * of them, and this file is not one: what it used to keep in step itself (nx2/coop_flags.py's shared flags, the placed
+ * objects' flags, each dungeon's small keys) went to the rules, where the Room rules page says whether it is shared at
+ * all, shared per player, or drawn from one pool.
  * Nothing is changed in a game while an event plays in it or a map loads (co_game_busy): it waits.
  *
- * THE WIRE: text lines over TCP. A joining player sends "H 1 <name> <game>" and from then on
- * plain messages; the host sends every player "<from> <message>", from 0 being the host itself.
- * <game> is a word for a changed game that all must share (a randomizer's seed); "-" is the game
- * as it is, the only one this file says.
- *   W <id> <name> <game>     host -> the player who joined: your number, and who hosts
- *   J <name> <game>          a player is here            L   a player left
- *   P <map> <x> <y> <z> <yaw> <child> <busy> <pvp>       where I am
- *   I <item> <count> [q]     I picked this up (q: said while levelling, not a find)
- *   F <hash> <hash> ...      these flags have left the value a new file starts them with (hex)
- *   K <key> <key> ...        these per-object flags are on (hex, 64 bits)
- *   N <hash> <change>        a counted value (a dungeon's small keys) went up or down by this much
- *   V <hash> <value>         (the host, levelling) that counted value is this
- *   M <quarters>             (levelling) my hearts, in quarters: containers and pieces
- *   R <name>                 I am called this now
+ * THE LINES, carried as the room's messages of kind COOP_K_LINE. The room puts every message under the number of the
+ * member that sent it (host/coop.c stamps it), so a line here never names its sender; the members are numbered 1..8 and
+ * the host is always 1, which is the number a hit names (D, U, O). A player who joins is caught up by the rules engine;
+ * this layer says only its hearts (M).
+ *   P <map> <x> <y> <z> <yaw> <child> <busy> <pvp>   where I am, and what my game is doing
+ *   I <name> <count> [q]     I found a heart container, a Piece of Heart or a token (q: said while a player catches up)
+ *   M <quarters>             (catching up) my hearts, in quarters: containers and pieces
  *   D <player> <quarters>    (PvP) my swing reached that player: so many quarter hearts
- *   T <slot> <command>       what my Link plays in an animation slot ("-": nothing)
- *   Y <words> <base64>       my Link's animation inputs: the words that changed
+ *   O <player>               (PvP) that player's hearts ran out
  *   U <enemy> <x y z> <life> my hit took this much of that enemy's life (its name's hash, where it was made)
  *   Q <enemy> <x y z> ...    I lead that enemy: where it stands and what it plays (co_enemy_lead_step)
- *   O <player>               (PvP) that player's hearts ran out
+ *   T <slot> <command>       what my Link plays in an animation slot ("-": nothing)
+ *   Y <words> <base64>       my Link's animation inputs: the words that changed
  *   G, A, Z, E, S            test runs only (HOS_COOP_TEST=1): travel, an animation, an actor, equipment
  *
- * THREADS: sockets live on one thread of their own (co_net). The game's side (oot_coop_frame
- * every frame shown, co_tick from Link's own update while a save is played) talks to it
- * through two queues under co.lock. Winsock is loaded by name at the first use, so the build's
- * link line is as it was.
- *
- * Windows only for now: the sockets are Winsock's. Elsewhere the entry points at the end of the
- * file do nothing, and the Co-op tab's Connect finds no link.
+ * THREADS: the room's own thread hears (co_on_line, co_on_room); the game's side speaks (oot_coop_frame every frame
+ * shown, co_tick from Link's own update while a save is played). Between them two queues under co.lock, and co.game keeps
+ * the two callers of the game's own data apart. The name, the host's address and the port are the Co-op tab's rows and
+ * hookshot_options.ini's (coop_name=, coop_server=, coop_port=), which host/coop.c reads at the start; Host and Join are
+ * the tab's buttons. A changed game — a randomizer's seed — is not this layer's business: the room's rules are signed by
+ * the host's key, and everyone in a room plays the same Hookshot build.
  */
 #include "hos.h"
-#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
+#include <windows.h>   /* (the queues' locks and the counters; on Linux, host/posix/windows.h: the same calls) */
+#include "coop.h"      /* (the room: host/coop.c. Its transport, host/coop_net.c, is Windows' and Linux's) */
+#include "coop_proto.h"
 #include "hos_paths.h"
 #include <stdarg.h>
 #include <stdio.h>
@@ -198,13 +176,6 @@ static int co_item_class(const char *name, char canon[0x60]) {
     snprintf(canon, 0x60, "%s", name);   /* (an item the Inventory page does not list: a trade item, a nut or stick bag) */
     return 1;
 }
-/* The lasting items the Inventory page does not list, by the names the pouch keeps them under
-   (PouchData.<name>.StockNum in the game's flag list): said to a player who joins when held. */
-static const char *const co_more_known[] = {
-    "Item_EyeDrop", "Item_EyeballFrog", "Item_OddMushroom", "Weapon_Sword_BrokenGiant",
-    "Item_NutBag_Small", "Item_NutBag_Medium", "Item_NutBag_Large",
-    "Item_StickBag_Small", "Item_StickBag_Medium", "Item_StickBag_Large",
-};
 
 /* The name the game takes an item by, and the other spellings it may hold it under. */
 static void co_item_spellings(int i, char give[0x70], char other[2][0x70]) {
@@ -238,19 +209,30 @@ static struct {
     CRITICAL_SECTION lock;
     CRITICAL_SECTION game;              /* the game's side: oot_coop_frame and co_tick, one at a time */
     int ready;
-    HANDLE thread;
-    volatile LONG want, port;           /* what the menu asks for */
-    volatile LONG state;                /* 0 off, 1 hosting, 2 joining (trying), 3 joined, 4 failed to listen */
-    volatile LONG my_id, links;         /* my number; how many sockets are up */
-    char name[24], addr[128], seed[24];
-    char why[72], advice[200];          /* not connected: why, in a few words for the status; what to do, for a note */
+    volatile LONG state;                /* the room's (host/coop.h): 0 off, 1 out of it, 2 reaching it, 3 in it,
+                                           4 the host went silent: reaching it again */
+    volatile LONG hosting;              /* this game holds the room */
+    volatile LONG my_id, links;         /* my number in it, the host's being 1; how many members there are */
+    char name[24], addr[128];           /* mine, and where the room is reached (for a note: not typed here) */
     CoPeer peer[CO_PEERS];
-    char *out; size_t out_len, out_cap; /* lines for the others (game -> net) */
-    CoEvent *in; size_t in_len, in_cap; /* what came (net -> game) */
+    CoEvent *in; size_t in_len, in_cap; /* what came (the room's thread -> the game's) */
     /* me, from oot_coop_player */
     volatile int64_t player_seen;
     float pos[3], yaw;
 } co;
+
+static CoPeer *co_peer(int id, int make);
+static void co_event(int from, const char *text);
+static void co_take(int from, const char *text);
+static void co_note(const char *fmt, ...);
+static void co_send(const char *fmt, ...);
+static int co_level;                    /* say everything again: someone joined or left */
+
+/* In a room, or on the way into one or back to it */
+static int co_room(void) {
+    const long s = (long)co.state;
+    return s == COOP_CONNECTING || s == COOP_JOINED || s == COOP_RECONNECTING;
+}
 
 static char co_map[64];                 /* the map I am on (co_tick) */
 static int co_playing;
@@ -299,33 +281,7 @@ static int co_ok(uint64_t addr, uint64_t len) {
     return 1;
 }
 
-static void co_game_dir(char *game, size_t cap) {
-    hos_game_path_a(game, (DWORD)cap);
-    char *slash = strrchr(game, '\\');
-    if (!slash) slash = strrchr(game, '/');
-    if (slash) *slash = 0;
-}
 
-/* (the socket thread) Not connected, and why. The status line says the few words; the advice is shown once as a note. */
-static void co_fail(const char *why, const char *fmt, ...) {
-    char advice[200];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(advice, sizeof advice, fmt, ap);
-    va_end(ap);
-    EnterCriticalSection(&co.lock);
-    const int said = !strcmp(co.why, why);
-    snprintf(co.why, sizeof co.why, "%s", why);
-    snprintf(co.advice, sizeof co.advice, "%s", said ? "" : advice);   /* (the same failure again: not said again) */
-    LeaveCriticalSection(&co.lock);
-    if (!said) hos_log("coop: not connected: %s", why);
-}
-
-static void co_fine(void) {
-    EnterCriticalSection(&co.lock);
-    co.why[0] = co.advice[0] = 0;
-    LeaveCriticalSection(&co.lock);
-}
 
 /* Letters, digits and a few marks only: a name or an address travels in a line of words. */
 static void co_clean(char *out, size_t cap, const char *in, const char *also) {
@@ -338,51 +294,13 @@ static void co_clean(char *out, size_t cap, const char *in, const char *also) {
 }
 
 /* ── settings: <game>\coop.txt (name, the host's address); the port is the menu's own row ── */
-static void co_config_path(char *path, size_t cap) {
-    char game[MAX_PATH];
-    co_game_dir(game, sizeof game);
-    snprintf(path, cap, "%s\\coop.txt", game);
-}
-
-static void co_config_save(void) {
-    char path[MAX_PATH + 16];
-    co_config_path(path, sizeof path);
-    FILE *f = fopen(path, "wb");
-    if (!f) return;
-    fprintf(f, "# Co-op (the F1 menu's Co-op tab). Change these there: press Enter on the row, type, Enter again.\r\n"
-               "# Or change them here while the game is closed.\r\n"
-               "name=%s\r\n"
-               "# Join: the host's address. Not used when hosting.\r\n"
-               "host=%s\r\n", co.name, co.addr);
-    fclose(f);
-}
-
-static void co_config_load(void) {
-    char path[MAX_PATH + 16], line[256];
-    snprintf(co.name, sizeof co.name, "Player");
-    snprintf(co.addr, sizeof co.addr, "127.0.0.1");
-    co_config_path(path, sizeof path);
-    FILE *f = fopen(path, "rb");
-    if (!f) return;   /* (none yet: written when a name or an address is first typed) */
-    while (fgets(line, sizeof line, f)) {
-        if (!strncmp(line, "name=", 5)) co_clean(co.name, 17, line + 5, "_-");
-        else if (!strncmp(line, "host=", 5)) co_clean(co.addr, sizeof co.addr, line + 5, "._-:");
-    }
-    fclose(f);
-    if (!co.name[0]) snprintf(co.name, sizeof co.name, "Player");
-    if (!co.addr[0]) snprintf(co.addr, sizeof co.addr, "127.0.0.1");
-}
-
 /* (the word for a changed game that all players must share: none here, the game as it is) */
-static void co_seed_load(void) {
-    snprintf(co.seed, sizeof co.seed, "-");
-}
 
 /* ── to the menu: a text, a letter at a time (the host's calls into it carry numbers only) ── */
 static void co_menu_text(int which, const char *text) {
     rx_option_set(HOS_OPT_COOP_CHAR, 0);
     for (; *text; text++) rx_option_set(HOS_OPT_COOP_CHAR, (unsigned char)*text);
-    rx_option_set(HOS_OPT_COOP_TEXT, which);
+    rx_option_set(HOS_OPT_COOP_TEXT, which);   /* (1 a note, 4 the others, a line each) */
 }
 
 static void co_note(const char *fmt, ...) {
@@ -395,7 +313,6 @@ static void co_note(const char *fmt, ...) {
     hos_log("coop: %s", text);
     hos_log_flush();                                   /* (rare, and the first thing asked for when it goes wrong) */
 }
-
 /* ── the queues ──────────────────────────────────────────────────────────── */
 static void co_send(const char *fmt, ...) {            /* a line for the others (any thread) */
     char line[CO_LINE];
@@ -404,20 +321,57 @@ static void co_send(const char *fmt, ...) {            /* a line for the others 
     const int n = vsnprintf(line, sizeof line - 1, fmt, ap);
     va_end(ap);
     if (n <= 0 || n >= (int)sizeof line - 1 || !co.ready) return;
-    line[n] = '\n';
+    coop_send(COOP_K_LINE, line, (size_t)n);           /* (not in a room: the session says so and sends nothing) */
+}
+
+/* ── the room (host/coop.c) ──────────────────────────────────────────────────
+   The room is the host's listening socket, and this file never touches a socket: a line goes out as one of the
+   room's messages (COOP_K_LINE), what came arrives on the room's thread (co_on_line -> co_take, under co.lock, for
+   co_events on the game's thread), and who is in the room, under what name, which number I am and whether I hold it,
+   come from the room's view (co_on_room). The room's members are numbered 1..8, the host always 1; a peer here is a
+   member by that number, so the numbers a player's hit names (D, U, O) mean the same in every game. */
+static void co_on_line(int from, const uint8_t *bytes, size_t n, void *user) {
+    (void)user;
+    if (!n || n >= CO_LINE) return;
+    char text[CO_LINE];
+    memcpy(text, bytes, n);
+    text[n] = 0;
+    co_take(from, text);                               /* (the room's thread: positions, animations, an enemy being led,
+                                                        and, for the game's side, what is worth saying: co_event) */
+}
+
+static void co_on_room(const CoopView *v, void *user) {
+    (void)user;
     EnterCriticalSection(&co.lock);
-    if (co.links > 0 && co.out_len < (1u << 22)) {      /* (nobody there: nothing to say; a stuck link: not without end) */
-        if (co.out_len + (size_t)n + 1 > co.out_cap) {
-            const size_t cap = (co.out_cap ? co.out_cap * 2 : 8192) + (size_t)n + 1;
-            char *grown = realloc(co.out, cap);
-            if (grown) co.out = grown, co.out_cap = cap;
+    InterlockedExchange(&co.state, (long)v->state);
+    InterlockedExchange(&co.hosting, v->hosting ? 1 : 0);
+    InterlockedExchange(&co.my_id, (long)v->self);
+    InterlockedExchange(&co.links, (long)v->n);
+    snprintf(co.name, sizeof co.name, "%s", v->name[0] ? v->name : "Player");
+    snprintf(co.addr, sizeof co.addr, "%s", v->addr);
+    uint8_t here[COOP_MAX_MEMBERS + 1] = {0};
+    for (int i = 0; i < v->n && i < COOP_MAX_MEMBERS; i++) {
+        const CoopPeer *m = &v->member[i];
+        here[m->id] = 1;
+        if (m->id == v->self) continue;                /* (the others only: my own place and name are the game's side's) */
+        CoPeer *p = co_peer((int)m->id, 1);
+        if (!p) continue;
+        if (strcmp(p->name, m->name)) {
+            co_clean(p->name, sizeof p->name, m->name, "_-");
+            co_level = 1;                              /* (a player joined, or took another name: say what I hold) */
         }
-        if (co.out_len + (size_t)n + 1 <= co.out_cap) memcpy(co.out + co.out_len, line, (size_t)n + 1), co.out_len += (size_t)n + 1;
+    }
+    for (int i = 0; i < CO_PEERS; i++) {               /* (a member the room no longer lists: its number is not given to
+                                                        someone else while the room lasts, so its body and its animation go) */
+        CoPeer *p = &co.peer[i];
+        if (!p->used || here[p->id]) continue;
+        if (p->name[0]) co_note("%s left", p->name);
+        p->used = 0;
     }
     LeaveCriticalSection(&co.lock);
 }
 
-static void co_event(int from, const char *text) {     /* (net thread) for the game's side */
+static void co_event(int from, const char *text) {     /* (the room's thread) for the game's side */
     EnterCriticalSection(&co.lock);
     if (co.in_len == co.in_cap) {
         const size_t cap = co.in_cap ? co.in_cap * 2 : 64;
@@ -601,413 +555,19 @@ static void co_take(int from, const char *text) {
     co_event(from, text);
 }
 
-/* ── the sockets (their own thread) ──────────────────────────────────────── */
-static struct {
-    HMODULE dll;
-    int (WSAAPI *startup)(WORD, LPWSADATA);
-    SOCKET (WSAAPI *socket_)(int, int, int);
-    int (WSAAPI *bind_)(SOCKET, const struct sockaddr *, int);
-    int (WSAAPI *listen_)(SOCKET, int);
-    SOCKET (WSAAPI *accept_)(SOCKET, struct sockaddr *, int *);
-    int (WSAAPI *connect_)(SOCKET, const struct sockaddr *, int);
-    int (WSAAPI *send_)(SOCKET, const char *, int, int);
-    int (WSAAPI *recv_)(SOCKET, char *, int, int);
-    int (WSAAPI *close_)(SOCKET);
-    int (WSAAPI *ioctl_)(SOCKET, long, u_long *);
-    int (WSAAPI *setopt_)(SOCKET, int, int, const char *, int);
-    int (WSAAPI *getopt_)(SOCKET, int, int, char *, int *);
-    int (WSAAPI *select_)(int, fd_set *, fd_set *, fd_set *, const struct timeval *);
-    int (WSAAPI *getaddr_)(PCSTR, PCSTR, const ADDRINFOA *, PADDRINFOA *);
-    void (WSAAPI *freeaddr_)(PADDRINFOA);
-    int (WSAAPI *error_)(void);
-} ws;
-
-static int co_ws_load(void) {
-    if (ws.dll) return ws.error_ != NULL;
-    ws.dll = LoadLibraryA("ws2_32.dll");
-    if (!ws.dll) return 0;
-#define CO_WS(member, name) *(FARPROC *)&ws.member = GetProcAddress(ws.dll, name)
-    CO_WS(startup, "WSAStartup"); CO_WS(socket_, "socket"); CO_WS(bind_, "bind"); CO_WS(listen_, "listen");
-    CO_WS(accept_, "accept"); CO_WS(connect_, "connect"); CO_WS(send_, "send"); CO_WS(recv_, "recv");
-    CO_WS(close_, "closesocket"); CO_WS(ioctl_, "ioctlsocket"); CO_WS(setopt_, "setsockopt"); CO_WS(getopt_, "getsockopt"); CO_WS(select_, "select");
-    CO_WS(getaddr_, "getaddrinfo"); CO_WS(freeaddr_, "freeaddrinfo"); CO_WS(error_, "WSAGetLastError");
-#undef CO_WS
-    WSADATA data;
-    if (!ws.startup || !ws.socket_ || !ws.bind_ || !ws.listen_ || !ws.accept_ || !ws.connect_ || !ws.send_ || !ws.recv_ ||
-        !ws.close_ || !ws.ioctl_ || !ws.setopt_ || !ws.getopt_ || !ws.select_ || !ws.getaddr_ || !ws.freeaddr_ || !ws.error_ ||
-        ws.startup(MAKEWORD(2, 2), &data)) { ws.error_ = NULL; return 0; }
-    return 1;
+/* ── the room's view, asked for once ──────────────────────────────────────────
+   The name and the host's address are the Co-op tab's fields and the room's settings (gpu/vk/vk_menu.cpp,
+   host/coop_menu.c, hookshot_options.ini); the room itself is started there, with Host and Join. What this file needs is
+   its view, which it is given. */
+static void co_ready(void) {
+    if (co.ready) return;
+    InitializeCriticalSection(&co.lock);
+    InitializeCriticalSection(&co.game);
+    snprintf(co.name, sizeof co.name, "Player");
+    co.ready = 1;
+    coop_on_message(COOP_K_LINE, co_on_line, NULL);
+    coop_on_view(co_on_room, NULL);
 }
-
-typedef struct {
-    SOCKET s;
-    int id, hello;                      /* (host) the player's number; whether their H line came */
-    char name[24], seed[24];
-    char in[CO_LINE * 2]; int in_len;
-    char *out; size_t out_len, out_cap;
-} CoLink;
-
-static CoLink co_link[CO_PEERS];        /* host: the players who joined; joined: [0] is the host */
-static SOCKET co_listen = INVALID_SOCKET;
-static int co_next_id = 1;
-
-static void co_link_put(CoLink *l, const char *text, size_t n) {
-    if (l->s == INVALID_SOCKET || l->out_len > (1u << 22)) return;
-    if (l->out_len + n > l->out_cap) {
-        const size_t cap = (l->out_cap ? l->out_cap * 2 : 8192) + n;
-        char *grown = realloc(l->out, cap);
-        if (!grown) return;
-        l->out = grown, l->out_cap = cap;
-    }
-    memcpy(l->out + l->out_len, text, n);
-    l->out_len += n;
-}
-
-static void co_link_say(CoLink *l, const char *fmt, ...) {
-    char line[CO_LINE + 32];
-    va_list ap;
-    va_start(ap, fmt);
-    const int n = vsnprintf(line, sizeof line - 1, fmt, ap);
-    va_end(ap);
-    if (n <= 0 || n >= (int)sizeof line - 1) return;
-    line[n] = '\n';
-    co_link_put(l, line, (size_t)n + 1);
-}
-
-static void co_links_count(void) {
-    int n = 0;
-    for (int i = 0; i < CO_PEERS; i++) n += co_link[i].s != INVALID_SOCKET && (co.state != 1 || co_link[i].hello);
-    InterlockedExchange(&co.links, n);
-}
-
-static void co_link_close(CoLink *l) {
-    if (l->s == INVALID_SOCKET) return;
-    ws.close_(l->s);
-    l->s = INVALID_SOCKET;
-    free(l->out);
-    l->out = NULL, l->out_len = l->out_cap = 0, l->in_len = 0;
-    if (co.state == 1 && l->hello) {                   /* (host) the others hear it, and so does this game */
-        char line[32];
-        const int n = snprintf(line, sizeof line, "%d L\n", l->id);
-        for (int i = 0; i < CO_PEERS; i++)
-            if (&co_link[i] != l && co_link[i].hello) co_link_put(&co_link[i], line, (size_t)n);
-        co_take(l->id, "L");
-    }
-    l->hello = 0;
-    co_links_count();
-}
-
-static void co_close_all(void) {
-    for (int i = 0; i < CO_PEERS; i++) {
-        if (co_link[i].s == INVALID_SOCKET) continue;
-        ws.close_(co_link[i].s);
-        co_link[i].s = INVALID_SOCKET;
-        free(co_link[i].out);
-        co_link[i].out = NULL, co_link[i].out_len = co_link[i].out_cap = 0, co_link[i].in_len = 0, co_link[i].hello = 0;
-    }
-    if (co_listen != INVALID_SOCKET) ws.close_(co_listen), co_listen = INVALID_SOCKET;
-    EnterCriticalSection(&co.lock);
-    for (int i = 0; i < CO_PEERS; i++) {
-        if (!co.peer[i].used) continue;
-        co.peer[i].used = 0;
-    }
-    co.out_len = 0;
-    LeaveCriticalSection(&co.lock);
-    InterlockedExchange(&co.links, 0);
-    InterlockedExchange(&co.my_id, 0);
-}
-
-static void co_nonblocking(SOCKET s) {
-    u_long on = 1;
-    ws.ioctl_(s, FIONBIO, &on);
-    const int nodelay = 1;
-    ws.setopt_(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof nodelay);
-}
-
-/* (host) a line from the player on link l */
-static void co_host_line(CoLink *l, char *text) {
-    if (!l->hello) {
-        int version = 0;
-        char name[64] = "", seed[64] = "-";
-        if (sscanf(text, "H %d %63s %63s", &version, name, seed) < 2 || version != CO_VERSION) {
-            co_link_say(l, "0 X %s", version != CO_VERSION && version ? "this game and the host's are different co-op versions" : "not a co-op hello");
-            hos_log("coop: a connection was turned away (%.40s)", text);
-            l->in_len = -1;                            /* (closed once its goodbye is out) */
-            return;
-        }
-        l->hello = 1, l->id = co_next_id++;
-        co_clean(l->name, 17, name, "_-");
-        co_clean(l->seed, 17, seed, "_-");
-        if (!l->name[0]) snprintf(l->name, sizeof l->name, "Player%d", l->id);
-        co_link_say(l, "0 W %d %s %s", l->id, co.name, co.seed);
-        for (int i = 0; i < CO_PEERS; i++) {
-            CoLink *o = &co_link[i];
-            if (o == l || o->s == INVALID_SOCKET || !o->hello) continue;
-            co_link_say(l, "%d J %s %s", o->id, o->name, o->seed);
-            co_link_say(o, "%d J %s %s", l->id, l->name, l->seed);
-        }
-        char joined[96];
-        snprintf(joined, sizeof joined, "J %s %s", l->name, l->seed);
-        co_take(l->id, joined);
-        co_links_count();
-        return;
-    }
-    if (text[0] == 'H' || text[0] == 'W' || text[0] == 'J' || text[0] == 'L' || text[0] == 'X') return;   /* (the host's own to say) */
-    if (text[0] == 'R' && text[1] == ' ') co_clean(l->name, 17, text + 2, "_-");   /* (their new name, for players who join later) */
-    char line[CO_LINE + 32];
-    const int n = snprintf(line, sizeof line, "%d %s\n", l->id, text);
-    for (int i = 0; i < CO_PEERS; i++)
-        if (&co_link[i] != l && co_link[i].s != INVALID_SOCKET && co_link[i].hello) co_link_put(&co_link[i], line, (size_t)n);
-    co_take(l->id, text);
-}
-
-/* (joined) a line from the host: "<from> <message>" */
-static void co_join_line(char *text) {
-    char *rest = NULL;
-    const long from = strtol(text, &rest, 10);
-    if (rest == text || *rest != ' ' || from < 0) return;
-    rest++;
-    if (rest[0] == 'W' && rest[1] == ' ' && from == 0) {
-        int id = 0;
-        char name[64] = "", seed[64] = "-";
-        if (sscanf(rest + 2, "%d %63s %63s", &id, name, seed) < 2) return;
-        InterlockedExchange(&co.my_id, id);
-        InterlockedExchange(&co.state, 3);
-        InterlockedExchange(&co.links, 1);
-        co_fine();
-        char joined[160];
-        snprintf(joined, sizeof joined, "J %s %s", name, seed);
-        co_take(0, joined);
-        return;
-    }
-    if (from == co.my_id && co.my_id) return;
-    co_take((int)from, rest);
-}
-
-static void co_link_pump(CoLink *l, int hosting) {
-    if (l->s == INVALID_SOCKET) return;
-    for (;;) {                                         /* what came */
-        if (l->in_len < 0) break;
-        const int room = (int)sizeof l->in - 1 - l->in_len;
-        if (room <= 0) { hos_log("coop: a line too long to be ours: link closed"); co_link_close(l); return; }
-        const int n = ws.recv_(l->s, l->in + l->in_len, room, 0);
-        if (n == 0) { co_link_close(l); return; }
-        if (n < 0) {
-            if (ws.error_() != WSAEWOULDBLOCK) { co_link_close(l); return; }
-            break;
-        }
-        l->in_len += n;
-        int start = 0;
-        for (int i = 0; i < l->in_len && l->in_len >= 0; i++) {
-            if (l->in[i] != '\n') continue;
-            l->in[i] = 0;
-            if (i > start && l->in[i - 1] == '\r') l->in[i - 1] = 0;
-            char *text = l->in + start;
-            start = i + 1;
-            if (!*text) continue;
-            const int before = l->in_len;
-            if (hosting) co_host_line(l, text); else co_join_line(text);
-            if (l->in_len != before) break;            /* (turned away) */
-        }
-        if (l->in_len < 0) break;
-        memmove(l->in, l->in + start, (size_t)(l->in_len - start));
-        l->in_len -= start;
-    }
-    while (l->out_len) {                               /* what goes */
-        const int n = ws.send_(l->s, l->out, (int)(l->out_len > 65536 ? 65536 : l->out_len), 0);
-        if (n <= 0) {
-            if (n < 0 && ws.error_() != WSAEWOULDBLOCK) { co_link_close(l); return; }
-            break;
-        }
-        memmove(l->out, l->out + n, l->out_len - (size_t)n);
-        l->out_len -= (size_t)n;
-    }
-    if (l->in_len < 0 && !l->out_len) { l->in_len = 0; co_link_close(l); }
-}
-
-static void co_host_step(void) {
-    if (co_listen == INVALID_SOCKET) {
-        static int64_t retry;
-        if (hos_now_ns() < retry) return;
-        retry = hos_now_ns() + 3000000000LL;
-        SOCKET s = ws.socket_(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (s == INVALID_SOCKET) { InterlockedExchange(&co.state, 4); return; }
-        struct sockaddr_in at;
-        memset(&at, 0, sizeof at);
-        at.sin_family = AF_INET;
-        const unsigned port = (unsigned)co.port;
-        at.sin_port = (u_short)((port >> 8) | ((port & 0xff) << 8));
-        if (ws.bind_(s, (const struct sockaddr *)&at, sizeof at) || ws.listen_(s, 4)) {
-            hos_log("coop: cannot listen on port %u (error %d): is another game hosting on it?", port, ws.error_());
-            co_fail("that port is in use on this PC", "Port %u is already used on this PC, by another program or another copy of the game: "
-                    "pick another Port (everyone has to use the same one)", port);
-            ws.close_(s);
-            InterlockedExchange(&co.state, 4);
-            return;
-        }
-        co_nonblocking(s);
-        co_listen = s;
-        co_fine();
-        InterlockedExchange(&co.state, 1);
-        hos_log("coop: hosting on port %u as %s", port, co.name);
-    }
-    for (;;) {
-        SOCKET s = ws.accept_(co_listen, NULL, NULL);
-        if (s == INVALID_SOCKET) break;
-        CoLink *l = NULL;
-        for (int i = 0; i < CO_PEERS - 1 && !l; i++)
-            if (co_link[i].s == INVALID_SOCKET) l = &co_link[i];
-        if (!l) { ws.close_(s); continue; }            /* (full) */
-        co_nonblocking(s);
-        memset(l, 0, sizeof *l);
-        l->s = s;
-    }
-    char *out = NULL; size_t out_len = 0;              /* this game's own lines: to everyone, as from 0 */
-    EnterCriticalSection(&co.lock);
-    if (co.out_len) {
-        out = malloc(co.out_len + 1);
-        if (out) memcpy(out, co.out, co.out_len), out_len = co.out_len;
-        co.out_len = 0;
-    }
-    LeaveCriticalSection(&co.lock);
-    for (size_t at = 0; at < out_len;) {
-        const char *end = memchr(out + at, '\n', out_len - at);
-        if (!end) break;
-        const size_t n = (size_t)(end - (out + at)) + 1;
-        for (int i = 0; i < CO_PEERS; i++)
-            if (co_link[i].s != INVALID_SOCKET && co_link[i].hello) co_link_put(&co_link[i], "0 ", 2), co_link_put(&co_link[i], out + at, n);
-        at += n;
-    }
-    free(out);
-    for (int i = 0; i < CO_PEERS; i++) co_link_pump(&co_link[i], 1);
-}
-
-static void co_join_step(void) {
-    CoLink *l = &co_link[0];
-    static int connecting;
-    static int64_t retry, started;
-    if (l->s == INVALID_SOCKET) {
-        if (co.state == 3) {                           /* the link went: say so, start over */
-            co_fail("the connection to the host dropped", "The connection to the host dropped (their game closed, or the network cut out): trying again");
-            co_event(0, "D");
-            EnterCriticalSection(&co.lock);
-            for (int i = 0; i < CO_PEERS; i++) co.peer[i].used = 0;
-            LeaveCriticalSection(&co.lock);
-        }
-        InterlockedExchange(&co.state, 2);
-        InterlockedExchange(&co.my_id, 0);
-        if (hos_now_ns() < retry) return;
-        retry = hos_now_ns() + 3000000000LL;
-        char addr[128], port[16];
-        EnterCriticalSection(&co.lock);
-        snprintf(addr, sizeof addr, "%s", co.addr);
-        LeaveCriticalSection(&co.lock);
-        char *colon = strrchr(addr, ':');              /* (an address copied with its port: that port) */
-        snprintf(port, sizeof port, "%d", colon && atoi(colon + 1) > 0 ? atoi(colon + 1) : (int)co.port);
-        if (colon) *colon = 0;
-        ADDRINFOA hint, *found = NULL;
-        memset(&hint, 0, sizeof hint);
-        hint.ai_family = AF_INET, hint.ai_socktype = SOCK_STREAM;
-        if (ws.getaddr_(addr, port, &hint, &found) || !found) {
-            co_fail("that address was not found", "The host address could not be found: check it was typed right (Co-op tab, Host address)");
-            return;
-        }
-        SOCKET s = ws.socket_(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (s != INVALID_SOCKET) {
-            co_nonblocking(s);
-            ws.connect_(s, found->ai_addr, (int)found->ai_addrlen);   /* (answers at once: select below says when it is up) */
-            memset(l, 0, sizeof *l);
-            l->s = s;
-            connecting = 1, started = hos_now_ns();
-        }
-        ws.freeaddr_(found);
-        return;
-    }
-    if (connecting) {
-        fd_set writable, failed;
-        writable.fd_count = failed.fd_count = 1;
-        writable.fd_array[0] = failed.fd_array[0] = l->s;
-        const struct timeval none = {0, 0};
-        ws.select_(0, NULL, &writable, &failed, &none);
-        if (failed.fd_count || hos_now_ns() - started > 6000000000LL) {
-            int error = WSAETIMEDOUT, size = sizeof error;
-            if (failed.fd_count) ws.getopt_(l->s, SOL_SOCKET, SO_ERROR, (char *)&error, &size);
-            ws.close_(l->s);
-            l->s = INVALID_SOCKET;
-            connecting = 0;
-            char addr[128];
-            EnterCriticalSection(&co.lock);
-            snprintf(addr, sizeof addr, "%s", co.addr);
-            LeaveCriticalSection(&co.lock);
-            const int home = !strncmp(addr, "192.168.", 8) || !strncmp(addr, "10.", 3) || (!strncmp(addr, "172.", 4) && atoi(addr + 4) >= 16 && atoi(addr + 4) <= 31);
-            if (error == WSAECONNREFUSED)
-                co_fail("no game is hosting at that address", "That PC answered, but no game is hosting on port %d there: the host has to press Connect first, "
-                        "and both of you need the same Port", (int)co.port);
-            else if (home)
-                co_fail("no answer from the host", "No answer. That is a home-network address: it only works when both PCs are in the same house. "
-                        "Over the internet, use the host's public address (with port %d forwarded) or a VPN address (Tailscale, Radmin)", (int)co.port);
-            else
-                co_fail("no answer from the host", "No answer. The host's router has to let port %d through to their PC (port forwarding), "
-                        "or both of you join one VPN (Tailscale, Radmin) and use the host's address there", (int)co.port);
-            return;
-        }
-        if (!writable.fd_count) return;
-        connecting = 0;
-        co_link_say(l, "H %d %s %s", CO_VERSION, co.name, co.seed);
-        hos_log("coop: reached the host, saying hello as %s", co.name);
-    }
-    if (co.state == 3) {
-        EnterCriticalSection(&co.lock);
-        if (co.out_len) co_link_put(l, co.out, co.out_len), co.out_len = 0;
-        LeaveCriticalSection(&co.lock);
-    }
-    co_link_pump(l, 0);
-}
-
-static DWORD WINAPI co_net(void *unused) {
-    (void)unused;
-    int mode = 0, port = 0;
-    char addr[128] = "";
-    for (;;) {
-        const int want = (int)co.want;
-        EnterCriticalSection(&co.lock);
-        const int moved = want != mode || (mode && (int)co.port != port) || (mode == 2 && strcmp(addr, co.addr));
-        if (moved) snprintf(addr, sizeof addr, "%s", co.addr);
-        LeaveCriticalSection(&co.lock);
-        if (moved) {
-            if (mode) co_close_all(), hos_log("coop: link closed");
-            mode = want, port = (int)co.port;
-            co_fine();
-            InterlockedExchange(&co.state, mode == 1 ? 1 : mode == 2 ? 2 : 0);
-            if (mode == 1) co_listen = INVALID_SOCKET;
-        }
-        if (mode == 1) co_host_step();
-        else if (mode == 2) co_join_step();
-        Sleep(mode ? 4 : 100);
-    }
-    return 0;
-}
-
-/* The name and the address are read with the game's first frame, for the tab's rows. The link's thread is started the
-   first time the tab asks to connect (link), not before: a game that never connects loads no network library and has
-   no thread of co-op's. 1 with the thread running. */
-static int co_start(int link) {
-    static int failed;
-    if (!co.ready) {
-        InitializeCriticalSection(&co.lock);
-        InitializeCriticalSection(&co.game);
-        for (int i = 0; i < CO_PEERS; i++) co_link[i].s = INVALID_SOCKET;
-        co_config_load();
-        co_seed_load();
-        co.ready = 1;
-    }
-    if (co.thread || !link || failed) return co.thread != NULL;
-    if (!co_ws_load()) { failed = 1; hos_log("coop: Windows' network library did not load: no co-op"); return 0; }
-    co.thread = CreateThread(NULL, 0, co_net, NULL, 0, NULL);
-    if (!co.thread) failed = 1;
-    return co.thread != NULL;
-}
-
 /* ── the game's side ─────────────────────────────────────────────────────── */
 
 /* The save flags: GameDataMgr (hos_main.c OOT_GAMEDATA_SLOT), its bools as f_8022d9c0 reads them:
@@ -1016,11 +576,10 @@ static int co_start(int link) {
        +0x10 which save file keeps it (below 0: none)    +0x14 changed since the last save
        +0x15 the value a new file starts with            +0x16 the value now
        +0x17 the value as last saved
-   Two things to know of them:
-     * a flag is progress when it has LEFT the value it starts with, whichever way. Mido stands in the way
-       while KokiriForest_Npc_Kokiri_Mido_Child_Blocker is ON, and it starts on: "tell the others what is
-       on" had a new file telling everyone Mido was back. 54 of the shared flags start on.
-     * a flag written without its "changed" mark is not in the next save. */
+   Read here for two things only: which map Link is on, and whether he is a child — what the others are
+   told of him, so his body is drawn as the Link of their age. What a room shares of the save itself is
+   its rules engine's (host/coop_state.c, host/coop_oot.c, the Co-op tab's Room rules page): progress,
+   items, songs, quest items, small keys, rupees and ammunition. Not this file's business. */
 #define CO_GAMEDATA_SLOT 0x84c9e180ULL
 typedef struct { uint64_t table, entries; uint32_t size, count; } CoFlags;
 
@@ -1047,210 +606,6 @@ static uint8_t *co_flag_value(const CoFlags *f, uint32_t hash, uint32_t *index) 
     return NULL;
 }
 
-/* Has this flag left the value a new file starts with? (entry: the 24 bytes) */
-static int co_flag_moved(const uint8_t *entry) { return (entry[0x16] & 1) != (entry[0x15] & 1); }
-
-/* Another player's flag has: this one leaves its start value too, and is marked for the next save. */
-static int co_flag_move(uint8_t *entry) {
-    if (co_flag_moved(entry)) return 0;
-    int32_t kept;
-    memcpy(&kept, entry + 0x10, 4);
-    entry[0x16] = !(entry[0x15] & 1);
-    if (kept >= 0) entry[0x14] = 1;
-    HOS_WRITTEN(entry, 24);
-    return 1;
-}
-
-static uint32_t *co_shared; static size_t co_shared_n;   /* <game>\coop\flags.bin, sorted */
-static int co_shared_loaded;
-
-static void co_shared_load(void) {
-    char game[MAX_PATH], path[MAX_PATH + 32];
-    co_shared_loaded = 1;
-    co_game_dir(game, sizeof game);
-    snprintf(path, sizeof path, "%s\\coop\\flags.bin", game);
-    FILE *f = fopen(path, "rb");
-    if (!f) { hos_log("coop: %s is not there: items are shared, flags are not (nx2/coop_flags.py makes it)", path); return; }
-    fseek(f, 0, SEEK_END);
-    const long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (size > 0 && size < (1 << 22) && (co_shared = malloc((size_t)size)) != NULL)
-        co_shared_n = fread(co_shared, 4, (size_t)size / 4, f);
-    fclose(f);
-    hos_log("coop: %u save flags are shared", (unsigned)co_shared_n);
-}
-
-static int co_is_shared(uint32_t hash) {
-    size_t lo = 0, hi = co_shared_n;
-    while (lo < hi) {
-        const size_t mid = (lo + hi) / 2;
-        if (co_shared[mid] < hash) lo = mid + 1; else hi = mid;
-    }
-    return lo < co_shared_n && co_shared[lo] == hash;
-}
-
-/* What the others have said is on (all of it, for the whole session: asked again of a save that
-   is loaded later), and what of it is still to be turned on here. */
-static uint32_t *co_theirs; static size_t co_theirs_n, co_theirs_cap, co_theirs_done;
-static uint8_t *co_shadow; static uint32_t co_shadow_n;   /* each bool as last seen: 0, 1, 0xff not looked at */
-static int co_level;                                  /* say everything again: someone joined */
-
-static void co_theirs_add(uint32_t hash) {
-    for (size_t i = 0; i < co_theirs_n; i++)
-        if (co_theirs[i] == hash) return;
-    if (co_theirs_n == co_theirs_cap) {
-        const size_t cap = co_theirs_cap ? co_theirs_cap * 2 : 1024;
-        uint32_t *grown = cap <= (1u << 16) ? realloc(co_theirs, cap * 4) : NULL;
-        if (!grown) return;
-        co_theirs = grown, co_theirs_cap = cap;
-    }
-    co_theirs[co_theirs_n++] = hash;
-}
-
-/* The others' flags not yet on here: on. Then mine that came on since the last look: said. */
-static void co_flags_step(int levelling) {
-    CoFlags f;
-    if (!co_shared_n || !co_flags_open(&f)) return;
-    if (co_shadow_n != f.count) {
-        uint8_t *grown = realloc(co_shadow, f.count);
-        if (!grown) return;
-        co_shadow = grown, co_shadow_n = f.count;
-        memset(co_shadow, 0xff, f.count);
-    }
-    if (levelling) memset(co_shadow, 0xff, co_shadow_n);
-    unsigned turned_on = 0;
-    for (; co_theirs_done < co_theirs_n; co_theirs_done++) {
-        const uint32_t hash = co_theirs[co_theirs_done];
-        uint32_t index = 0;
-        uint8_t *value = co_is_shared(hash) ? co_flag_value(&f, hash, &index) : NULL;   /* (only what this game shares too) */
-        if (!value) continue;
-        turned_on += (unsigned)co_flag_move(value - 22);
-        co_shadow[index] = 1;
-    }
-    if (turned_on) hos_log("coop: %u flags the others moved, moved here", turned_on);
-    char line[CO_LINE];
-    size_t used = 0;
-    unsigned said = 0;
-    for (uint32_t slot = 0; slot < f.size; slot++) {
-        const uint32_t key = G32(f.table + slot * 8ULL);
-        if (!key) continue;
-        const uint32_t index = G32(f.table + slot * 8ULL + 4);
-        if (index >= f.count) continue;
-        const uint8_t now = (uint8_t)co_flag_moved((const uint8_t *)GP(f.entries + index * 24ULL));   /* (1: it has left its start value) */
-        const uint8_t was = co_shadow[index];
-        co_shadow[index] = now;
-        if (!now || was == 1 || !co_is_shared(key)) continue;
-        if (!used) used = (size_t)snprintf(line, sizeof line, "F");
-        used += (size_t)snprintf(line + used, sizeof line - used, " %x", key);
-        said++;
-        if (used > sizeof line - 64) co_send("%s", line), used = 0;
-    }
-    if (used) co_send("%s", line);
-    if (said && co.links > 0) hos_log("coop: %u flags of mine said to the others", said);
-}
-
-/* The flags kept by a placed object's own number (Bool64bitKey), as the game's own code keeps them
-   (f_805ce6b0 fills the table, the loop at 80bc2570 writes one): GameDataMgr +0xc58 the count,
-   +0xc60 the entries, sorted by key, 16 bytes each:
-       +0 the key   +8 reset type   +0xc the value   +0xd save file index   +0xe changed   +0xf group
-   Turning one on the game's way: the value, "changed" (bit 0, when the flag is one a save keeps),
-   the table's own reset types seen (+0x50) and its changed mark (+0x54). */
-typedef struct { uint64_t box, entries; uint32_t count; } CoKeys;
-#define CO_KEY_LASTING 24u              /* (reset type: 88 pots and grass, 280 enemies, 25 shop stock put themselves back) */
-
-static int co_keys_open(CoKeys *k) {
-    const uint64_t holder = G64(CO_GAMEDATA_SLOT);
-    if (!co_ok(holder, 8)) return 0;
-    const uint64_t mgr = G64(holder);
-    if (!co_ok(mgr, 0xd20)) return 0;
-    k->box = mgr + 0xc58, k->count = G32(mgr + 0xc58), k->entries = G64(mgr + 0xc60);
-    return k->count && k->count < (1u << 20) && co_ok(k->entries, k->count * 16ULL);
-}
-
-static int co_key_find(const CoKeys *k, uint64_t key) {
-    uint32_t lo = 0, hi = k->count;
-    while (lo < hi) {
-        const uint32_t mid = lo + (hi - lo) / 2;
-        if (G64(k->entries + mid * 16ULL) < key) lo = mid + 1; else hi = mid;
-    }
-    return lo < k->count && G64(k->entries + lo * 16ULL) == key ? (int)lo : -1;
-}
-
-/* (co_ktheirs_ok: that key is dealt with in this save. One that this game's table does not hold yet stays waiting and
-   is looked for again each time: it used to be dropped at the first look, and a chest another player had opened was
-   then closed again here.) */
-static uint64_t *co_ktheirs; static uint8_t *co_ktheirs_ok; static size_t co_ktheirs_n, co_ktheirs_cap, co_ktheirs_done;
-static uint8_t *co_kshadow; static uint32_t co_kshadow_n;
-
-static void co_ktheirs_add(uint64_t key) {
-    for (size_t i = 0; i < co_ktheirs_n; i++)
-        if (co_ktheirs[i] == key) return;
-    if (co_ktheirs_n == co_ktheirs_cap) {
-        const size_t cap = co_ktheirs_cap ? co_ktheirs_cap * 2 : 1024;
-        uint64_t *grown = cap <= (1u << 16) ? realloc(co_ktheirs, cap * 8) : NULL;
-        if (!grown) return;
-        co_ktheirs = grown;
-        uint8_t *ok = realloc(co_ktheirs_ok, cap);
-        if (!ok) return;
-        co_ktheirs_ok = ok, co_ktheirs_cap = cap;
-    }
-    co_ktheirs_ok[co_ktheirs_n] = 0;
-    co_ktheirs[co_ktheirs_n++] = key;
-}
-
-static void co_keys_step(int levelling) {
-    CoKeys k;
-    if (!co_keys_open(&k)) return;
-    if (co_kshadow_n != k.count) {
-        uint8_t *grown = realloc(co_kshadow, k.count);
-        if (!grown) return;
-        co_kshadow = grown, co_kshadow_n = k.count;
-        memset(co_kshadow, 0xff, k.count);
-    }
-    if (levelling) memset(co_kshadow, 0xff, co_kshadow_n);
-    unsigned turned_on = 0, waiting = 0;
-    if (!co_ktheirs_done && co_ktheirs_n) memset(co_ktheirs_ok, 0, co_ktheirs_n), co_ktheirs_done = 1;   /* (another save, maybe: all looked at again) */
-    for (size_t t = 0; t < co_ktheirs_n; t++) {
-        if (co_ktheirs_ok[t]) continue;
-        const int i = co_key_find(&k, co_ktheirs[t]);
-        if (i < 0) { waiting++; continue; }               /* (not in this game's table now: kept, looked for again) */
-        co_ktheirs_ok[t] = 1;
-        const uint64_t e = k.entries + (uint64_t)i * 16;
-        uint8_t *b = (uint8_t *)GP(e);
-        if (G32(e + 8) != CO_KEY_LASTING) continue;       /* (only what this game shares too) */
-        if (!(b[0xc] & 1)) {
-            b[0xc] = 1;
-            if ((int8_t)b[0xd] >= 0) b[0xe] |= 1;
-            G32(k.box + 0x50) |= G32(e + 8);
-            *(uint8_t *)GP(k.box + 0x54) = 1;
-            HOS_WRITTEN(b, 16);
-            turned_on++;
-        }
-        co_kshadow[i] = 1;
-    }
-    if (turned_on) hos_log("coop: %u chests and other objects the others dealt with marked done", turned_on);
-    { static unsigned said_waiting = ~0u; if (waiting != said_waiting) said_waiting = waiting, hos_log("coop: %u of the others' chests and objects are not in this game's table now (of %u objects here): kept for when they are", waiting, k.count); }
-    char line[CO_LINE];
-    size_t used = 0;
-    unsigned said = 0;
-    for (uint32_t i = 0; i < k.count; i++) {
-        const uint64_t e = k.entries + (uint64_t)i * 16;
-        const uint8_t now = *(const uint8_t *)GP(e + 0xc) & 1, was = co_kshadow[i];
-        co_kshadow[i] = now;
-        if (!now || was == 1 || G32(e + 8) != CO_KEY_LASTING) continue;
-        if (!used) used = (size_t)snprintf(line, sizeof line, "K");
-        used += (size_t)snprintf(line + used, sizeof line - used, " %llx", (unsigned long long)G64(e));
-        said++;
-        if (used > sizeof line - 64) co_send("%s", line), used = 0;
-    }
-    if (used) co_send("%s", line);
-    if (said && co.links > 0) hos_log("coop: %u chests and other objects of mine said to the others", said);
-}
-
-/* The counted save values that are shared: each dungeon's small keys. GameDataMgr's ints: +0xd0 the
-   count, +0xd8 the 40-byte entries (the value at +0x1c), +0xe0 the (hash, index) table, +0xec its size.
-   (PlayerStatus.MaxLife and the like are in there too, but the game writes those from Link himself
-   every frame: a value put there is gone the next moment. Hearts go round as the items they are.) */
 static uint32_t co_mm3(const char *text) {             /* MurMur3, seed 0: the game's name hash */
     const size_t len = strlen(text), blocks = len / 4;
     uint32_t h = 0, k = 0;
@@ -1266,16 +621,9 @@ static uint32_t co_mm3(const char *text) {             /* MurMur3, seed 0: the g
     return h;
 }
 
-static const char *const co_dungeon[] = {
-    "InsideTheDekuTree", "DodongoCavern", "InsideJabuJabuBelly", "ForestTemple", "FireTemple", "WaterTemple", "ShadowTemple",
-    "SpiritTemple", "IceCavern", "BottomOfTheWell", "GerudoTrainingGround", "GerudoFortress", "InsideGanonCastle", "FinalBattleField",
-};
-#define CO_COUNTS ((int)(sizeof co_dungeon / sizeof co_dungeon[0]))
-static uint32_t co_count_hash[CO_COUNTS];
-static int co_count_seen[CO_COUNTS], co_count_known[CO_COUNTS];   /* each as last read; whether it has been read */
-static int co_count_add[CO_COUNTS], co_count_set[CO_COUNTS], co_count_has_set[CO_COUNTS];   /* the others' changes still to make */
-
-static int32_t *co_int_value(uint32_t hash) {          /* a save value of the Int kind, by its name's hash */
+/* A save value of the Int kind, by its name's hash. Read here for my hearts (PlayerStatus.MaxLife, co_my_quarters);
+   what a room shares of the counted values — small keys, rupees, ammunition — is its rules engine's own (host/coop_state.c). */
+static int32_t *co_int_value(uint32_t hash) {
     const uint64_t holder = G64(CO_GAMEDATA_SLOT);
     const uint64_t mgr = co_ok(holder, 8) ? G64(holder) : 0;
     if (!co_ok(mgr, 0x100)) return NULL;
@@ -1292,47 +640,6 @@ static int32_t *co_int_value(uint32_t hash) {          /* a save value of the In
     return NULL;
 }
 
-static int32_t *co_count_value(int n) { return co_int_value(co_count_hash[n]); }
-
-static int co_count_index(uint32_t hash) {
-    if (!co_count_hash[0]) {
-        char name[96];
-        for (int n = 0; n < CO_COUNTS; n++) snprintf(name, sizeof name, "DungeonInfo.%s.SmallKeyNum", co_dungeon[n]), co_count_hash[n] = co_mm3(name);
-        if (co_mm3("Sequence_IsLoadingBanc") != 0xef2b60c2u) hos_log("coop: the name hash is wrong here (%x): small keys will not be shared", co_mm3("Sequence_IsLoadingBanc"));
-    }
-    for (int n = 0; n < CO_COUNTS; n++)
-        if (co_count_hash[n] == hash) return n;
-    return -1;
-}
-
-/* fresh: a save was just loaded, what it holds is where it starts (not a find to tell of).
-   levelling: someone joined; the host says what each count is. */
-static void co_counts_step(int fresh, int levelling) {
-    co_count_index(0);
-    for (int n = 0; n < CO_COUNTS; n++) {
-        int32_t *value = co_count_value(n);
-        if (!value) continue;
-        if (fresh || !co_count_known[n]) co_count_known[n] = 1, co_count_seen[n] = *value;
-        if (*value != co_count_seen[n]) {                 /* mine changed: a key found (+1), a door opened (-1) */
-            co_send("N %x %d", co_count_hash[n], *value - co_count_seen[n]);
-            hos_log("coop: %s small keys %d -> %d, said to the others", co_dungeon[n], co_count_seen[n], *value);
-            co_count_seen[n] = *value;
-        }
-        if (co_count_has_set[n] || co_count_add[n]) {     /* theirs */
-            int next = co_count_has_set[n] ? co_count_set[n] : *value + co_count_add[n];
-            next = next < 0 ? 0 : next > 99 ? 99 : next;
-            if (next != *value) {
-                hos_log("coop: %s small keys %d -> %d (the others)", co_dungeon[n], *value, next);
-                *value = next;
-                *((uint8_t *)value - 0x1c + 0x14) = 1;      /* (changed since the last save, as a flag's entry has it) */
-                HOS_WRITTEN((uint8_t *)value - 0x1c, 40);
-            }
-            co_count_seen[n] = next, co_count_has_set[n] = 0, co_count_add[n] = 0;
-        }
-        if (levelling && co.state == 1) co_send("V %x %d", co_count_hash[n], *value);
-    }
-}
-
 /* Sequence_CurrentBanc (hos_main.c oot_gamedata_string: f_80cd0ea0, String64 by name hash) */
 static void co_current_map(Ctx *c, char *buf, size_t size) {
     buf[0] = 0;
@@ -1345,7 +652,6 @@ static void co_current_map(Ctx *c, char *buf, size_t size) {
     recomp_store64_sp(c, out, 0);
     c->x[31] = out;
     c->x[0] = mgr, c->x[1] = out, c->x[2] = 0x1d6189dau;
-    get(c);
     const int found = (int)(c->x[0] & 1);
     const uint64_t text = recomp_load64(c, out);
     *c = saved;
@@ -1368,11 +674,11 @@ static void co_map_words(const char *map, char *out, size_t cap) {
     out[n] = 0;
 }
 
-/* The others' items: which they hold (lasting ones), how many counted ones are still to give. Those the
-   Inventory page lists go by their place in it; any other by its name (co_more). */
-static uint8_t co_they_hold[256], co_to_check[256];
+/* What the others found that this layer gives one for one — a heart container, a Piece of Heart, a Gold Skulltula
+   token — and how many are still to hand over. Those the Inventory page lists go by their place in it; any other by its
+   name (co_more). */
 static int co_to_give[256];
-typedef struct { char name[0x60]; uint8_t they_hold, to_check; int to_give; } CoMore;
+typedef struct { char name[0x60]; int to_give; } CoMore;
 static CoMore co_more[96];
 static int co_more_n;
 static int co_their_quarters = -1;                    /* the most hearts another player said they have, in quarters */
@@ -1385,18 +691,6 @@ static CoMore *co_more_get(const char *name) {
     memset(m, 0, sizeof *m);
     strcpy(m->name, name);
     return m;
-}
-
-static int co_holds(Ctx *c, int i) {
-    char give[0x70], other[2][0x70];
-    co_item_spellings(i, give, other);
-    int n = co_pouch_count(c, co_item_name[i]);
-    if (n < 0) return -1;
-    if (n > 0) return 1;
-    if (strcmp(give, co_item_name[i]) && co_pouch_count(c, give) > 0) return 1;
-    for (unsigned k = 0; k < 2; k++)
-        if (other[k][0] && co_pouch_count(c, other[k]) > 0) return 1;
-    return 0;
 }
 
 static void co_give_named(Ctx *c, const char *name) {
@@ -1442,12 +736,6 @@ static void co_trade_step(Ctx *c, int64_t now) {
     }
 }
 
-static void co_give(Ctx *c, int i) {
-    char give[0x70], other[2][0x70];
-    co_item_spellings(i, give, other);
-    co_give_named(c, give);
-}
-
 /* My hearts in quarters: containers (PlayerStatus.MaxLife counts them in quarters already) and pieces. */
 static int co_my_quarters(Ctx *c) {
     static uint32_t hash;
@@ -1478,21 +766,10 @@ static void co_items_step(Ctx *c, int64_t now) {
         const int i = at % total;
         if (i >= CO_ITEMS) {
             CoMore *m = &co_more[i - CO_ITEMS];
-            if (m->to_check) {
-                m->to_check = 0;
-                if (co_pouch_count(c, m->name) > 0) continue;
-                co_give_named(c, m->name);
-            } else if (m->to_give > 0) {
-                const int many = m->to_give > 99 ? 99 : m->to_give;
-                m->to_give -= many;
-                co_give_many(c, m->name, many);
-            } else continue;
-        } else if (co_item_kind[i] == 0 && co_to_check[i]) {
-            const int holds = co_holds(c, i);
-            if (holds < 0) return;
-            co_to_check[i] = 0;
-            if (holds) continue;
-            co_give(c, i);
+            if (m->to_give <= 0) continue;
+            const int many = m->to_give > 99 ? 99 : m->to_give;
+            m->to_give -= many;
+            co_give_named(c, m->name);
         } else if (co_item_kind[i] != 0 && co_to_give[i] > 0) {
             char give[0x70], other[2][0x70];
             const int many = co_to_give[i] > 99 ? 99 : co_to_give[i];
@@ -1506,29 +783,31 @@ static void co_items_step(Ctx *c, int64_t now) {
     }
 }
 
-/* Everything lasting I hold, said quietly, and my hearts: for a player who just joined. */
-static void co_say_items(Ctx *c) {
-    for (int i = 0; i < CO_ITEMS; i++) {
-        if (co_item_kind[i] != 0) continue;
-        const int holds = co_holds(c, i);
-        if (holds < 0) return;
-        if (holds) co_send("I %s 1 q", co_item_name[i]);
-    }
-    for (unsigned i = 0; i < sizeof co_more_known / sizeof co_more_known[0]; i++)
-        if (co_pouch_count(c, co_more_known[i]) > 0) co_send("I %s 1 q", co_more_known[i]);
-    for (int i = 0; i < co_more_n; i++)
-        if (co_more[i].they_hold) co_send("I %s 1 q", co_more[i].name);   /* (what a third player told me of) */
+/* My hearts, said quietly: for a player who just joined, so that the hearts one for one catch up. What else a room
+   shares of what everyone holds is its rules engine's, and it levels that itself. */
+static void co_say_hearts(Ctx *c) {
     const int quarters = co_my_quarters(c);
     if (quarters > 0) co_send("M %d", quarters);
 }
 
+/* A heart container, a Piece of Heart or a Gold Skulltula token: the three the room's rules leave to this layer,
+   each given one for one (canon: the name it goes by between games). */
+static int co_heart_or_token(const char *name, char canon[0x60]) {
+    if (strstr(name, "Heart_Piece")) return snprintf(canon, 0x60, "Obj_Heart_Piece"), 1;
+    if (!strcmp(name, "Obj_Heart_Container")) return snprintf(canon, 0x60, "%s", name), 1;
+    if (strstr(name, "Skulltula") && strstr(name, "Token")) return snprintf(canon, 0x60, "%s", name), 1;
+    canon[0] = 0;
+    return 0;
+}
+
 /* (oot_coop_pouch_add, any of the game's threads) an item entered the pouch by this name */
 static void co_pickup(const char *name, int many) {
-    if (!co.ready || co.links <= 0 || co_applying) return;
+    if (!co.ready || !co_room() || co_applying) return;
     char canon[0x60];
+    char canon2[0x60];
+    if (!co_heart_or_token(name, canon2)) return;        /* (the room's rules share the rest: host/coop_state.c) */
     const int kind = co_item_class(name, canon);
-    if (kind == 1) co_send("I %s 1", canon);
-    else if (kind == 2) co_send("I %s %d", canon, many < 1 ? 1 : many > 99 ? 99 : many);
+    if (kind == 2) co_send("I %s %d", canon, many < 1 ? 1 : many > 99 ? 99 : many);
 }
 
 /* (hos_main.c hos_oot_lift_player, the player's own actor each frame) where Link stands */
@@ -1552,24 +831,6 @@ void oot_coop_player(Ctx *c, uint64_t actor) {
     co_tick(c, actor);
 }
 
-/* A name or an address typed in the menu's Co-op tab (which: 1 the name, 2 the address): its letters, then kept. */
-static void co_typed(int which) {
-    char text[160];
-    size_t n = 0;
-    for (int ch; n + 1 < sizeof text && (ch = rx_option(HOS_OPT_COOP_OUT, 0)) != 0;) text[n++] = (char)ch;
-    text[n] = 0;
-    char clean[128];
-    co_clean(clean, which == 1 ? 17 : sizeof clean, text, which == 1 ? "_-" : "._-:");
-    if (!clean[0]) { co_note(which == 1 ? "A name is letters and digits: nothing changed" : "No address typed: nothing changed"); return; }
-    EnterCriticalSection(&co.lock);
-    if (which == 1) snprintf(co.name, sizeof co.name, "%s", clean);
-    else snprintf(co.addr, sizeof co.addr, "%s", clean);
-    LeaveCriticalSection(&co.lock);
-    co_config_save();
-    co_menu_text(which == 1 ? 2 : 3, which == 1 ? clean : "Set (kept off the screen)");
-    co_note(which == 1 ? "Name set to %s" : "Host address set%s", which == 1 ? clean : "");
-    if (which == 1) co_send("R %s", clean);            /* (connected: the others see the new name now) */
-}
 
 static void co_events(void) {
     CoEvent *list = NULL; size_t n = 0;
@@ -1581,14 +842,7 @@ static void co_events(void) {
         const char *text = list[e].text;
         char who[24];
         co_peer_name(list[e].from, who, sizeof who);
-        if (text[0] == 'J' && text[1] == ' ') {
-            char name[64] = "", seed[64] = "-";
-            sscanf(text + 2, "%63s %63s", name, seed);
-            co_note("%s is here", name);
-            if (strcmp(seed, co.seed)) co_note("%s plays a changed game: items will not match", name);
-            co_level = 1;                              /* all I have done and hold: said again */
-        } else if (text[0] == 'L' && text[1] == ' ') {
-            co_note("%s left", text + 2);
+        if (text[0] == 'L' && text[1] == ' ') {
         } else if (text[0] == 'D' && text[1] == ' ') {     /* a player's swing reached someone: me? */
             int target = -1, quarters = 0;
             if (sscanf(text + 2, "%d %d", &target, &quarters) == 2 && target == (int)co.my_id && quarters > 0 && quarters <= 8) {
@@ -1606,49 +860,26 @@ static void co_events(void) {
             co_peer_name(by, winner, sizeof winner);
             if (by == (int)co.my_id) co_note("You defeated %s", who);
             else co_note("%s defeated %s", winner, who);
-        } else if (text[0] == 'D' && !text[1]) {
-            co_note("The link to the host is gone: trying again");
-        } else if (text[0] == 'X' && text[1] == ' ') {
-            co_note("The host said no: %s", text + 2);
-            co_fail("the host turned this game away", "%s", "");
         } else if (text[0] == 'I' && text[1] == ' ') {
             char name[0x70] = "", canon[0x60], quiet[8] = "";
             int many = 1;
             if (sscanf(text + 2, "%100s %d %7s", name, &many, quiet) < 1) continue;
-            const int kind = co_item_class(name, canon);
-            if (!kind) continue;
+            if (!co_heart_or_token(name, canon)) continue;   /* (hearts and Gold Skulltula tokens only: the room's rules
+                                                                share the other finds) */
             many = many < 1 ? 1 : many > 99 ? 99 : many;
             const int i = co_item_index(canon);
             const char *label = canon;
             if (i >= 0 && i < 256) {
                 label = co_item_label[i];
-                if (kind == 1) co_they_hold[i] = co_to_check[i] = 1; else co_to_give[i] += many;
+                co_to_give[i] += many;
             } else {
                 CoMore *m = co_more_get(canon);
                 if (!m) continue;
-                if (kind == 1) m->they_hold = m->to_check = 1; else m->to_give += many;
+                m->to_give += many;
                 label = !strcmp(canon, "Obj_Heart_Piece") ? "a Piece of Heart" : !strcmp(canon, "Obj_Heart_Container") ? "a Heart Container"
                       : !strncmp(canon, "Item_", 5) ? canon + 5 : canon;
             }
-            if (!quiet[0] && kind == 1) co_note("%s found %s", who, label);   /* (a find worth a line: not every rupee and seed) */
-            else if (!quiet[0] && (!strcmp(canon, "Obj_Heart_Piece") || !strcmp(canon, "Obj_Heart_Container"))) co_note("%s found %s", who, label);
-        } else if (text[0] == 'K' && text[1] == ' ') {
-            const char *at = text + 2;
-            while (*at) {
-                char *end = NULL;
-                const unsigned long long key = strtoull(at, &end, 16);
-                if (end == at) break;
-                if (key) co_ktheirs_add(key);
-                at = end;
-            }
-        } else if ((text[0] == 'N' || text[0] == 'V') && text[1] == ' ') {
-            unsigned hash = 0;
-            int amount = 0;
-            if (sscanf(text + 2, "%x %d", &hash, &amount) != 2) continue;
-            const int n = co_count_index(hash);
-            if (n < 0 || amount < -99 || amount > 99) continue;
-            if (text[0] == 'N') co_count_add[n] += amount;
-            else if (list[e].from == 0) co_count_set[n] = amount, co_count_has_set[n] = 1, co_count_add[n] = 0;   /* (the host's word only) */
+            if (!quiet[0]) co_note("%s found %s", who, label);
         } else if ((text[0] == 'E' || text[0] == 'S') && text[1] == ' ') {   /* (test runs only: equipment tried on the bodies) */
             const char *e = getenv("HOS_COOP_TEST");
             if (e && !strcmp(e, "1")) snprintf(co_test_equip_line, sizeof co_test_equip_line, "%s", text), InterlockedExchange(&co_test_equip, 1);
@@ -1672,62 +903,35 @@ static void co_events(void) {
         } else if (text[0] == 'M' && text[1] == ' ') {
             const int quarters = atoi(text + 2);
             if (quarters > co_their_quarters && quarters <= 400) co_their_quarters = quarters;
-        } else if (text[0] == 'F' && text[1] == ' ') {
-            const char *at = text + 2;
-            while (*at) {
-                char *end = NULL;
-                const unsigned long hash = strtoul(at, &end, 16);
-                if (end == at) break;
-                if (hash) co_theirs_add((uint32_t)hash);
-                at = end;
-            }
         }
     }
     free(list);
 }
 
-static void co_status(Ctx *c, int64_t now, const char *map, int playing) {
-    static char last[200], last_list[700];
-    char text[200], list[700] = "";                    /* (the list: "Name: where", a line each, in the peers' order: co_goto_ask counts the same way) */
+static void co_players_list(int64_t now, const char *map, int playing) {
+    static char last_list[700];
+    char list[700] = "";                               /* ("Name: where", a line each, in the room's order: co_goto_ask counts the same way) */
     size_t listed = 0;
-    const int state = (int)co.state;
-    char why[72], advice[200];
+    float mine[3];
     EnterCriticalSection(&co.lock);
-    snprintf(why, sizeof why, "%s", co.why);
-    snprintf(advice, sizeof advice, "%s", co.advice);
-    co.advice[0] = 0;                                   /* (said once) */
-    LeaveCriticalSection(&co.lock);
-    if (advice[0] && co.want) co_note("%s", advice);
-    if (!co.want) snprintf(text, sizeof text, "Not connected");
-    else if (!co.thread) snprintf(text, sizeof text, "Not connected: Windows' network library did not load");
-    else if (state == 4) snprintf(text, sizeof text, "Not connected: %s", why[0] ? why : "this PC cannot host on that port");
-    else if (state == 2 && why[0]) snprintf(text, sizeof text, "Not connected: %s (trying again)", why);
-    else if (state == 2) snprintf(text, sizeof text, "Connecting...");
-    else {
-        size_t used = (size_t)snprintf(text, sizeof text, "Connected: ");
-        int others = 0;
-        float mine[3];
-        EnterCriticalSection(&co.lock);
-        memcpy(mine, co.pos, sizeof mine);
-        for (int i = 0; i < CO_PEERS; i++) {
-            const CoPeer *p = &co.peer[i];
-            if (!p->used) continue;
-            char words[96], where[112];
+    memcpy(mine, co.pos, sizeof mine);
+    for (int i = 0; i < CO_PEERS; i++) {
+        const CoPeer *p = &co.peer[i];
+        if (!p->used) continue;
+        char where[112];
+        if (!p->map[0] || now - p->seen > 3000000000LL) snprintf(where, sizeof where, "not in the game yet");
+        else if (playing && !strcmp(p->map, map)) {
+            const float dx = p->pos[0] - mine[0], dy = p->pos[1] - mine[1], dz = p->pos[2] - mine[2];
+            snprintf(where, sizeof where, "here, %.0f m away", sqrtf(dx * dx + dy * dy + dz * dz));
+        } else {
+            char words[96];
             co_map_words(p->map, words, sizeof words);
-            if (!p->map[0] || now - p->seen > 3000000000LL) snprintf(where, sizeof where, "not in the game yet");
-            else if (playing && !strcmp(p->map, map)) {
-                const float dx = p->pos[0] - mine[0], dy = p->pos[1] - mine[1], dz = p->pos[2] - mine[2];
-                snprintf(where, sizeof where, "here, %.0f m away", sqrtf(dx * dx + dy * dy + dz * dz));
-            } else snprintf(where, sizeof where, "%s", words);
-            if (used <= sizeof text - 96) used += (size_t)snprintf(text + used, sizeof text - used, "%s%s: %s", others ? "   " : "", p->name, where);
-            if (listed < sizeof list - 150) listed += (size_t)snprintf(list + listed, sizeof list - listed, "%s: %s\n", p->name, where);
-            others++;
+            snprintf(where, sizeof where, "%s", words);
         }
-        LeaveCriticalSection(&co.lock);
-        if (!others) snprintf(text, sizeof text, state == 1 ? "Hosting on port %d: nobody has joined yet" : "Connected: waiting for the others", (int)co.port);
+        if (listed < sizeof list - 150)
+            listed += (size_t)snprintf(list + listed, sizeof list - listed, "%s: %s\n", p->name, where);
     }
-    (void)c;
-    if (strcmp(text, last)) snprintf(last, sizeof last, "%s", text), co_menu_text(0, text);
+    LeaveCriticalSection(&co.lock);
     if (strcmp(list, last_list)) snprintf(last_list, sizeof last_list, "%s", list), co_menu_text(4, list);
 }
 
@@ -2891,7 +2095,7 @@ static void co_enemy_lead_step(Ctx *c, uint64_t life, uint64_t actor, int64_t no
 }
 
 void oot_coop_life_seen(Ctx *c, uint64_t life) {
-    if (!co.ready || !co.want || !co_ok(life, 0x1c20)) return;
+    if (!co.ready || !co_room() || !co_ok(life, 0x1c20)) return;
     const uint64_t actor = G64(life + 0x18);
     if (!co_ok(actor, 0x390)) return;
     const uint64_t name_at = G64(actor + 0x20);
@@ -2944,7 +2148,7 @@ void oot_coop_life_seen(Ctx *c, uint64_t life) {
 
 void oot_coop_life_write(Ctx *c, uint64_t life, uint32_t was, uint32_t now_left) {
     (void)c;
-    if (!co.ready || !co.want || now_left >= was || !co_ok(life, 0x20)) return;
+    if (!co.ready || !co_room() || now_left >= was || !co_ok(life, 0x20)) return;
     const uint64_t actor = G64(life + 0x18);
     const int64_t now = hos_now_ns();
     int found = 0;
@@ -2974,32 +2178,23 @@ void oot_coop_life_write(Ctx *c, uint64_t life, uint32_t was, uint32_t now_left)
 
 void oot_coop_frame(void) {
     static int64_t next_slow;
-    static int shown;
     {   /* (co-op's corner and the names are not drawn over the game's own menus: the pause menu, the map. Not at the title,
-           where the corner says whether the link is up before a save is loaded) */
+           where the corner says whether a player is in the room before a save is loaded) */
         int hos_oot_menu_in_front(void);               /* host/oot_menu.c */
         static int hidden = -1;
         const int hide = co_playing && hos_oot_menu_in_front();
         if (hide != hidden) hidden = hide, rx_option_set(HOS_OPT_COOP_HIDE, hide);
     }
-    const int mode = rx_option(HOS_OPT_COOP_MODE, 0);
-    /* (From the game's first frame, connected or not: the name and the address are read, shown in their rows and can be
-       typed before Connect is ever pressed. The port is set before the link's thread can start, and what is wanted of
-       the thread after: it never sees one without the other.) */
-    { const int port = rx_option(HOS_OPT_COOP_PORT, 43400); InterlockedExchange(&co.port, port >= 1024 && port <= 65535 ? port : 43400); }
-    co_start(mode == 1 || mode == 2);
-    InterlockedExchange(&co.want, mode == 1 || mode == 2 ? mode : 0);
-    if (!shown) shown = 1, co_menu_text(2, co.name), co_menu_text(3, "Set (kept off the screen)");   /* (an address is not for a stream) */
+    co_ready();   /* (the room's view and its lines, asked for once, from the game's first frame) */
     const int action = rx_option(HOS_OPT_COOP_ACTION, 0);
-    if (action == 3 || action == 4) co_typed(action - 2);
-    else if (action >= 10 && action < 10 + CO_PEERS) co_goto_ask(action - 10);
+    if (action >= 10 && action < 10 + CO_PEERS) co_goto_ask(action - 10);   /* (the Co-op tab's Go to player rows) */
     const int64_t now = hos_now_ns();
     EnterCriticalSection(&co.game);
     co_events();
     if (now >= next_slow) {
         next_slow = now + 1000000000LL;
         const int playing = co_playing && co.player_seen && now - co.player_seen < 1000000000LL;
-        co_status(NULL, now, co_map, playing);
+        co_players_list(now, co_map, playing);
     }
     LeaveCriticalSection(&co.game);
 }
@@ -3009,23 +2204,14 @@ void oot_coop_frame(void) {
 static void co_tick(Ctx *c, uint64_t link) {
     static int64_t next_map, next_place, next_flags, playing_since, last_playing;
     static volatile int64_t last_tick;
-    static int fresh;                                  /* a save was just loaded: its counts are where it starts */
     static int64_t quiet_until;                        /* nothing is changed in the game before this: an event or a load, and two seconds after */
-    if (!co.ready || !co.want) return;
+    if (!co.ready || !co_room()) return;
     const int64_t now = hos_now_ns();
     if (now - last_tick < 10000000LL || !TryEnterCriticalSection(&co.game)) return;
     last_tick = now;
-    if (!co_shared_loaded) co_shared_load();
-
     /* in the game: Link was updated a moment ago, and for three seconds on end (a save just loaded settles first) */
     const int playing_now = co.player_seen && now - co.player_seen < 1000000000LL;
-    if (playing_now && (!last_playing || now - last_playing > 3000000000LL)) {
-        playing_since = now;
-        co_theirs_done = co_ktheirs_done = 0;          /* this may be another save: the others' flags and items, asked of it again */
-        for (int i = 0; i < CO_ITEMS && i < 256; i++) co_to_check[i] = co_they_hold[i];
-        for (int i = 0; i < co_more_n; i++) co_more[i].to_check = co_more[i].they_hold;
-        fresh = 1;
-    }
+    if (playing_now && (!last_playing || now - last_playing > 3000000000LL)) playing_since = now;
     if (playing_now) last_playing = now;
     const int playing = playing_now && now - playing_since > 3000000000LL;
     co_playing = playing;
@@ -3058,13 +2244,7 @@ static void co_tick(Ctx *c, uint64_t link) {
         const int quiet = now < quiet_until;
         if (now >= next_flags && !quiet) {
             next_flags = now + 500000000LL;
-            const int levelling = co_level && co.links > 0;
-            if (levelling) co_level = 0;
-            co_flags_step(levelling);
-            co_keys_step(levelling);
-            co_counts_step(fresh, levelling);
-            fresh = 0;
-            if (levelling) co_say_items(c);
+            if (co_level && co.links > 0) co_level = 0, co_say_hearts(c);   /* (a player joined: my hearts, so theirs catch up) */
         }
         if (!quiet) co_items_step(c, now);
         if (!quiet) co_trade_step(c, now);
@@ -3092,10 +2272,3 @@ void oot_coop_pouch_add(Ctx *c) {
     if (!len || len >= 0x60) return;
     co_pickup(name, many);
 }
-#else   /* (not Windows: no link yet. The lifted game's hooks and the frame's call still land here) */
-void oot_coop_frame(void) {}
-void oot_coop_player(Ctx *c, uint64_t actor) { (void)c, (void)actor; }
-void oot_coop_pouch_add(Ctx *c) { (void)c; }
-void oot_coop_life_seen(Ctx *c, uint64_t life) { (void)c, (void)life; }
-void oot_coop_life_write(Ctx *c, uint64_t life, uint32_t was, uint32_t now) { (void)c, (void)life, (void)was, (void)now; }
-#endif

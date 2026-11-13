@@ -26,6 +26,7 @@ FIXTURE = r"""
 #include <cstring>
 
 using DWORD = unsigned long;
+static int coop_port = 43400;   // (the Co-op tab's Port row: ini_key's key for it; no room here)
 constexpr int MAX_PATH = 260;
 static DWORD hos_game_path_a(char *path, DWORD size) { return snprintf(path, size, "./hookshot.exe"); }
 static char logged[256];

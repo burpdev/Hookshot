@@ -1129,7 +1129,8 @@ def main():
     if host_srcs:
         jobs += zstd_jobs(cc, target() + CPU + ["-O2", "-g0", "-DNDEBUG", "-Wno-everything", "-DZSTD_DISABLE_ASM",
                                                 "-DZSTD_LEGACY_SUPPORT=0", "-DZSTD_MULTITHREAD=0"], obj_dir, "zstd_")
-    # Monocypher 4.0.2 (third_party/monocypher): co-op's cryptography (host/coop_proto.c)
+    # Monocypher 4.0.2 (third_party/monocypher): co-op's cryptography — the room's signed rules, removals and each
+    # player's Ed25519 identity (host/coop_state.c, host/coop_oot.c, host/coop.c)
     if host_srcs:
         jobs.append((cc, os.path.join(MONOCYPHER, "monocypher.c"), os.path.join(obj_dir, "monocypher.o"),
                      target() + CPU + ["-O2", "-g0", "-Wno-everything"], b"monocypher-4.0.2"))

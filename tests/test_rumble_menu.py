@@ -51,6 +51,7 @@ def one_line(text, head):
 FIXTURE = r"""
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL %%d %%s\n", __LINE__, #x); return 1; } } while (0)
@@ -85,6 +86,12 @@ struct { void note(const int*) {} } restart_state;
 %(is_slider)s
 %(stops)s
 %(snap)s
+/* (the Co-op tab's Port row, in ini_key and in set_row: the room's port, told to host/coop_menu.c. No room and no
+   host here, so the host's pointer is there and its coop_command is not) */
+int coop_port = 43400;
+const char* tx_port(int v) { static char t[16]; std::snprintf(t, sizeof t, "%%d", v); return t; }
+constexpr int HOS_COOP_CMD_PORT = 4;
+struct { int (*coop_command)(int, const char*, uint32_t); } coop_host{nullptr}, *host = &coop_host;
 %(ini_key)s
 /* (the Microphone row's hook in set_row: no microphones here) */
 bool can_mic() { return false; }

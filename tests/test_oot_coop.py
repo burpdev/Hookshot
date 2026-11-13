@@ -109,19 +109,20 @@ ENTRY = ("void oot_coop_frame(void)", "void oot_coop_player(Ctx *c, uint64_t act
 
 def check_host():
     coop = read("host", "oot_coop.c")
-    at_if, at_else = coop.index("#if defined(_WIN32)"), coop.rindex("\n#else")
-    check(coop.rstrip().endswith("#endif") and at_if < at_else, "host/oot_coop.c is not one #if defined(_WIN32) ... #else ... #endif")
-    windows, other = coop[at_if:at_else], coop[at_else:]
+    # (one file for both platforms: co-op is on Linux too, so it holds no #if defined(_WIN32) split and no stand-ins.
+    #  host/posix/windows.h is where CRITICAL_SECTION and Interlocked* come from there.)
+    check("#if defined(_WIN32)" not in coop and "\n#else" not in coop and "#endif" not in coop,
+          "host/oot_coop.c splits itself between Windows and everywhere else")
+    check("#include <windows.h>" in coop, "host/oot_coop.c does not take the lock and Interlocked helpers from <windows.h>")
     for entry in ENTRY:
-        check(windows.count("\n" + entry) == 1, "host/oot_coop.c: not defined once for Windows: " + entry)
-        check(other.count("\n" + entry) == 1, "host/oot_coop.c: no stand-in elsewhere (the lifted C calls it): " + entry)
-    check("#include <w" not in coop[:at_if] and "#include <w" not in other, "a Windows header outside the Windows part")
+        check(coop.count("\n" + entry) == 1, "host/oot_coop.c: not defined once, on every platform: " + entry)
     check(re.search(r"oot_coop_player\(c, actor\);", read("host", "hos_main.c")), "hos_oot_lift_player does not tell co-op of the player")
     check(re.search(r"\n(int hos_oot_travel\(Ctx \*c, uint64_t actor, const char \*banc\)) \{", read("host", "hos_main.c")),
           "host/hos_main.c has no hos_oot_travel (co-op's go to a player)")
     check("oot_coop_frame();" in read("host", "nn_vi.c"), "hos_vi_native_presented does not call co-op's frame")
     check(read("host", "oot_menu.c").count("\nint hos_oot_menu_in_front(void)") == 2,
           "host/oot_menu.c: hos_oot_menu_in_front for Windows and its stand-in elsewhere")
+    check("coop_command" in read("gpu", "vk", "vk_api.h"), "MkwVkHost has no coop_command (the Co-op tab's rows to host/coop_menu.c)")
 
 
 def enum_ids(text):
@@ -143,8 +144,8 @@ def enum_ids(text):
 
 def check_ids():
     ours = enum_ids(read("gpu", "vk", "oot_coop_opts.h"))
-    names = ["HOS_OPT_COOP_" + n for n in ("MODE", "PORT", "ACTION", "CHAR", "TEXT", "OUT", "PVP", "LABEL", "HIDE")]
-    check(sorted(ours) == sorted(names), "gpu/vk/oot_coop_opts.h: the ids are not the nine expected: %s" % sorted(ours))
+    names = ["HOS_OPT_COOP_" + n for n in ("ACTION", "CHAR", "TEXT", "PVP", "LABEL", "HIDE")]
+    check(sorted(ours) == sorted(names), "gpu/vk/oot_coop_opts.h: the ids are not the six expected: %s" % sorted(ours))
     check(len(set(ours.values())) == len(ours), "two co-op option ids are one number")
     theirs = enum_ids(read("gpu", "vk", "vk_api.h"))
     clash = sorted(n for n, v in theirs.items() if v in ours.values())
@@ -158,13 +159,13 @@ def check_ids():
         check(name in coop, "host/oot_coop.c never uses " + name)
     replay, menu = read("gpu", "vk", "vk_replay.cpp"), read("gpu", "vk", "vk_menu.cpp")
     # (what the host asks, rx_option: vk_replay.cpp's option hands the whole range to the menu, first id to last)
-    check(ours["HOS_OPT_COOP_MODE"] == min(ours.values()) and ours["HOS_OPT_COOP_HIDE"] == max(ours.values()) and
-          max(ours.values()) - min(ours.values()) == len(ours) - 1, "the co-op ids are not one run from MODE to HIDE")
-    check("if (id >= HOS_OPT_COOP_MODE && id <= HOS_OPT_COOP_HIDE) return menu_coop_option(id);" in replay,
+    check(ours["HOS_OPT_COOP_ACTION"] == min(ours.values()) and ours["HOS_OPT_COOP_HIDE"] == max(ours.values()) and
+          max(ours.values()) - min(ours.values()) == len(ours) - 1, "the co-op ids are not one run from ACTION to HIDE")
+    check("if (id >= HOS_OPT_COOP_ACTION && id <= HOS_OPT_COOP_HIDE) return menu_coop_option(id);" in replay,
           "vk_replay.cpp's option does not answer co-op's rows")
     start = menu.index("int menu_coop_option(int id) {")
     asked = menu[start:menu.index("\n}\n", start)]
-    for name in ("HOS_OPT_COOP_MODE", "HOS_OPT_COOP_PORT", "HOS_OPT_COOP_ACTION", "HOS_OPT_COOP_OUT", "HOS_OPT_COOP_PVP"):
+    for name in ("HOS_OPT_COOP_ACTION", "HOS_OPT_COOP_PVP"):
         check("id == " + name in asked, "menu_coop_option does not answer " + name)
     start = menu.index("void menu_option_set(int id, int value) {")
     setter = menu[start:menu.index("\n}\n", start)]
@@ -175,12 +176,14 @@ def check_ids():
 def check_rows():
     menu = read("gpu", "vk", "vk_menu.cpp")
     rows = re.findall(r'\{TAB_COOP, "([^"]+)", (&?\w+),', menu)
-    # (the Co-op tab holds the room's rows too: only the direct link's are checked here, in the order they are in the table)
-    direct = ["Play as", "Host address", "Port", "Player name", "Connection", "Status"] + ["Go to player"] * 7 + ["PvP"]
-    names = [name for name, _ in rows if name in direct]
-    check(names == direct, "the Co-op tab's direct-link rows are not the ones expected: %s" % names)
-    # (a row with a value is saved by its name, as every row: play_as, port, pvp. No preset sets them: preset_exempt)
-    for name, value in (("Play as", "&coop_role"), ("Port", "&coop_port"), ("PvP", "&coop_pvp")):
+    # (the Co-op tab is one room: Host and Join, where to reach the host, its port, the name, the status, the room's
+    #  consent and its pools, then the seven ways to follow a player and PvP. In the order they are in the table.)
+    direct = (["Host", "Join", "Host address", "Port", "Player name", "Status", "Accept the room", "Remove a player",
+               "Reset the pools", "Room rules"] + ["Go to player"] * 7 + ["PvP"])
+    names = [name for name, _ in rows]
+    check(names == direct, "the Co-op tab's rows are not the ones expected: %s" % names)
+    # (a row with a value is saved by its name, as every row: port, pvp. No preset sets them: preset_exempt)
+    for name, value in (("Port", "&coop_port"), ("PvP", "&coop_pvp")):
         check((name, value) in rows, "the Co-op tab's %s row is not %s" % (name, value))
         at = menu.index('{TAB_COOP, "%s", %s,' % (name, value))
         check(menu[at:menu.index("},\n", at)].endswith("nullptr, false, true"), "the Co-op tab's %s row would turn the preset to Custom" % name)

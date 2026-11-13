@@ -120,16 +120,17 @@ screen. It costs some GPU time on cards that cull quickly, so it is off unless s
 
 ### Co-op
 
-Co-op's direct link (`host/oot_coop.c`, [coop-network.md](coop-network.md)) is turned on by the Co-op tab's
-Connection row, not by a switch.
+Co-op is one room (host/coop.c, its wire host/coop_net.c and host/coop_proto.h, its rules host/coop_state.c and
+host/coop_oot.c, its players' layer host/oot_coop.c) and it is [described in coop.md](coop.md). It is turned on by the
+Co-op tab's **Host** or **Join** row, not by a switch.
 These change parts of it or stand in for the tab in test runs:
 
 | Switch | What it does |
 |---|---|
 | `HOS_COOP_ENEMY_PLACE=0` | Enemies are not kept in one place for all players: each game moves its own copies (their life is still shared) |
 | `HOS_COOP_BOSS=0` | Bosses are left to each game: no leader, no hand-over (their life is still shared) |
-| `HOS_COOP_AUTO=host` or `join`, `HOS_COOP_PORT=<port>` | Test runs: connected from the start without the Connection row; the port, over the Port row |
-| `HOS_COOP_TEST=1` | Test runs: the link also takes the test lines (`G` travel or stand at a place, `A` an animation on the bodies, `Z` an actor beside Link, `E` and `S` equipment on the bodies); `HOS_COOP_FOLLOW=1` or `2` with it: this game never leads an enemy, or only a boss it took over by its own hit |
+| `HOS_COOP_AUTO=host` or `join`, `HOS_COOP_PORT=<port>`, `HOS_COOP_SERVER=<host>`, `HOS_COOP_NAME=<name>` | Test runs: in a room from the start without the Host or Join row; the port, the host's address and the name, over their rows |
+| `HOS_COOP_TEST=1` | Test runs: the room also takes the test lines (`G` travel or stand at a place, `A` an animation on the bodies, `Z` an actor beside Link, `E` and `S` equipment on the bodies); `HOS_COOP_FOLLOW=1` or `2` with it: this game never leads an enemy, or only a boss it took over by its own hit |
 
 ### Input for scripted runs
 
@@ -444,7 +445,7 @@ through (inputs timed in frames, screenshots, waits for the game's state, the In
 | `gpu/vk/` | the Vulkan back end (`hookshot_vk.dll`, `hookshot_vk.so`), with Eden's shader recompiler and sirit |
 | `gpu/render/`, `gpu/third_party/` | the WebGPU renderer the Windows exe falls back to when it was built with wgpu-native, its op stream (`rx_nvn.h`), suyu's decoders |
 | `builder/` | Hookshot Builder: the Windows app (.NET 8 WPF), its setup and MSI, and the Linux builder and launcher scripts |
-| `scripts/` | test runs, the profile and log readers, the save copier (`oot_saves.py`), co-op's relay (`coop_relay.py`, [coop.md](coop.md)), release tooling, `scripts/linux` (dependencies, AppImage) |
+| `scripts/` | test runs, the profile and log readers, the save copier (`oot_saves.py`), release tooling, `scripts/linux` (dependencies, AppImage) |
 | `tests/` | the game-free checks, all run by `tests/run_all.py` |
 | `third_party/` | a64-kit (Hookshot's few changes marked `(hookshot)`), libopus, zbic (Atmosphere's zstd with ZBIC, for unpacking only), SDL2's licence, Dear ImGui and its Vulkan backend, zstd's decoder, Monocypher (co-op's cryptography), the Libertinus fonts |
 

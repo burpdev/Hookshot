@@ -5042,7 +5042,7 @@ void fill_replay_table(MkwVkRenderer& t) {
         if (id == HOS_OPT_CHEAT_HEARTS) return menu_heart_protection();
         if (id == HOS_OPT_CHEAT_FLIGHT) return menu_player_flight();
         if (id == HOS_OPT_CHEAT_ACTION) return menu_take_cheat_action();
-        if (id >= HOS_OPT_COOP_MODE && id <= HOS_OPT_COOP_HIDE) return menu_coop_option(id);   // (the Co-op tab: oot_coop_opts.h)
+        if (id >= HOS_OPT_COOP_ACTION && id <= HOS_OPT_COOP_HIDE) return menu_coop_option(id);   // (the Co-op tab: oot_coop_opts.h)
         if (id == HOS_OPT_CHEAT_CAMERA) return menu_free_camera();
         if (id == HOS_OPT_CHEAT_SPEED) return menu_link_speed();
         if (id == HOS_OPT_HDR_NATIVE) return dev.hdr && opts.hdr == 2;

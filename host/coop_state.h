@@ -18,14 +18,14 @@
 // Gossip. Registers are split into COOP_SYNC_SECTIONS sections by hash; a DIGEST carries a sum per section (and the
 // room's rules), every 2 s and at once to a member who joins; a section whose sum differs from a peer's is sent to it in
 // SYNC messages, so two players converge within a few digests and a late joiner catches up with everything. A local
-// change goes out at once and again 80 and 250 ms later. Sending is paced (32 KB/s) under the relay's per-member limit.
+// change goes out at once and again 80 and 250 ms later. Sending is paced (32 KB/s) under the room's per-member limit.
 // Every SECTION (a push or an answer) carries its sender's signature over the room, its member id and session, a
 // counter and its bytes, checked before anything of it counts: the room's message key, which every holder of the
-// secret has (a relay run by one, a sender on a player's network), makes no values in a member's name.
+// secret has (one player's game, a host on a player's network), makes no values in a member's name.
 //
 // Identities. Each game has a signing key for each room and start of the game (from coop_sync_seed's random value and the
 // room's secret; the room's maker keeps one per room across starts, coop_sync_room_seed), and signs its identity in that
-// room: the key, the name, the session the relay lists for it and its session in the room before that one. A game takes
+// room: the key, the name, the session the room's roster lists for it and its session in the room before that one. A game takes
 // values only from a member whose identity it checked, an identity is bound to one session, and a session a member's
 // later identity names as the one before is never taken again, so an identity cannot be copied or reused by another
 // member; nothing else (a roster, a lost room) ends a session, since anyone on the path can send those. A signature
@@ -36,9 +36,9 @@
 // settings, coop_sync_settings), the identities admitted to the pools, the identities removed and the pools' epoch,
 // with an epoch it raises at each change; it rides in every DIGEST, so every member passes it on. A game takes a
 // charter only signed by the key it pinned when its player accepted the room (coop_sync_accept); before that, its own
-// for a room it made in this session; else the key of the member the relay names as the maker, but only while no
+// for a room it made in this session; else the key of the member the room's roster names as its maker, but only while no
 // identified member carries a charter of another key; else, while no maker is there, the one key every member's
-// charter carries. A member the relay marks later (a restart, a hostile relay) changes nothing for a player who
+// charter carries. A member the roster marks later (another game's roster, a restarted host) changes nothing for a player who
 // accepted. A category switched to shared starts merging (its digest sums differ, the sections are exchanged); one
 // switched to per player stops; what was merged stays. A removed identity's messages are ignored and its records
 // dropped everywhere, and each game keeps every removal it saw in the room; a pool reset starts a new pools' epoch in
@@ -126,12 +126,12 @@ unsigned coop_sync_ignored(const CoopSync *s);
 // another room starts them anew.
 // self: this player's member id; ids and sessions: every member's (self included: this game's own session, the one it
 // joined with, which its identity and sections are signed for; sessions NULL: each id's own number); maker: the member
-// the relay names as the room's maker, 0 when none is in the room.
-void coop_sync_room(CoopSync *s, const char *code, int self, const int *ids, const uint64_t *sessions, int n, int maker,
+// the room's roster names as its maker, 0 when none is in the room.
+void coop_sync_room(CoopSync *s, const char *room_id, int self, const int *ids, const uint64_t *sessions, int n, int maker,
                     uint64_t now_ms);
-// The room's own seed for this player's key in the room of that code (the maker's, kept in its profile so that its key
+// The room's own seed for this player's key in the room of that id (the maker's, kept in its profile so that its key
 // outlives a restart of the game); without it the key comes from coop_sync_seed's value of this start.
-void coop_sync_room_seed(CoopSync *s, const char *code, const uint8_t seed[32]);
+void coop_sync_room_seed(CoopSync *s, const char *room_id, const uint8_t seed[32]);
 // This player's own rule settings, and whether it made the room in this session (its settings are the room's).
 void coop_sync_settings(CoopSync *s, const CoopRules *mine, int made_room);
 // A peer message (kind COOP_K_DIGEST or COOP_K_SECTION, the bytes after the kind) from member from.
@@ -156,7 +156,7 @@ void coop_sync_name(CoopSync *s, const char *name);   // this player's name, sig
 // (the members and disagree are filled in), and while a member that just appeared is not identified yet.
 typedef struct {
     int id, heard, maker, removed;
-    char name[COOP_NAME_MAX + 1];   // the name it signed; "" until heard (the game side shows the relay's)
+    char name[COOP_NAME_MAX + 1];   // the name it signed; "" until heard (the game side shows the roster's)
     char key[20];                   // its key's fingerprint, xxxx-xxxx-xxxx-xxxx; "" until heard
     char accepted_as[COOP_NAME_MAX + 1];   // its key was accepted under this other name ("" when not, or under this one)
 } CoopOfferMember;
@@ -167,7 +167,7 @@ typedef struct {
     CoopOfferMember member[COOP_MAX_MEMBERS];
     CoopRules rules;
     char maker_key[20]; // the fingerprint of the key that signed the rules
-    int maker_moved;    // the relay names another member as the maker than the one whose key signs the rules
+    int maker_moved;    // the roster names another member as the maker than the one whose key signs the rules
     int new_save;       // another save was loaded since the last acceptance: it gets the room's progress, which holds
                         // what every save played in the room brought (the last one's too)
     int copy;           // the copy of the save for this acceptance: 0 not yet, 1 made, -1 failed (accept again to retry)

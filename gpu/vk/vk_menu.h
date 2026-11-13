@@ -3,7 +3,7 @@
 #include "auto_settings.h"
 
 #include "vk_internal.h"
-#include "oot_coop_opts.h"   // (HOS_OPT_COOP_*: the Co-op tab's direct link and host/oot_coop.c)
+#include "oot_coop_opts.h"   // (HOS_OPT_COOP_*: the Co-op tab's rows and host/oot_coop.c)
 
 namespace mkwvk {
 

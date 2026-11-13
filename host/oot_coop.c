@@ -405,17 +405,23 @@ static char co_cmd_name[CO_PEERS][CO_AS_SLOTS][CO_AS_NAME];   /* what their Link
 static uint8_t co_cmd_have[CO_PEERS][CO_AS_SLOTS];
 
 #define CO_EQ_SLOTS 18          /* (the equipment user's slots: the game's own request numbers them) */
-#define CO_EQ_NO    0x7fffffc0  /* (a state nothing has said yet) */
-/* What another player's Link holds and how it hangs, as their game last said it (under co.lock); a body takes it on
-   its next step, and a new body takes it all again. */
+#define CO_EQ_EVENTS 16         /* (hangs kept for a body that is not awake yet) */
+/* What another player's Link holds, as their game last said it (under co.lock); a body takes it on its next step,
+   and a new body takes it all again. */
 static char co_eq_name[CO_PEERS][CO_EQ_SLOTS][CO_AS_NAME];
 static int co_eq_num[CO_PEERS][CO_EQ_SLOTS];
-static int co_eq_state[CO_PEERS][3];
-static uint8_t co_eq_state_have[CO_PEERS][3];
-/* Mine, already said: changes go out once, as they happen; someone joining gets them whole again. */
+/* And the hangs: these are not a state but calls the game made — which equipment call, on which slot — because
+   a Link reaching for or putting away a thing is something that happens, not something that stays. They queue
+   under co.lock and a body works through them in order; a body not awake yet keeps them, and if the queue fills
+   its oldest is forgotten. */
+typedef struct { uint8_t kind, slot; } CoEquipEvent;
+static CoEquipEvent co_eq_evt[CO_PEERS][CO_EQ_EVENTS];
+static int co_eq_evt_head[CO_PEERS], co_eq_evt_tail[CO_PEERS];   /* (under co.lock) */
+/* Mine, already said: a hold goes out once, as it changes; a hang goes out every time the game asks for it, the
+   same one at most a couple of times a second. Someone joining gets the holds whole again. */
 static char co_said_name[CO_EQ_SLOTS][CO_AS_NAME];
 static int co_said_num[CO_EQ_SLOTS];
-static int co_said_state[3] = {CO_EQ_NO, CO_EQ_NO, CO_EQ_NO};
+static int64_t co_said_hang_ns[3][CO_EQ_SLOTS];   /* (under co.lock, where the hook writes it) */
 /* (how much of this holds-and-hangs chain went to the log: the lines are changes, not frames, and a game left
    swinging still has to stop talking eventually) */
 static int co_eq_put_said;
@@ -432,7 +438,8 @@ static CoPeer *co_peer(int id, int make) {             /* (under co.lock) */
     {   /* (another player's movement was here) */
         const size_t at = (size_t)(free_slot - co.peer);
         memset(co_in_have[at], 0, CO_INPUTS), co_in_words[at] = 0, memset(co_cmd_have[at], 0, CO_AS_SLOTS),
-        memset(co_eq_name[at], 0, sizeof co_eq_name[at]), memset(co_eq_state_have[at], 0, sizeof co_eq_state_have[at]);
+        memset(co_eq_name[at], 0, sizeof co_eq_name[at]),
+        memset(co_eq_evt[at], 0, sizeof co_eq_evt[at]), co_eq_evt_head[at] = co_eq_evt_tail[at] = 0;
     }
     return free_slot;
 }
@@ -924,14 +931,18 @@ static void co_events(void) {
                 }
                 LeaveCriticalSection(&co.lock);
             }
-        } else if (text[0] == 'S' && text[1] == ' ') {   /* that player's equipment state changed */
-            int kind = 0, st = 0;
-            if (sscanf(text + 2, "%d %d", &kind, &st) == 2 && kind >= 1 && kind <= 2) {
+        } else if (text[0] == 'S' && text[1] == ' ') {   /* that player's game asked their Link to reach for or put away this */
+            int kind = 0, slot = 0;
+            if (sscanf(text + 2, "%d %d", &kind, &slot) == 2 && kind >= 1 && kind <= 2 && slot >= 0 && slot < CO_EQ_SLOTS) {
                 EnterCriticalSection(&co.lock);
                 const CoPeer *p = co_peer(list[e].from, 1);
                 if (p) {
                     const size_t at = (size_t)(p - co.peer);
-                    co_eq_state[at][kind] = st, co_eq_state_have[at][kind] = 1;
+                    const int t = co_eq_evt_tail[at];
+                    co_eq_evt[at][t].kind = (uint8_t)kind, co_eq_evt[at][t].slot = (uint8_t)slot;
+                    co_eq_evt_tail[at] = (t + 1) % CO_EQ_EVENTS;
+                    if (co_eq_evt_tail[at] == co_eq_evt_head[at])   /* (their body is not awake: the oldest reach is forgotten) */
+                        co_eq_evt_head[at] = (co_eq_evt_head[at] + 1) % CO_EQ_EVENTS;
                 }
                 LeaveCriticalSection(&co.lock);
             }
@@ -1140,7 +1151,7 @@ static uint64_t co_create(Ctx *c, const char *name, const float place[3], float 
 }
 
 typedef struct { uint64_t actor, made_of; int child, posed, foe; uint32_t life_full; int64_t tried, struck; float push[2], push_far;
-                 char eq_name[CO_EQ_SLOTS][CO_AS_NAME]; int eq_num[CO_EQ_SLOTS]; int eq_state[3];
+                 char eq_name[CO_EQ_SLOTS][CO_AS_NAME]; int eq_num[CO_EQ_SLOTS];
                  uint64_t retired, retired_of;   /* (the body this one replaced: put under and kept under, see co_bodies_step) */
                  int64_t child_at; int child_want; } CoBody;
 static CoBody co_body[CO_PEERS];
@@ -1510,40 +1521,42 @@ static int co_equip(Ctx *c, uint64_t actor, int slot, const char *name, int numb
     return result;
 }
 
-static int co_equip_state(Ctx *c, uint64_t actor, int kind, int state) {
+static int co_equip_state(Ctx *c, uint64_t actor, int kind, int slot) {
     const uint64_t user = co_equipment_user(actor);
     A64Fn change = a64_lookup(kind == 2 ? 0x80e54c70ULL : 0x806d6820ULL);
     if (!user || !change) return -1;
     const Ctx saved = *c;
     c->x[31] = (c->x[31] - 0x40) & ~0xfULL;
-    c->x[0] = user, c->x[1] = (uint64_t)(uint32_t)state;
+    c->x[0] = user, c->x[1] = (uint64_t)(uint32_t)slot;
     change(c);
     const int result = (int)c->x[0];
     *c = saved;
     return result;
 }
 
-/* (every frame) a body takes what that player's Link holds and how it hangs, as the body takes what it plays: the game's
-   own equipment calls, on the body's user, each thing only when the body does not have it yet. A thing its graph has no
-   use for is remembered as said anyway, so it is not asked every frame; a new body hears it all again. */
+/* (every frame) a body takes what that player's Link holds and works through the reaches it has missed, as the body
+   takes what it plays: the game's own equipment calls, on the body's user. A hold a body already has is not asked
+   for again; a reach is an event, so the body is asked for it once, in the order it happened. */
 static void co_equip_put(Ctx *c, uint64_t actor, CoBody *b, int peer) {
     char want[CO_EQ_SLOTS][CO_AS_NAME];
-    int num[CO_EQ_SLOTS], state[3];
-    uint8_t state_have[3];
+    int num[CO_EQ_SLOTS];
+    CoEquipEvent evt[CO_EQ_EVENTS];
+    int n = 0;
     EnterCriticalSection(&co.lock);
     memcpy(want, co_eq_name[peer], sizeof want), memcpy(num, co_eq_num[peer], sizeof num);
-    memcpy(state, co_eq_state[peer], sizeof state), memcpy(state_have, co_eq_state_have[peer], sizeof state_have);
+    while (co_eq_evt_head[peer] != co_eq_evt_tail[peer]) {
+        if (n < CO_EQ_EVENTS) evt[n++] = co_eq_evt[peer][co_eq_evt_head[peer]];
+        co_eq_evt_head[peer] = (co_eq_evt_head[peer] + 1) % CO_EQ_EVENTS;
+    }
     LeaveCriticalSection(&co.lock);
-    for (int kind = 1; kind <= 2; kind++)          /* (the hangs first: they say where the sword and the shield sit) */
-        if (state_have[kind] && b->eq_state[kind] != state[kind]) {
-            b->eq_state[kind] = state[kind];
-            const int got = co_equip_state(c, actor, kind, state[kind]);
-            if (co_eq_put_said < 400) {              /* (a hang changes when a Link reaches for or puts away a thing:
-                                                        -1 means this body had no equipment user to change) */
-                co_eq_put_said++;
-                hos_log("coop: body %llx hang %d to %d: %d", (unsigned long long)actor, kind, state[kind], got);
-            }
+    for (int i = 0; i < n; i++) {                      /* (the reaches first: they say where the sword and the shield sit) */
+        const int got = co_equip_state(c, actor, evt[i].kind, evt[i].slot);
+        if (co_eq_put_said < 400) {                    /* (a reach asked for and what the game's own call made of it:
+                                                            -1 means this body had no equipment user to ask) */
+            co_eq_put_said++;
+            hos_log("coop: body %llx reach %d at %d: %d", (unsigned long long)actor, evt[i].kind, evt[i].slot, got);
         }
+    }
     for (int s = 0; s < CO_EQ_SLOTS; s++) {
         if (!want[s][0] || !strcmp(b->eq_name[s], want[s])) continue;
         snprintf(b->eq_name[s], CO_AS_NAME, "%s", want[s]), b->eq_num[s] = num[s];
@@ -1596,9 +1609,11 @@ void oot_coop_equip_seen(Ctx *c, int kind) {
             }
         }
     } else {
-        const int state = (int)(int32_t)c->x[1];
-        if (co_said_state[kind] != state)
-            co_said_state[kind] = state, snprintf(line, sizeof line, "S %d %d", kind, state);
+        const int slot = (int)(int32_t)c->x[1];       /* (the game's own call takes the slot, and calls it again every
+                                                            time its Link reaches for or puts away the thing) */
+        const int64_t now = hos_now_ns();
+        if (slot >= 0 && slot < CO_EQ_SLOTS && now - co_said_hang_ns[kind][slot] >= 400000000LL)
+            co_said_hang_ns[kind][slot] = now, snprintf(line, sizeof line, "S %d %d", kind, slot);
     }
     LeaveCriticalSection(&co.lock);
     if (line[0]) {
@@ -1611,15 +1626,15 @@ void oot_coop_equip_seen(Ctx *c, int kind) {
     }
 }
 
-/* (a player joined: their game opened its ears after my Link's holds and hangs changed; say the state whole again) */
+/* Someone joined: what my Link holds goes to them whole. The reaches are not said again — they are things that
+   happened, and a new body catches up with the next one my Link makes. */
 static void co_equip_say_again(void) {
     char names[CO_EQ_SLOTS][CO_AS_NAME];
-    int num[CO_EQ_SLOTS], state[3];
+    int num[CO_EQ_SLOTS];
     EnterCriticalSection(&co.lock);
-    memcpy(names, co_said_name, sizeof names), memcpy(num, co_said_num, sizeof num), memcpy(state, co_said_state, sizeof state);
+    memcpy(names, co_said_name, sizeof names), memcpy(num, co_said_num, sizeof num);
     LeaveCriticalSection(&co.lock);
     for (int s = 0; s < CO_EQ_SLOTS; s++) if (names[s][0]) co_send("E %d %s %d", s, names[s], num[s]);
-    for (int kind = 1; kind <= 2; kind++) if (state[kind] != CO_EQ_NO) co_send("S %d %d", kind, state[kind]);
 }
 
 /* (test runs) what Link plays, said to the log each time it changes; and a "A <slot> <command>" line plays one on the bodies */
@@ -1690,7 +1705,6 @@ static void co_bodies_step(Ctx *c, uint64_t link, int64_t now) {
     if (link != co_link_actor) {                       /* another map: the game took the bodies with the old one */
         co_link_actor = link;
         memset(co_body, 0, sizeof co_body);
-        for (int i = 0; i < CO_PEERS; i++) co_body[i].eq_state[1] = co_body[i].eq_state[2] = CO_EQ_NO;
     }
     if (co_test_go[0]) {                               /* (test runs: "G <map>") */
         float to[3];
@@ -1796,7 +1810,7 @@ static void co_bodies_step(Ctx *c, uint64_t link, int64_t now) {
             b->made_of = b->actor ? G64(b->actor) : 0, b->child = who[i].child, b->posed = 0;
             b->child_want = who[i].child, b->child_at = 0;
             b->foe = own && who[i].foe, b->life_full = 0, b->struck = 0;
-            memset(b->eq_name, 0, sizeof b->eq_name), b->eq_state[1] = b->eq_state[2] = CO_EQ_NO;
+            memset(b->eq_name, 0, sizeof b->eq_name);
             hos_log("coop: %s drawn as %s: actor %llx", who[i].name, name, (unsigned long long)b->actor);
             hos_log_flush();
         }

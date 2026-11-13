@@ -1,4 +1,4 @@
-"""The Debug tab's Movement speed (1x to 3x): nx2/oot_patches.py's patch_cct_speed hooks the places a character controller's
+"""The Debug tab's Movement speed (1x to 10x): nx2/oot_patches.py's patch_cct_speed hooks the places a character controller's
 forward speed is set (SPEED_PLACES: Link's move f_809552f0 at its two setter calls, the setter f_80559df0 and f_80964bf0), each
 once, after its anchor, with s0's unit; a file patched before is given back as it is, and a file without them is left alone.
 apply makes them only in the supported build's lift (protect_hearts). host/hos_main.c's hos_oot_cct_speed scales the speed for
@@ -74,7 +74,8 @@ def main():
     check("oot_speed_controller" in fn and "hos_move_stick_held()" in fn, "the host scales only Link's speed while he is steered")
     check(re.search(r"<= 15\.0f", fn) is not None, "the host leaves speeds over 15 m/s alone")
     menu = (ROOT / "gpu" / "vk" / "vk_menu.cpp").read_text(encoding="utf-8")
-    check("constexpr int link_speeds[] = {100, 125, 150, 200, 300};" in menu, "the row's choices are 1x, 1.25x, 1.5x, 2x, 3x")
+    check("constexpr int link_speeds[] = {100, 125, 150, 200, 300, 400, 500, 600, 700, 800, 900, 1000};" in menu,
+          "the row's choices are 1x, 1.25x, 1.5x, 2x, 3x, 4x, 5x, 6x, 7x, 8x, 9x, 10x")
     check(re.search(r"int menu_link_speed\(\) \{ return cheats_on\(\) \? .* : 100; \}", menu) is not None,
           "the row sends 100 while the debug tools are off")
     print("PASS: movement speed hooks, host gate and menu choices")

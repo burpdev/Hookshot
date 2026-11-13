@@ -1609,8 +1609,8 @@ std::atomic<int> free_camera{0};
 std::atomic<int> cheat_action{0};
 std::atomic<int> link_age{-1};
 // (Movement speed: the choice, an index of link_speeds; the game side reads it in percent, HOS_OPT_CHEAT_SPEED)
-constexpr int link_speeds[] = {100, 125, 150, 200, 300};
-constexpr const char* link_speed_names[] = {"1x", "1.25x", "1.5x", "2x", "3x"};
+constexpr int link_speeds[] = {100, 125, 150, 200, 300, 400, 500, 600, 700, 800, 900, 1000};
+constexpr const char* link_speed_names[] = {"1x", "1.25x", "1.5x", "2x", "3x", "4x", "5x", "6x", "7x", "8x", "9x", "10x"};
 constexpr int kLinkSpeeds = sizeof link_speeds / sizeof link_speeds[0];
 std::atomic<int> link_speed{0};   // (the game side's report, OOT_CHEAT_AGE_ID: 0 child, 1 adult, -1 no save loaded)
 int clock_hour = 12;
@@ -5295,7 +5295,7 @@ void cheat_press(int i, const bool* press, bool& changed) {
         pouch_item = (pouch_item + kPouchItems + (press[4] ? 1 : -1)) % kPouchItems;
         changed = true;
     }
-    if (i == 11 && (press[3] || press[4])) {   // (Movement speed: stops at 1x and 3x)
+    if (i == 11 && (press[3] || press[4])) {   // (Movement speed: stops at 1x and 10x)
         link_speed.store(std::clamp(link_speed.load() + (press[4] ? 1 : -1), 0, kLinkSpeeds - 1));
         changed = true;
     }

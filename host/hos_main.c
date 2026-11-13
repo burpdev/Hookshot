@@ -571,7 +571,7 @@ void hos_oot_cct_speed(Ctx *c, uint64_t controller, int per_second) {
     if (!controller || controller != __atomic_load_n(&oot_speed_controller, __ATOMIC_RELAXED)) return;
     const int percent = __atomic_load_n(&oot_speed_percent, __ATOMIC_RELAXED);
     int hos_move_stick_held(void);   /* host/nn_hid.c */
-    if (percent <= 100 || percent > 400 || !hos_move_stick_held()) return;
+    if (percent <= 100 || percent > 1000 || !hos_move_stick_held()) return;
     float speed;
     memcpy(&speed, &c->vreg[0][0], sizeof speed);
     if (!(fabsf(speed) * (per_second ? 1.0f : 60.0f) <= 15.0f)) return;   /* (and NaN) */
@@ -1273,7 +1273,7 @@ static void oot_player_speed(Ctx *c, uint64_t components) {
     int rx_option(int id, int otherwise);
     static int logged = 100;
     int percent = rx_option(HOS_OPT_CHEAT_SPEED, 100);
-    if (percent < 100 || percent > 400) percent = 100;
+    if (percent < 100 || percent > 1000) percent = 100;
     __atomic_store_n(&oot_speed_controller, percent > 100 ? oot_player_controller(c, components) : 0, __ATOMIC_RELAXED);
     __atomic_store_n(&oot_speed_percent, percent, __ATOMIC_RELAXED);
     if (percent != logged) hos_log("cheats: movement speed %d%%", percent);

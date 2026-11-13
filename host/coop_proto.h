@@ -82,7 +82,7 @@ void coop_room_keys(const char secret[COOP_SECRET_LEN], uint8_t locator[COOP_KEY
 
 // ---- datagrams
 // The datagram of hdr (its len is ignored: n is the payload length) and payload into out. key NULL: a zero tag (what a
-// relay of another protocol version answers). Bytes written, 0 when it does not fit cap or n is too long.
+// host of another protocol version answers). Bytes written, 0 when it does not fit cap or n is too long.
 size_t coop_dgram_pack(uint8_t *out, size_t cap, const CoopHdr *hdr, const void *payload, size_t n,
                        const uint8_t key[COOP_KEY_LEN]);
 // 1 when d is exactly one datagram of this format (magic, a length that matches); *payload points into d. The version
@@ -97,13 +97,13 @@ int coop_dgram_tag_zero(const uint8_t *d);
 // controls). out is NUL-terminated (cap at least COOP_NAME_MAX + 1); the length.
 size_t coop_name_clean(char *out, size_t cap, const uint8_t *raw, size_t n);
 
-// ---- client and relay messages
+// ---- messages between a player and the host
 // CONNECT: u8 intent, u8 flags, u8[16] locator, u64 client id, u64 session, u64 nonce, u8 name length, name,
 // u8[16] cookie (zero, or the CHALLENGE's), u8[16] rejoin token (zero, or the JOINED's of this room).
 typedef struct {
     uint8_t intent, flags;
     uint8_t locator[COOP_KEY_LEN];
-    uint64_t client_id;     // random for each start of the game; the relay knows a rejoin of the same member by it
+    uint64_t client_id;     // random for each start of the game; the host knows a rejoin of the same member by it
     uint64_t session;       // random for each join: the others take messages only of the session the roster names
     uint64_t nonce;         // random for each attempt: every answer carries it
     char name[COOP_NAME_MAX + 1];
@@ -143,7 +143,7 @@ typedef struct { uint8_t reason; uint64_t nonce; char text[61]; } CoopError;   /
 size_t coop_error_pack(uint8_t *out, size_t cap, const CoopError *e);
 int coop_error_parse(const uint8_t *p, size_t n, CoopError *e);
 
-// KICK (the room's maker to the relay): u8 member, u64 its session.
+// KICK (the room's maker to the host): u8 member, u64 its session.
 size_t coop_kick_pack(uint8_t *out, size_t cap, uint8_t member, uint64_t session);
 int coop_kick_parse(const uint8_t *p, size_t n, uint8_t *member, uint64_t *session);
 

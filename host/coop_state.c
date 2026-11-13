@@ -48,7 +48,7 @@ enum {
     PUSH_SLOTS = 4096,           // local changes waiting for their three sends
     DIGEST_MS = 2000,            // every digest_ms plus up to 400 ms
     ANSWER_MS = 500,             // a section goes to the same peer at most this often
-    RATE_BYTES = 32768,          // section and push bytes per second; shares the relay budget with the other layers
+    RATE_BYTES = 32768,          // section and push bytes per second; shares the link's budget with the other layers
     BURST_BYTES = 8192,
     IDENT_WAIT_MS = 5000,        // a member that appeared this recently and is not identified holds the offer back
     IDENT_HOLD_MS = 10000,       // another key's identity for a member's session takes its place only after this long
@@ -196,7 +196,7 @@ struct CoopSync {
     Charter ch;
     CoopRules room, mine;
     int have_room, have_mine, made;
-    int maker;                      // the member id the relay names as the room's maker, 0 none in the room
+    int maker;                      // the member id the host marks as the room's maker, 0 none in the room
     uint64_t originated_at;
     unsigned rules_ver;
     int want_reset;                 // the maker asked for a pool reset
@@ -955,8 +955,8 @@ static uint64_t members_signer(const CoopSync *s, uint64_t want, int *differ, in
 }
 
 // The key whose charter this game takes, 0 none yet: the one pinned when the player accepted; else the room this game
-// made in this session is its own; else the key of the member the relay names as the maker, but only while no member
-// carries another signer's charter (a relay's mark cannot outvote the members); else, with no maker in the room, the
+// made in this session is its own; else the key of the member the host marks as the maker, but only while no member
+// carries another signer's charter (the host's mark cannot outvote the members); else, with no maker in the room, the
 // signer of the charter in force, or the one signer every identified member's charter carries. Every member that
 // appeared recently has its say first, not the quickest.
 static uint64_t trusted_signer(const CoopSync *s) {
@@ -1382,8 +1382,8 @@ void coop_sync_room(CoopSync *s, const char *code, int self, const int *ids, con
         }
         seen[ids[i]] = 1, sess[ids[i]] = v;
     }
-    // A session ends at this game only when its member's identity in a later one names it (on_digest): what a roster
-    // says, and that the relay lost the room, anyone on the path can say too, so a member that leaves the roster or
+    // A session ends at this game only when its member's identity in a later one names it (on_digest): a roster, and
+    // that the room is gone, can be said by anyone holding the secret, so a member that leaves the roster or
     // comes back in another session is only met again, and a session ended by a roster could never be taken again
     for (int id = 1; id <= COOP_MAX_MEMBERS; id++) {
         Peer *p = &s->peer[id];
@@ -1541,7 +1541,7 @@ static void on_digest(CoopSync *s, int from, const uint8_t *b, size_t n, uint64_
         char raw[NAME_CAP];
         memcpy(raw, name_raw, nl), raw[nl] = 0;
         if (strlen(raw) != nl) return;
-        // checked over the bytes as signed; shown cleaned, as the relay's names are. A digest is not signed by its sender:
+        // checked over the bytes as signed; shown cleaned, as the roster's names are. A digest is not signed by its sender:
         // an identity that does not check out is dropped and counted, never held against the member
         uint8_t m[128];
         int ok = sig_check(s, p, sig, pk, m, identity_message(s, from, p->session, prev, pk, raw, m));

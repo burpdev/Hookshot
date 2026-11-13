@@ -711,7 +711,7 @@ static void view_changed(const CoopView *v) {
     AcquireSRWLockExclusive(&G.lock);
     G.view = *v;
     if (G.eng) {
-        coop_sync_name(G.eng, v->name);   /* the player's own name, signed: the relay's roster may say another */
+        coop_sync_name(G.eng, v->name);   /* the player's own name, signed: the host's roster may say another */
         if (in_room && G.has_room_key) coop_sync_room_seed(G.eng, v->code, G.room_key);
         coop_sync_room(G.eng, in_room ? v->code : "", v->self, ids, sessions, n, in_room ? v->maker : 0, coop_now_ms());
         CoopRules mine;
@@ -746,7 +746,7 @@ static int accept_always(void) {
     return v && !strcmp(v, "always");
 }
 
-/* The engine's offer, with the relay's names for members not identified yet (G.lock held). */
+/* The engine's offer, with the host's names for members not identified yet (G.lock held). */
 static int offer_of(CoopOffer *o, uint64_t now) {
     const int has = coop_sync_offer(G.eng, o, now);
     for (int i = 0; i < o->n; i++)
@@ -805,7 +805,7 @@ static void offer_update(uint64_t now) {
                 : again    ? "the room changed (a member, the rules or the key that signs them)"
                            : "a room to accept",
                 o.n ? who : "nobody else", rules, o.maker_key);
-        if (o.maker_moved) hos_log("coop: sync: the relay names another member as the maker than the one whose key signs the rules; the signed rules stay");
+        if (o.maker_moved) hos_log("coop: sync: the host names another member as the maker than the one whose key signs the rules; the signed rules stay");
         if (o.disagree)
             hos_log("coop: sync: members carry rules signed by different keys: before accepting, compare the key that signs these rules with the "
                     "maker's, by voice or chat");
@@ -899,7 +899,7 @@ int hos_oot_coop_contributors(CoopContributor *out, int max) {
 }
 
 /* A removal by fingerprint from the menu (the co-op thread, without G.lock): a member in the room that holds the key is
-   removed at the relay too (coop_remove_member signs it through on_remove). */
+   removed by the host too (coop_remove_member signs it through on_remove). */
 static void remove_by_fingerprint(const char *fp) {
     uint64_t kid = 0, k;
     int member = 0;

@@ -14,6 +14,7 @@
 typedef SOCKET Sock;
 #define SOCK_NONE INVALID_SOCKET
 #define sock_close closesocket
+#define sock_send_flags 0   /* Winsock reports a closed peer as an error, never as a signal */
 #else
 #include <arpa/inet.h>
 #include <errno.h>
@@ -30,6 +31,11 @@ typedef SOCKET Sock;
 typedef int Sock;
 #define SOCK_NONE (-1)
 #define sock_close close
+#ifdef MSG_NOSIGNAL
+#define sock_send_flags MSG_NOSIGNAL   /* a peer that closes its end mid-write gives EPIPE, not a dead process */
+#else
+#define sock_send_flags 0
+#endif
 #endif
 
 struct CoopTcp {
@@ -508,7 +514,7 @@ int coop_tcp_alive(const CoopTcp *t) { return t && !t->dead; }
 /* What is waiting for the socket, up to what it will take. 1 when nothing is left. */
 static int tcp_flush(CoopTcp *t) {
     while (t->tx_at < t->tx_n) {
-        int n = (int)send(t->s, (const char *)t->tx + t->tx_at, (int)(t->tx_n - t->tx_at), 0);
+        int n = (int)send(t->s, (const char *)t->tx + t->tx_at, (int)(t->tx_n - t->tx_at), sock_send_flags);
         if (n > 0) {
             t->tx_at += (size_t)n;
             continue;

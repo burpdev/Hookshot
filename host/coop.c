@@ -59,7 +59,6 @@ enum {
     PING_MS = 2000, SILENCE_MS = 8000, BURST_GAP_MS = 250, BACKOFF_FIRST_MS = 1000, BACKOFF_MAX_MS = 15000,
     BURST_TRIES = 4,                 // CONNECTs per burst
     ROSTER_EVERY_MS = 5000,          // (hosting) who is in the room, said again this often whatever else changed
-    ROSTER_AGAIN_MS = 750,           // and again after a change, so that a lost one is made up
     AWAY_MS = 15000,                 // (hosting) a member it has heard nothing from for this long is marked away
     HANDSHAKE_MS = 10000,            // a link that has not become a member by then is closed
     CONNECT_WAIT_MS = 3000,          // how long a link to the host is waited for
@@ -104,7 +103,7 @@ typedef struct {
 } EventIn;
 
 // A cause that logs at most once per LOG_EVERY_MS.
-enum { L_MALFORMED, L_SENDER, L_TAG, L_REPLAY, L_OUTBOX, L_NO_SERVER, L_RESOLVE, L_SOCKET, L_CAUSES };
+enum { L_MALFORMED, L_SENDER, L_TAG, L_REPLAY, L_OUTBOX, L_NO_SERVER, L_RESOLVE, L_SOCKET, L_MEMBER, L_CAUSES };
 
 // The counters of one sender's session seen last: a counter at most 64 below the highest is taken once, an older one
 // is not, unless the sender's own messages keep arriving below the window (window_below). A new session (the roster
@@ -166,6 +165,7 @@ struct CoopSess {
     int own_slot;                               // (joining) the slot the link to the host took
     int slot_of[COOP_MAX_MEMBERS + 1];          // (hosting) member id -> link slot, 0 none
     int who[LINK_SLOTS + 1];                    // link slot -> member id, 0 for a link still handshaking
+    uint8_t joined_ack[COOP_MAX_MEMBERS + 1];   // (hosting) a member answered something than its own CONNECT: its JOINED arrived
     PendingLink pend[4];                        // links that have not become members yet: each holds the cookie it must carry back
     GoneMember gone[COOP_MAX_MEMBERS];          // (hosting) members that left: their token, kept for a minute
     int intent, made_room;                      // CONNECT's intent; this session's own hosting made the room
@@ -177,7 +177,7 @@ struct CoopSess {
     uint8_t cookie[COOP_COOKIE_LEN], token[COOP_COOKIE_LEN];
     int have_cookie, have_token, have_secret, said_answer, heard_host;
     uint32_t connect_seq, out_seq, out_counter;
-    uint64_t next_tx, last_connect_tx, last_rx, next_ping, next_stats, rename_at, next_roster, roster_again;
+    uint64_t next_tx, last_connect_tx, last_rx, next_ping, next_stats, rename_at, next_roster;
     uint64_t roster_at, roster_rejoin_at;       // when a roster was last taken; the last rejoin a roster asked for
     int own_taken;                              // the roster taken last lists another session for this player
     uint32_t backoff;
@@ -201,7 +201,8 @@ struct CoopSess {
 
 // ---- logging
 
-// HOS_COOP_TRACE=1: a line per frame, and the host's address (never logged otherwise)
+// HOS_COOP_TRACE=1: a line per frame, and the host's address when nothing has gone wrong (a link that fails names it
+// in the log either way)
 static int trace_on(void) {
     static volatile int on = -1;   // (read once; two threads reading it at once both find the same answer)
     if (on < 0) on = env_on("HOS_COOP_TRACE");
@@ -659,7 +660,6 @@ static void publish_rooms(CoopSess *s, const CoopRoster *r) {
     if (n) send_room(s, COOP_T_ROSTER, COOP_DST_ALL, payload, n);
     const uint64_t now = coop_now_ms();
     s->next_roster = now + ROSTER_EVERY_MS;
-    s->roster_again = now + ROSTER_AGAIN_MS;
     s->dirty = 1;
 }
 
@@ -681,14 +681,13 @@ static void end_link(CoopSess *s, int slot, const char *why) {
     s->who[slot] = 0;
     if (!member) return;
     s->slot_of[member] = 0;
+    s->joined_ack[member] = 0;
     const CoopMemberInfo *m = member_of(s, member);
     if (m) {
-        for (int i = 0; i < COOP_MAX_MEMBERS; i++) {
-            if (s->gone[i].until && s->gone[i].session != m->session) continue;
-            memset(s->gone[i].token, 0, COOP_COOKIE_LEN);
-            s->gone[i].session = m->session;
-            s->gone[i].until = coop_now_ms() + TOKEN_KEEP_MS;
-            break;
+        GoneMember *g = &s->gone[member - 1];   // (this member's line still carries the token it was given)
+        if (!g->until || g->session == m->session) {
+            g->session = m->session;
+            g->until = coop_now_ms() + TOKEN_KEEP_MS;
         }
     }
     if (!s->hosting) return;
@@ -700,11 +699,19 @@ static void end_link(CoopSess *s, int slot, const char *why) {
     publish_rooms(s, &left);   // everyone hears who left
 }
 
-// Sixteen random bytes for a link to come back with. Zero when the system's source failed, which is a link the host
-// cannot let into a room: a token anyone could guess would hand them someone else's member id.
+// Sixteen random bytes for a link to carry back. Its first byte is also the "none yet" mark on the wire, so a draw that
+// lands there is drawn again: refusing a player because of one byte out of 256 is a bug the player would see as the host
+// being full. Zero only when the system's source fails outright, which is a link the host cannot let into a room: a
+// token anyone could guess would hand them someone else's member id.
+static int random_proof(uint8_t out[COOP_COOKIE_LEN]) {
+    for (int again = 0; again < 16; again++)
+        if (coop_random(out, COOP_COOKIE_LEN) && out[0]) return 1;
+    return 0;
+}
+
 static int random_token(CoopSess *s, uint8_t out[COOP_COOKIE_LEN]) {
     (void)s;
-    return coop_random(out, COOP_COOKIE_LEN) && out[0];
+    return random_proof(out);
 }
 
 // How many links are handshaking: each holds a cookie of its own, so a link that has proved nothing yet has its own
@@ -721,7 +728,7 @@ static int pending_add(CoopSess *s, int slot, uint64_t nonce, uint64_t now) {
     for (int i = 0; i < (int)(sizeof s->pend / sizeof s->pend[0]); i++) {
         if (s->pend[i].slot) continue;
         s->pend[i] = (PendingLink){.slot = slot, .nonce = nonce, .since = now};
-        if (!coop_random(s->pend[i].cookie, COOP_COOKIE_LEN) || !s->pend[i].cookie[0]) {
+        if (!random_proof(s->pend[i].cookie)) {
             memset(s->pend[i].cookie, 0, COOP_COOKIE_LEN);
             s->pend[i].slot = 0;
             return -1;
@@ -769,6 +776,26 @@ static int gone_of(const CoopSess *s, const uint8_t token[COOP_COOKIE_LEN], uint
     return 0;
 }
 
+// The answer that makes a link a member: its number, the token it comes back with for a minute after it leaves, and
+// who is in the room. It is answered with the attempt's nonce, which is why a later CONNECT of the same attempt can
+// answer it again when the copy this player was waiting for went missing (joined_ack).
+static void send_joined(CoopSess *s, int slot, int member, uint64_t nonce, uint64_t session, const char *name) {
+    CoopJoined j = {.member = (uint8_t)member, .nonce = nonce};
+    memcpy(j.token, s->gone[member - 1].token, COOP_COOKIE_LEN);
+    host_roster(s, &j.roster);
+    CoopMemberInfo *mine = NULL;
+    for (int i = 0; i < j.roster.n; i++)
+        if (j.roster.m[i].id == member) mine = &j.roster.m[i];
+    if (mine) {
+        mine->session = session;
+        copy_str(mine->name, sizeof mine->name, name);
+        mine->flags = 0;
+    }
+    uint8_t payload[COOP_MAX_PAYLOAD];
+    size_t k = coop_joined_pack(payload, sizeof payload, &j);
+    if (k) send_slot(s, slot, COOP_T_JOINED, s->room, (uint8_t)s->self, (uint8_t)member, payload, k, s->locator);
+}
+
 // (hosting) A link that has proved it holds the room's keys becomes a member: the id it had before, if it carries the
 // token of a player that left within the last minute, or else the lowest free one. The answer is its number, the room
 // key it already has, a token for next time, and who is in the room.
@@ -797,31 +824,21 @@ static void take_member(CoopSess *s, int slot, const CoopConnect *c, uint64_t no
         line->session = c->session;
         copy_str(line->name, sizeof line->name, c->name);
     }
-    uint8_t payload[COOP_MAX_PAYLOAD];
-    CoopJoined j = {.member = (uint8_t)id, .nonce = c->nonce};
-    if (!random_token(s, j.token)) {   // a link the host cannot give a member id to: it would not come back as itself
+    if (!random_token(s, s->gone[id - 1].token)) {   // a link the host cannot give a member id to: it would not come back as itself
         s->who[slot] = 0;
         s->slot_of[id] = 0;
+        s->gone[id - 1] = (GoneMember){0};
         say(s, "refused a player: this game cannot make random numbers");
         refuse_link(s, slot, COOP_E_SERVER_FULL, "this game cannot make random numbers: co-op needs them", c->nonce);
         return;
     }
-    memcpy(s->gone[id - 1].token, j.token, COOP_COOKIE_LEN);   /* (what it answers with if it is the one that left) */
     s->gone[id - 1].session = c->session;
-    s->gone[id - 1].until = 0;
-    host_roster(s, &j.roster);
-    CoopMemberInfo *mine = NULL;
-    for (int i = 0; i < j.roster.n; i++)
-        if (j.roster.m[i].id == id) mine = &j.roster.m[i];
-    if (mine) {
-        mine->session = c->session;
-        copy_str(mine->name, sizeof mine->name, c->name);
-        mine->flags = 0;
-    }
-    size_t k = coop_joined_pack(payload, sizeof payload, &j);
-    if (k) send_slot(s, slot, COOP_T_JOINED, s->room, (uint8_t)s->self, (uint8_t)id, payload, k, s->locator);
+    s->gone[id - 1].until = 0;   /* (the token is what it answers with if it is the one that left) */
+    say(s, "%s (member %u) joined the room", c->name, (unsigned)id);   // the maker hears it too: its view is its own roster
+    send_joined(s, slot, id, c->nonce, c->session, c->name);
     coop_lock(&s->lock);
     s->heard_at[id] = 0;
+    s->joined_ack[id] = 0;   // nothing but its own CONNECT has come back over it: its JOINED may still be missing
     coop_unlock(&s->lock);
     publish_roster(s);   // everyone hears who joined
 }
@@ -1128,22 +1145,23 @@ static int window_below(Window *w, uint32_t counter) {
     return 1;
 }
 
-// The answers to a CONNECT carry this attempt's nonce. Before this game holds the room's secret they carry no tag at
-// all — a host answers a link it has just accepted before that link can prove anything — and after it they carry the
-// room's tag, so an answer is one this host could have made.
-static int answer_ok(CoopSess *s, const uint8_t *d, size_t n, uint64_t nonce) {
+// The answers to a CONNECT carry this attempt's nonce. What a host says to a link it has just accepted, before that
+// link can prove anything about the room — CHALLENGE, ROOM, a refusal — carries no tag at all. What only a member of
+// the room could have said — the JOINED that hands out the member id, a removal — carries the room's tag, which a
+// player that holds the room's secret checks against it.
+static int answer_ok(CoopSess *s, const uint8_t *d, size_t n, uint64_t nonce, int keyed) {
     if (nonce && nonce != s->nonce) {   // (nonce 0: an answer that is not to one attempt, like a removal in a room)
         s->n_dup++, bump(&s->n_lost);
         return 0;
     }
-    if (!s->have_secret) {
-        if (!coop_dgram_tag_zero(d)) {
+    if (keyed && s->have_secret) {
+        if (!coop_dgram_verify(d, n, s->locator)) {
             s->n_bad_tag++, bump(&s->n_lost);
             return 0;
         }
         return 1;
     }
-    if (!coop_dgram_verify(d, n, s->locator)) {
+    if (!coop_dgram_tag_zero(d)) {
         s->n_bad_tag++, bump(&s->n_lost);
         return 0;
     }
@@ -1158,7 +1176,7 @@ static int on_challenge(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *
     uint64_t nonce;
     uint8_t cookie[COOP_COOKIE_LEN];
     if ((s->state != COOP_CONNECTING && s->state != COOP_RECONNECTING) || !coop_challenge_parse(p, h->len, &nonce, cookie)) return 0;
-    if (!answer_ok(s, d, n, nonce)) return 0;
+    if (!answer_ok(s, d, n, nonce, 0)) return 0;   // (a host says this before it knows anything about the link)
     memcpy(s->cookie, cookie, COOP_COOKIE_LEN);
     s->have_cookie = 1;
     s->heard_host = 1;
@@ -1173,7 +1191,7 @@ static int on_challenge(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *
 
 // ROOM: the host's secret, which is how a joiner gets into its room. Its next CONNECT carries the keys made from it,
 // and only then does the host give out a member id.
-static int on_room(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, const uint8_t *p, uint64_t now) {
+static int on_room(CoopSess *s, const uint8_t *d, const CoopHdr *h, const uint8_t *p, uint64_t now) {
     uint64_t nonce;
     char secret[COOP_SECRET_LEN + 1];
     if ((s->state != COOP_CONNECTING && s->state != COOP_RECONNECTING) || !coop_room_parse(p, h->len, &nonce, secret)) return 0;
@@ -1199,7 +1217,7 @@ static int on_joined(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, 
         s->n_malformed++, bump(&s->n_lost);
         return 0;
     }
-    if (!answer_ok(s, d, n, j.nonce)) return 0;   // this room (its locator), this attempt (our nonce)
+    if (!answer_ok(s, d, n, j.nonce, 1)) return 0;   // this room (its locator), this attempt (our nonce)
     const int rejoined = s->state == COOP_RECONNECTING;
     s->room = h->room;
     s->self = j.member;
@@ -1261,8 +1279,8 @@ static int on_error(CoopSess *s, const uint8_t *d, size_t n, const CoopHdr *h, c
     // An answer to this attempt carries its nonce; in a room the only ERROR a host sends is a removal, which carries
     // none and is tagged with the room's locator. A removal is what the maker's KICK becomes: the member's link ends
     // and the roster says who is left, so this is the reason the link says rather than a message that has to arrive.
-    if (connecting ? !answer_ok(s, d, n, e.nonce)
-                   : s->state != COOP_JOINED || e.reason != COOP_E_REMOVED || h->room != s->room || !answer_ok(s, d, n, 0))
+    if (connecting ? !answer_ok(s, d, n, e.nonce, 0)
+                   : s->state != COOP_JOINED || e.reason != COOP_E_REMOVED || h->room != s->room || !answer_ok(s, d, n, 0, 1))
         return 0;
     refused(s, e.reason, now);
     return 1;
@@ -1450,14 +1468,13 @@ static int host_frame(CoopSess *s, int slot, const uint8_t *d, size_t n, const C
         const int member_id = keys ? gone_of(s, c.token, now) : 0;
         const int proved = (keys && c.cookie[0] && !memcmp(c.cookie, s->pend[at].cookie, COOP_COOKIE_LEN)) || member_id;
         if (!proved) {
-            if (c.token[0] && !member_id) {   // a member id that is no one's here
-                say(s, "refused a player: it claims a member id that is not this room's");
-                refuse_link(s, slot, COOP_E_BAD_TAG, "that member id is not this room's", c.nonce);
-                return 0;
-            }
             // Not a refusal: the CHALLENGE and ROOM this CONNECT is answering may be the ones that went missing, and a
             // CONNECT of the burst can reach the host before its own ROOM does. Whoever reaches this port is told the
-            // room's secret anyway (docs/coop.md), so answering again gives away nothing.
+            // room's secret anyway (docs/coop.md), so answering again gives away nothing. A token no one here owns is
+            // answered the same way: a host that made its room again has no id to give back, and the cookie this link
+            // is asked for proves the keys, so the player joins this room as a member of its own.
+            if (c.token[0] && !member_id)
+                SAY_LIMITED(s, L_MEMBER, now, "a player came back with a member id this room does not know: it is asked to prove the room's keys");
             answer_connect(s, slot, c.nonce, s->pend[at].cookie);
             return 1;
         }
@@ -1472,6 +1489,9 @@ static int host_frame(CoopSess *s, int slot, const uint8_t *d, size_t n, const C
             s->n_sender++, bump(&s->n_lost);
             return 0;
         }
+        // Only its own CONNECT has come back over this link: the JOINED that handed it the member id may be the frame
+        // that went missing, and this CONNECT is an attempt to be answered, so it is answered the same way again.
+        if (!s->joined_ack[member]) send_joined(s, slot, member, c.nonce, c.session, c.name);
         if (!strcmp(c.name, m->name)) return 1;
         CoopRoster r = s->roster;
         for (int i = 0; i < r.n; i++)
@@ -1504,6 +1524,9 @@ static int host_frame(CoopSess *s, int slot, const uint8_t *d, size_t n, const C
 
 // What a link says, from either side: the host's own room, or the host's answers on the one link this game has.
 static void handle_frame(CoopSess *s, int slot, size_t n, uint64_t now) {
+    // A frame that came over the link says the other end is there, whatever the test goes on to throw away: the loss
+    // is there for the room's messages, not for this game's sense of whether its host is answering.
+    if (!s->hosting) s->last_rx = now;
     if (s->drop_pct && rnd(s) % 100 < s->drop_pct) {
         s->n_test_drop++;
         return;
@@ -1534,7 +1557,7 @@ static void handle_frame(CoopSess *s, int slot, size_t n, uint64_t now) {
     if (s->hosting) ok = host_frame(s, slot, s->rx, n, &h, p, now);
     else switch (h.type) {
     case COOP_T_CHALLENGE: ok = on_challenge(s, s->rx, n, &h, p, now); break;
-    case COOP_T_ROOM: ok = on_room(s, s->rx, n, &h, p, now); break;
+    case COOP_T_ROOM: ok = on_room(s, s->rx, &h, p, now); break;
     case COOP_T_JOINED: ok = on_joined(s, s->rx, n, &h, p, now); break;
     case COOP_T_ERROR: ok = on_error(s, s->rx, n, &h, p, now); break;
     case COOP_T_ROSTER: ok = on_roster(s, s->rx, n, &h, p, now); break;
@@ -1552,6 +1575,7 @@ static void handle_frame(CoopSess *s, int slot, size_t n, uint64_t now) {
             if (member) {
                 coop_lock(&s->lock);
                 s->heard_at[member] = now;
+                if (h.type != COOP_T_CONNECT) s->joined_ack[member] = 1;   // it answers more than its own CONNECT: its JOINED reached it
                 coop_unlock(&s->lock);
             }
         }
@@ -2121,7 +2145,8 @@ uint64_t coop_client_id(void) {
 // hosts on (0: 43400). The environment wins over each: HOS_COOP, HOS_COOP_NAME, HOS_COOP_SERVER, HOS_COOP_PORT. Off, no
 // thread is started and nothing else runs. For tests: HOS_COOP_AUTO=host|join with HOS_COOP_ROOM, a room at start (and
 // LAN parties; a host that went away is joined again), and HOS_COOP_DROP, a test's share of the received frames thrown
-// away (percent). The host's address reaches the log only with HOS_COOP_TRACE. No HOS_COOP name is
+// away (percent). A game that hosts logs the addresses a player on its own network can join it at; the address a player
+// joins is in the log when its link to it fails, and HOS_COOP_TRACE adds a line per frame. No HOS_COOP name is
 // taken from hookshot_env.txt, a file players pass around (host/hos_main.c env_line_allowed): the environment itself only.
 int hos_ini_option(const char *key, int otherwise);          // host/nn_applet.c: hookshot_options.ini
 int hos_ini_text(const char *key, char *out, size_t size);
@@ -2321,6 +2346,21 @@ int coop_configure(int on, const char *name, const char *server) {
     if (wait) stop_wait();
     coop_unlock(&g_life);
     return ok;
+}
+
+void coop_port_set(uint16_t port) {
+    if (!port) port = DEFAULT_PORT;
+    CoopSess *s = process_session();
+    if (!s) return;
+    coop_once(&g_set_once, make_locks, NULL);
+    coop_lock(&g_life);
+    coop_lock(&g_set_lock);
+    if (g_set.port != port) {
+        g_set.port = port;
+        if (g_set.on) configure_locked(s);   // (the thread moves the room it hosts to the new port)
+    }
+    coop_unlock(&g_set_lock);
+    coop_unlock(&g_life);
 }
 
 void coop_shutdown(void) {

@@ -1,5 +1,5 @@
-// The co-op wire format (coop_proto.h): room secrets and their keys, datagram tags, the datagram header, the client and
-// relay messages and the sealed player messages. Pure functions on bytes.
+// The co-op wire format (coop_proto.h): room secrets and their keys, datagram tags, the datagram header, the messages
+// between a player and the host and the sealed player messages. Pure functions on bytes.
 #include "coop_proto.h"
 
 #include <string.h>
@@ -232,7 +232,7 @@ size_t coop_name_clean(char *out, size_t cap, const uint8_t *raw, size_t n) {
     return text_clean(out, cap, raw, n, COOP_NAME_MAX);
 }
 
-// ---- client and relay messages
+// ---- messages between a player and the host
 
 enum { CONNECT_FIXED = 43 };   // the fields before the name
 

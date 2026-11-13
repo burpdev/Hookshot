@@ -73,6 +73,9 @@ void coop_init(void);
 // hookshot_options.ini's coop=, coop_name=, coop_server= and coop_port=, which coop_init reads at the next start; this
 // layer never writes the file. 1 when applied, 0 when the system's random source failed or the thread could not start.
 int coop_configure(int on, const char *name, const char *server);
+// The port this game hosts a room on, from the menu's Port row (0: 43400). It is kept for the next coop_init too; a
+// game that hosts moves its room to it, and the players in it join again. Calling it changes nothing else.
+void coop_port_set(uint16_t port);
 // The game is closing (host/hos_relaunch.c, the window's close): leaves the room with BYE to the others and LEAVE to
 // the host, closes the links and ends the coop thread, waiting at most 0.4 s for it; then returns whatever happened
 // (the process ends next). A game that ends any other way (killed, crashed) says nothing: the host drops a member it

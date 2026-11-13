@@ -434,7 +434,7 @@ static int env_line_allowed(const char *name, const char *value) {
     for (size_t i = 0; i < sizeof prefixes / sizeof *prefixes; i++) ok |= !strncmp(name, prefixes[i], strlen(prefixes[i]));
     if (!ok || !strcmp(name, "HOS_ENV_FILE") || !strcmp(name, "SDL_DYNAMIC_API")) return 0;
     /* (hookshot) nor any of co-op's switches (every name that begins HOS_COOP: host/coop.c): a shared file would switch
-       co-op on, name its author's relay and put the player into its author's room. Co-op is switched on in the menu or
+       co-op on, name its author's host and put the player into its author's room. Co-op is switched on in the menu or
        hookshot_options.ini; the variables are the player's own environment's, and a test's */
     if (!strncmp(name, "HOS_COOP", 8)) return 0;
     /* (hookshot) nor the libraries SDL loads by name (SDL_VULKAN_LIBRARY, SDL_OPENGL_LIBRARY, SDL_VIDEO_GL_DRIVER,

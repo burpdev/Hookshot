@@ -1,12 +1,12 @@
 /* (hookshot) The Insert menu's Co-op tab, the host's side (MkwVkHost.coop_view and coop_command, gpu/vk/vk_api.h): the room
    as the process's co-op session has it (host/coop.h) and as progress sync offers it (host/coop_oot.h: each member's
    identity key, the offer to accept, the maker's remedies), in the tab's terms, and what the tab asks turned into
-   coop_configure, coop_command and progress sync's calls. The player's name and the relay are the tab's two fields
-   (hookshot_options.ini's coop_name= and coop_server=, which the menu saves and coop_init reads at the next start);
-   making or joining a room from the tab switches co-op on with them for this run. Make a room makes a room of a new
-   random secret, or of HOS_COOP_ROOM's (the environment only, as host/coop.c takes it: test sessions whose second game
-   types a secret known before).
-   HOS_COOP_DEMO=1: a made-up room instead, for pictures of the tab and for trying it without a relay; the session is never
+   coop_configure, coop_command and progress sync's calls. The player's name and the host to join are the tab's two
+   fields (hookshot_options.ini's coop_name= and coop_server=, which the menu saves and coop_init reads at the next
+   start); hosting a room or joining one from the tab switches co-op on with them for this run. Host a room makes a room
+   of a new random secret, or of HOS_COOP_ROOM's (the environment only, as host/coop.c takes it: test sessions whose
+   second game types a secret known before), on the port the tab's Port row names.
+   HOS_COOP_DEMO=1: a made-up room instead, for pictures of the tab and for trying it without another game; the session is never
    started and nothing is sent. It follows what the tab asks: Make a room connects for a second, then the player is the
    room's maker, alone; Saria comes in, unidentified for three seconds, then with her key, and Darunia with his; the room is
    offered for acceptance, and Darunia is away for a while; the maker may remove a player or reset the pools. Join a room
@@ -36,6 +36,7 @@ int hos_oot_coop_remove_key(const char *fingerprint);
 int hos_oot_coop_contributors(CoopContributor *out, int max);
 
 static char g_name[64], g_server[64];   /* as the tab's fields have them */
+static uint16_t g_port;                 /* as the tab's Port row has it (0: coop.c's own default) */
 _Static_assert(HOS_COOP_STATE_OFF == (int)COOP_OFF && HOS_COOP_STATE_LEFT == (int)COOP_LEFT &&
                    HOS_COOP_STATE_CONNECTING == (int)COOP_CONNECTING && HOS_COOP_STATE_JOINED == (int)COOP_JOINED &&
                    HOS_COOP_STATE_RECONNECTING == (int)COOP_RECONNECTING && (int)HOS_COOP_MEMBERS == (int)COOP_MAX_MEMBERS,
@@ -43,8 +44,8 @@ _Static_assert(HOS_COOP_STATE_OFF == (int)COOP_OFF && HOS_COOP_STATE_LEFT == (in
 
 static void copy_text(char *out, size_t cap, const char *in) { snprintf(out, cap, "%s", in ? in : ""); }
 
-/* A field left empty: the environment's, else the options file's, as coop_init takes them (the file's relay is not the
-   field's when it is longer than the field holds) */
+/* A field left empty: the environment's, else the options file's, as coop_init takes them (the file's address is not
+   the field's when it is longer than the field holds) */
 static const char *fallback(const char *field, const char *env, const char *key, char *buf, size_t cap) {
     if (field[0]) return field;
     if (getenv(env)) return getenv(env);
@@ -162,7 +163,7 @@ static int demo_command(int cmd, const char *text, uint32_t number) {
         copy_text(g_demo.status, sizeof g_demo.status, "made up: the pools were reset");
         break;
     default:
-        return 1;   /* (the name and the relay: kept above, nothing to do in a made-up room) */
+        return 1;   /* (the name and the host address: kept above, nothing to do in a made-up room) */
     }
     g_demo.asks++;
     return 1;
@@ -213,6 +214,12 @@ void hos_coop_menu_view(MkwVkCoopView *out) {
 }
 
 int hos_coop_menu_command(int cmd, const char *text, uint32_t number) {
+    if (cmd == HOS_COOP_CMD_PORT) {   /* (the tab's Port row: the port this game hosts on, and the one the others join) */
+        if (number < 1024 || number > 65535) return 0;
+        g_port = (uint16_t)number;
+        coop_port_set(g_port);
+        return 1;
+    }
     if (cmd == HOS_COOP_CMD_NAME || cmd == HOS_COOP_CMD_SERVER) {
         char host[160];
         uint16_t port = 0;
@@ -221,24 +228,27 @@ int hos_coop_menu_command(int cmd, const char *text, uint32_t number) {
         if (demo_on()) return 1;
         CoopView v;
         coop_view_get(&v);
-        /* (number 1: the field's Enter, applied now to a session that runs: a new name rejoins under it, a new relay leaves the
-           room. 0: the saved value at the start, for the next Make or Join) */
+        /* (number 1: the field's Enter, applied now to a session that runs: a new name rejoins under it, a new host
+           address leaves the room. 0: the saved value at the start, for the next Host or Join) */
         return !number || v.state == COOP_OFF || coop_configure(1, name_now(), server_now());
     }
     if (demo_on()) return demo_command(cmd, text, number);
-    char secret[COOP_SECRET_LEN + 1];
+    char secret[COOP_SECRET_LEN + 1] = {0};
     switch (cmd) {
     case HOS_COOP_CMD_MAKE:
     case HOS_COOP_CMD_JOIN: {
-        /* (Make: a new random secret, or HOS_COOP_ROOM's, from the environment only: a test session's known room) */
+        /* (Host: a room of a new random secret, or of HOS_COOP_ROOM's, from the environment only: a test session's
+           known room. Join: the host's address; its secret is optional because the host says it on the link, and
+           typing one says it was told to you some other way. */
         const char *room = cmd == HOS_COOP_CMD_MAKE ? getenv("HOS_COOP_ROOM") : text;
-        const int have = room && *room && coop_secret_normalize(room, secret);
-        if (cmd == HOS_COOP_CMD_JOIN && !have) return 0;
+        const int have = !room || !*room || coop_secret_normalize(room, secret);
+        if (!have) return 0;
         if (!coop_configure(1, name_now(), server_now())) {
             hos_log("coop: the Co-op tab could not switch co-op on");
             return 0;
         }
-        return coop_command(cmd == HOS_COOP_CMD_MAKE ? COOP_CMD_CREATE : COOP_CMD_JOIN, have ? secret : NULL);
+        if (g_port) coop_port_set(g_port);
+        return coop_command(cmd == HOS_COOP_CMD_MAKE ? COOP_CMD_HOST : COOP_CMD_JOIN, secret[0] ? secret : NULL);
     }
     case HOS_COOP_CMD_LEAVE:
         return coop_command(COOP_CMD_LEAVE, NULL);

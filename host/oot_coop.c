@@ -17,6 +17,8 @@
  *              what Link plays; as his game puts equipment in his hands or hangs it on him, he says that too. The menu
  *              and the corner of the screen show it, and each other player is drawn there as a Link of their age,
  *              holding and wearing what their Link does (co_bodies_step). A Go to player row travels to one of them.
+ *              A game that has stopped updating Link — the pause menu, the map, the save — keeps saying once a
+ *              second that it is where it was and busy, so a pause is not read as a player leaving.
  *   enemies    An enemy's life is one for all, and it stands in one place for all: the game of the player nearest to it
  *              leads it, the others' copies follow ("one enemy for everyone", further down).
  *   PvP        A hit that reaches another player takes hearts from them, between players who both have the row on.
@@ -241,7 +243,9 @@ static int co_room(void) {
 
 static char co_map[64];                 /* the map I am on (co_tick) */
 static int co_playing;
-#define CO_AS_SLOTS 12               /* (the animation: slots read of an actor, and a command name's room) */
+#define CO_AS_SLOTS 24               /* (the animation: slots read of an actor, and a command name's room; adult Link's
+ *              controller carries more than child's, and the upper-body slots — the arms, a sword — sit past the twelve a
+ *              child uses: an animation said in a slot this does not read never reaches the others' body) */
 #define CO_AS_NAME 48
 static volatile LONG co_test_play;      /* (test runs) play co_test_play_name in slot co_test_play_slot on the bodies */
 static char co_test_play_name[CO_AS_NAME];
@@ -253,6 +257,8 @@ static void co_enemy_hit(uint32_t hash, const float at[3], uint32_t taken);   /*
 static void co_enemy_led(int from, const char *text);
 static int co_actor_move(Ctx *c, uint64_t actor, const float at[12]);
 static volatile LONG co_busy_now;      /* (co_tick) an event is playing or a map is loading in my game */
+static volatile LONG co_my_child = 1;  /* (co_tick) my Link's age, said with the place; held across a shut flag table */
+static volatile int64_t co_place_sent; /* (co_tick and the frame) the last time I said where I am */
 static volatile LONG co_hurt;           /* (PvP) quarter hearts to come off mine (the game side takes it) */
 static volatile LONG co_hurt_from;      /* (PvP) the number of the player whose swing it was */
 static char co_hurt_by[24];
@@ -1126,7 +1132,9 @@ static uint64_t co_create(Ctx *c, const char *name, const float place[3], float 
 }
 
 typedef struct { uint64_t actor, made_of; int child, posed, foe; uint32_t life_full; int64_t tried, struck; float push[2], push_far;
-                 char eq_name[CO_EQ_SLOTS][CO_AS_NAME]; int eq_num[CO_EQ_SLOTS]; int eq_state[3]; } CoBody;
+                 char eq_name[CO_EQ_SLOTS][CO_AS_NAME]; int eq_num[CO_EQ_SLOTS]; int eq_state[3];
+                 uint64_t retired, retired_of;   /* (the body this one replaced: put under and kept under, see co_bodies_step) */
+                 int64_t child_at; int child_want; } CoBody;
 static CoBody co_body[CO_PEERS];
 static uint64_t co_link_actor;                        /* Link's own actor when the bodies were made */
 
@@ -1221,12 +1229,15 @@ static int co_as_remove(Ctx *c, uint64_t actor, int slot) {
     return result;
 }
 
-/* An actor's animation inputs: where they start and how many 32-bit words (see "how another player moves"). */
+/* An actor's animation inputs: where they start and how many 32-bit words (see "how another player moves").
+   No hardcoded vtable: child and adult Link wear different controllers, and each game was lifted at a different
+   build, so the constants were wrong as often as right; what decides is the shape — the holder, its table of pointers
+   to one contiguous block of words — that only this layout has. Only Link and a co-op body are ever looked up. */
 static uint64_t co_inputs_at(uint64_t actor, uint32_t *words) {
     const uint64_t ctl = co_as_ctl(actor);
-    if (!ctl || G64(ctl) != 0x84c497c8ULL) return 0;
+    if (!ctl || !G64(ctl)) return 0;
     const uint64_t holder = G64(ctl + 0x40);
-    if (!co_ok(holder, 0x110) || G64(holder) != 0x84c49818ULL) return 0;
+    if (!co_ok(holder, 0x110) || !G64(holder)) return 0;
     uint64_t lo = ~0ULL, hi = 0;
     for (unsigned o = 0x10; o <= 0xc8; o += 8) {
         const uint64_t at = G64(holder + o);
@@ -1676,11 +1687,13 @@ static void co_bodies_step(Ctx *c, uint64_t link, int64_t now) {
     /* (CoopFoe_*: the same body with a life and the sensor that takes hits, made by make_bodies.py: a target for all the game
        can hit an enemy with. Used while PvP is on here and there; with it off anywhere the body is CoopPlayer_*, which
        nothing can hit or lock on to.) */
-    static int foes = -1;
-    if (foes < 0) {
+    static int foes = -1, own = -1;
+    if (foes < 0 || own < 0) {
         int hos_mods_has(const char *prefix, const char *suffix);   /* mods.c */
         foes = hos_mods_has("pack/actor/coopfoe_child", ".pack.zs") && hos_mods_has("pack/actor/coopfoe_adult", ".pack.zs");
+        own = hos_mods_has("pack/actor/coopplayer_child", ".pack.zs") && hos_mods_has("pack/actor/coopplayer_adult", ".pack.zs");
         hos_log("coop: PvP %s", foes ? "by the game's own combat (the other players' bodies are real targets)" : "by reach (no target bodies installed)");
+        hos_log("coop: the other players are drawn as %s", own ? "CoopPlayer (they move as they play)" : "PouchPlayer (no co-op bodies installed: they stand and slide)");
     }
     const int pvp_here = rx_option(HOS_OPT_COOP_PVP, 0) > 0;
     int listed = 0;
@@ -1710,25 +1723,36 @@ static void co_bodies_step(Ctx *c, uint64_t link, int64_t now) {
     for (int i = 0; i < CO_PEERS; i++) {
         CoBody *b = &co_body[i];
         if (b->actor && (!hos_guest_range(b->actor, 0x360) || G64(b->actor) != b->made_of)) b->actor = 0;   /* (gone, or its memory is something else now) */
-        if (b->actor && who[i].want && (b->child != who[i].child || b->foe != who[i].foe)) {   /* (they changed age, or PvP went on or off: this body goes under, the other is made) */
+        /* (A puppet's age comes over the wire, and the flag it comes from can flicker; and a body put under the world
+           is not destroyed — it stays in the game's memory and, left alone, its own walk-up stands it back on the
+           ground beside the new one. So only change age on what has held for half a second, and sink the one going
+           under in every step, so two of a player never stand in a room at once.) */
+        const int flip_foe = b->actor && who[i].want && b->foe != (own && who[i].foe);   /* (the tab's PvP row: a switch you made, act on it; without the target packs there is no foe body to turn to) */
+        if (who[i].child != b->child_want) b->child_at = 0, b->child_want = who[i].child;
+        else if (who[i].child != b->child && !b->child_at) b->child_at = now;
+        const int flip_child = flip_foe == 0 && b->actor && who[i].want && who[i].child != b->child && b->child_at && now - b->child_at > 500000000LL;
+        if (flip_foe || flip_child) {   /* (they changed age, or PvP went on or off: this body goes under, the other is made) */
             const float under[3] = {0, -5000, 0};
             co_body_put(b->actor, under, 0);
+            b->retired = b->actor, b->retired_of = b->actor ? G64(b->actor) : 0;   /* (kept under and watched: the game may take that memory, and its actor is not this one any more) */
             b->actor = 0;
+            b->child = who[i].child, b->child_at = 0;   /* (the body that comes next shows what we know now) */
+            hos_log("coop: %s's body turns %s: the old one (%llx) goes under", who[i].name, flip_foe ? "PvP" : "age", (unsigned long long)b->retired);
+            hos_log_flush();
+        }
+        if (b->retired && hos_guest_range(b->retired, 0x360) && G64(b->retired) == b->retired_of) {
+            const float under[3] = {0, -5000, 0};
+            co_body_put(b->retired, under, 0);
         }
         if (!b->actor && who[i].want && now - b->tried > 3000000000LL) {
             b->tried = now;
             /* (CoopPlayer_*: Link's model with Link's animation graph, made by nx2/coop_bodies.py. Without that
                mod the pause menu's Link is used, as before: it stands and slides, it cannot be animated.) */
-            static int own = -1;
-            if (own < 0) {
-                int hos_mods_has(const char *prefix, const char *suffix);   /* mods.c */
-                own = hos_mods_has("pack/actor/coopplayer_child", ".pack.zs") && hos_mods_has("pack/actor/coopplayer_adult", ".pack.zs");
-                hos_log("coop: the other players are drawn as %s", own ? "CoopPlayer (they move as they play)" : "PouchPlayer (no co-op bodies installed: they stand and slide)");
-            }
             const char *name = own && who[i].foe ? (who[i].child ? "CoopFoe_Child" : "CoopFoe_Adult")
                              : own ? (who[i].child ? "CoopPlayer_Child" : "CoopPlayer_Adult") : (who[i].child ? "PouchPlayer_Child" : "PouchPlayer_Adult");
             b->actor = co_create(c, name, who[i].place, who[i].yaw, 0);
             b->made_of = b->actor ? G64(b->actor) : 0, b->child = who[i].child, b->posed = 0;
+            b->child_want = who[i].child, b->child_at = 0;
             b->foe = own && who[i].foe, b->life_full = 0, b->struck = 0;
             memset(b->eq_name, 0, sizeof b->eq_name), b->eq_state[0] = b->eq_state[1] = CO_EQ_NO;
             hos_log("coop: %s drawn as %s: actor %llx", who[i].name, name, (unsigned long long)b->actor);
@@ -2286,6 +2310,19 @@ void oot_coop_frame(void) {
     const int64_t now = hos_now_ns();
     EnterCriticalSection(&co.game);
     co_events();
+    {   /* Link's update does not run while this game is paused (the pause menu, the map, a shop): the others would
+           read the silence as a player leaving, sink their puppet of him, and a moment at the save screen would ask
+           everyone to join again. A game that was playing keeps saying where it is — once a second, my last place,
+           and busy so the others' PvP leaves me alone. */
+        if (co.ready && co_room() && co_playing && co_map[0] && co.links > 0 && now - co_place_sent > 1000000000LL) {
+            float p[3], yaw;
+            EnterCriticalSection(&co.lock);
+            memcpy(p, co.pos, sizeof p), yaw = co.yaw;
+            LeaveCriticalSection(&co.lock);
+            co_send("P %s %.2f %.2f %.2f %.3f %d %d %d", co_map, p[0], p[1], p[2], yaw, (int)co_my_child, 1, rx_option(HOS_OPT_COOP_PVP, 0) > 0);
+            co_place_sent = now;   /* (co.game is held here and taken by co_tick's own sends: one writer at a time) */
+        }
+    }
     if (now >= next_slow) {
         next_slow = now + 1000000000LL;
         const int playing = co_playing && co.player_seen && now - co.player_seen < 1000000000LL;
@@ -2331,9 +2368,14 @@ static void co_tick(Ctx *c, uint64_t link) {
             EnterCriticalSection(&co.lock);
             memcpy(p, co.pos, sizeof p), yaw = co.yaw;
             LeaveCriticalSection(&co.lock);
-            int child = 1;
-            { CoFlags f; const uint8_t *v = co_flags_open(&f) ? co_flag_value(&f, 0xcea220d3u, NULL) : NULL; if (v) child = *v & 1; }
-            co_send("P %s %.2f %.2f %.2f %.3f %d %d %d", co_map, p[0], p[1], p[2], yaw, child, co_game_busy(), rx_option(HOS_OPT_COOP_PVP, 0) > 0);
+            {   /* (the flag table reads open only while sync is taking; say the last age known, so the others'
+                   puppet does not flicker between child and adult while the table is shut) */
+                CoFlags f;
+                const uint8_t *v = co_flags_open(&f) ? co_flag_value(&f, 0xcea220d3u, NULL) : NULL;
+                if (v) InterlockedExchange(&co_my_child, (long)(*v & 1));
+            }
+            co_send("P %s %.2f %.2f %.2f %.3f %d %d %d", co_map, p[0], p[1], p[2], yaw, (int)co_my_child, co_game_busy(), rx_option(HOS_OPT_COOP_PVP, 0) > 0);
+            co_place_sent = now;
             co_anim_say(link);
         }
         { const int busy = co_game_busy(); InterlockedExchange(&co_busy_now, busy); if (busy) quiet_until = now + 2000000000LL; }

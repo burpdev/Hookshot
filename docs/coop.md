@@ -100,6 +100,12 @@ So a killed game shows as present for 5 s and as away for 3 s more. Its progress
 already; nothing is taken from anyone when it goes. The other way round — a game joined, whose host goes silent — is the
 same 8 s, and that game reaches its host again by itself (`nothing from the host for 8 s`, then waits of 1, 2, 4, 8 and
 15 s) until it hosts nothing any more (`stopped trying to reach the room`) or the player leaves.
+
+What a game says, while it plays, is where Link stands thirty times a second. While it is *not* updating Link — the pause
+menu, the map, a save scene — it keeps saying once a second that it is where it was and busy, so a pause is never read as
+a player leaving, and the others' PvP leaves it alone. The puppet it is drawn as follows what its game last said: a change
+of age needs to hold for half a second before the body is changed over, so a flag crossing the wire never leaves two
+puppets of one player standing in a field.
 ### The Co-op tab
 
 The Insert menu's last tab does the same from the game, with no setting written by hand. **Host** and **Join** make this

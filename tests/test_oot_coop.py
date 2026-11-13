@@ -101,6 +101,31 @@ def check_equip():
     check(oot_patches.patch_coop_equip(got) == got, "a file patched before got its equipment hooks again")
 
 
+def check_presence_fixes():
+    """what the room told us it got wrong, checked in the source it was wrong in"""
+    coop = read("host", "oot_coop.c")
+    # (the animation inputs: child and adult Link wear different controllers, so a hardcoded vtable was wrong
+    #  as often as right — the adult sender said no inputs at all and its puppet stood still on the others' screens)
+    inp = re.search(r"static uint64_t co_inputs_at\(uint64_t actor, uint32_t \*words\) \{.*?\n    return lo;\n\}", coop, re.S)
+    check(inp and "0x84c497c8" not in inp.group(0),
+          "host/oot_coop.c: co_inputs_at still gates on one hardcoded controller vtable")
+    # (a paused game stops updating Link: it must keep saying where it is, or the others read silence as leaving)
+    frame = re.search(r"void oot_coop_frame\(void\) \{.*?\n\}\n", coop, re.S)
+    check(frame and "co_place_sent > 1000000000LL" in frame.group(0) and "co_place_sent = now" in frame.group(0),
+          "host/oot_coop.c: oot_coop_frame does not keep-alive the place while the game is paused")
+    check("co_place_sent = now" in coop and coop.count("co_place_sent = now") >= 2,
+          "host/oot_coop.c: the normal place send does not note that it said it")
+    # (a body put under is not destroyed: an age flicker used to leave two puppets of one player standing together)
+    bodies = re.search(r"static void co_bodies_step\(Ctx \*c.*?\n\}\n\n", coop, re.S)
+    check(bodies and "now - b->child_at > 500000000LL" in bodies.group(0),
+          "host/oot_coop.c: a body's age is not asked to hold for half a second before it is changed")
+    check(bodies and "b->retired_of" in bodies.group(0) and "co_body_put(b->retired, under, 0)" in bodies.group(0),
+          "host/oot_coop.c: a retired body is not kept sunk below the world")
+    # (the age a puppet shows comes from a flag that reads only while sync is open: hold the last known one)
+    check("InterlockedExchange(&co_my_child" in coop,
+          "host/oot_coop.c: the said age is not held across a shut flag table")
+
+
 def applied(protect_hearts):
     with tempfile.TemporaryDirectory() as gen:
         path = os.path.join(gen, "code_000.c")
@@ -247,6 +272,7 @@ def main():
     check_pickup()
     check_life()
     check_equip()
+    check_presence_fixes()
     check_apply()
     check_host()
     check_ids()

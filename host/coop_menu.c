@@ -1,16 +1,15 @@
 /* (hookshot) The Insert menu's Co-op tab, the host's side (MkwVkHost.coop_view and coop_command, gpu/vk/vk_api.h): the room
-   as the process's co-op session has it (host/coop.h) and as progress sync offers it (host/coop_oot.h: each member's
-   identity key, the offer to accept, the host's remedies), in the tab's terms, and what the tab asks turned into
+   as the process's co-op session has it (host/coop.h) and as progress sync has it (host/coop_oot.h: each member's
+   identity key, the host's remedies, which members are not identified yet), in the tab's terms, and what the tab asks turned into
    coop_configure, coop_command, coop_set_port and progress sync's calls. There is one way into a room: this game hosts
    one, or joins the one at an address. The player's name, the host's address and the port are the tab's three fields
    (hookshot_options.ini's coop_name=, coop_server= and coop_port=, which the menu saves and coop_init reads at the next
    start); Host or Join switches co-op on with them for this run. Pressing the row again leaves the room it is in.
    HOS_COOP_DEMO=1: a made-up room instead, for pictures of the tab and for trying it without another game; the session is
    never started and nothing is sent. It follows what the tab asks: Host connects for a second, then this game is the
-   room's maker, alone; Saria comes in, unidentified for three seconds, then with her key, and Darunia with his; the room
-   is offered for acceptance, and Darunia is away for a while; the maker may remove a player or reset the pools. Join (any
-   valid address) puts the player third in Malon's room, offered at once. Accept takes the offer. All of it from the
-   menu's thread. */
+   room's maker, alone; Saria comes in, unidentified for three seconds (while she is, nothing of hers is shared), then
+   with her key, and Darunia with his; Darunia is away for a while; the maker may remove a player or reset the pools. Join
+   (any valid address) puts the player third in Malon's room. All of it from the menu's thread. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +28,6 @@ int hos_ini_text(const char *key, char *out, size_t size);   /* host/nn_applet.c
 int hos_ini_option(const char *key, int otherwise);
 /* host/coop_oot.h's calls for the menu (declared here: that header needs the lifted code's a64.h) */
 int hos_oot_coop_offer(CoopOffer *out);
-int hos_oot_coop_accept(uint32_t token);
 int hos_oot_coop_is_maker(void);
 int hos_oot_coop_reset_pools(void);
 int hos_oot_coop_remove_key(const char *fingerprint);
@@ -74,13 +72,12 @@ static int demo_on(void) {
 
 /* ---- the made-up room ---- */
 static struct {
-    int state, made, accepted, asks;   /* asks: the commands taken, for the view's version */
+    int state, made, asks;            /* asks: the commands taken, for the view's version */
     unsigned removed;                  /* the made-up members the maker removed, a bit by id */
     int64_t since_ms;                  /* the last Host or Join */
     char addr[64], status[96];
-} g_demo = {HOS_COOP_STATE_OFF, 0, 0, 0, 0, 0, "192.168.1.20:43400", "a made-up room (HOS_COOP_DEMO=1): nothing is sent"};
+} g_demo = {HOS_COOP_STATE_OFF, 0, 0, 0, 0, "192.168.1.20:43400", "a made-up room (HOS_COOP_DEMO=1): nothing is sent"};
 enum { DEMO_CONNECT_MS = 1200, DEMO_SARIA_MS = 3000, DEMO_KEYS_MS = 6000, DEMO_AWAY_MS = 9000, DEMO_BACK_MS = 13000 };
-static const uint32_t kDemoOffer = 0x5eed0c0bu;
 
 static int64_t now_ms(void) { return hos_now_ns() / 1000000; }
 
@@ -88,7 +85,7 @@ static void demo_member(MkwVkCoopView *v, int id, const char *name, const char *
     if (g_demo.removed >> id & 1) return;
     MkwVkCoopMember *m = &v->member[v->n++];
     m->id = id, m->self = (uint8_t)self, m->maker = (uint8_t)maker, m->away = (uint8_t)away;
-    m->accepted = (uint8_t)(!self && key[0] && g_demo.accepted);
+    m->accepted = (uint8_t)(!self && key[0]);   /* (accepted as soon as the key is known: joining shares at once) */
     copy_text(m->name, sizeof m->name, name), copy_text(m->key, sizeof m->key, key);
 }
 
@@ -112,45 +109,34 @@ static void demo_view(MkwVkCoopView *v) {
             if (t >= DEMO_KEYS_MS) demo_member(v, 3, "Darunia", "d03a-5f17-c2e9-8b44", 0, 0, t >= DEMO_AWAY_MS && t < DEMO_BACK_MS);
             phase = t < DEMO_SARIA_MS ? 1 : t < DEMO_KEYS_MS ? 2 : t < DEMO_AWAY_MS ? 3 : t < DEMO_BACK_MS ? 4 : 5;
             v->unidentified = t >= DEMO_SARIA_MS && t < DEMO_KEYS_MS;
-            v->offer = t >= DEMO_KEYS_MS ? kDemoOffer : 0;
         } else {
             demo_member(v, 1, "Malon", "a9e0-31c7-6d58-f2b4", 0, 1, 0);
             demo_member(v, 2, "Saria", "7c1d-e842-3b90-a5f6", 0, 0, 0);
             demo_member(v, 3, v->name, "4be1-07d2-9a3f-c615", 1, 0, 0);
-            v->offer = kDemoOffer;
             phase = 6;
         }
-        v->accepted = g_demo.accepted;
         v->remedies = g_demo.made;
     }
     v->version = (uint32_t)(g_demo.asks << 8 | g_demo.state << 4 | phase);
 }
 
 static int demo_command(int cmd, const char *text, uint32_t number) {
+    (void)number;   /* (nothing of the tab's asks a number any more: Accept is gone with the button) */
     const int in_room = g_demo.state == HOS_COOP_STATE_CONNECTING || g_demo.state == HOS_COOP_STATE_JOINED;
     switch (cmd) {
     case HOS_COOP_CMD_HOST:
     case HOS_COOP_CMD_JOIN:
         if (in_room) {   /* the row again: out of the room this game is in (host/coop.h: leaving clears who holds it) */
-            g_demo.state = HOS_COOP_STATE_LEFT, g_demo.made = 0, g_demo.accepted = 0;
+            g_demo.state = HOS_COOP_STATE_LEFT, g_demo.made = 0;
             copy_text(g_demo.status, sizeof g_demo.status,
                       cmd == HOS_COOP_CMD_HOST ? "made up: stopped hosting" : "made up: left the room");
             break;
         }
         if (cmd == HOS_COOP_CMD_JOIN && !text) return 0;   /* (Join needs the host's address; the field is checked there) */
-        g_demo.state = HOS_COOP_STATE_CONNECTING, g_demo.made = cmd == HOS_COOP_CMD_HOST, g_demo.accepted = 0, g_demo.removed = 0;
+        g_demo.state = HOS_COOP_STATE_CONNECTING, g_demo.made = cmd == HOS_COOP_CMD_HOST, g_demo.removed = 0;
         g_demo.since_ms = now_ms();
         copy_text(g_demo.status, sizeof g_demo.status, cmd == HOS_COOP_CMD_HOST ? "made up: hosting" : "made up: joining");
         break;
-    case HOS_COOP_CMD_ACCEPT: {
-        MkwVkCoopView v;
-        memset(&v, 0, sizeof v);
-        demo_view(&v);
-        if (!v.offer || number != v.offer || v.accepted) return 0;
-        g_demo.accepted = 1;
-        copy_text(g_demo.status, sizeof g_demo.status, "accepted: your save was copied first (made up: nothing copied)");
-        break;
-    }
     case HOS_COOP_CMD_REMOVE: {   /* (the member of that key, from the host's room) */
         MkwVkCoopView v;
         memset(&v, 0, sizeof v);
@@ -200,11 +186,11 @@ void hos_coop_menu_view(MkwVkCoopView *out) {
         copy_text(m->name, sizeof m->name, v.member[i].name);
     }
     if (v.state != COOP_JOINED && v.state != COOP_RECONNECTING) return;
-    /* (progress sync: the others' keys from the offer, which it makes while the room is not accepted and keeps, accepted,
-       with its acceptance; this player's own key from the pools' list, which marks it) */
+    /* (progress sync: the others' keys, which it publishes once every member is identified (the room accepts itself,
+       host/coop_oot.c), and how many are not there yet; this player's own key from the pools' list, which marks it) */
     CoopOffer offer;
     if (hos_oot_coop_offer(&offer)) {
-        out->offer = offer.token, out->accepted = offer.accepted, out->unidentified = offer.unidentified;
+        out->unidentified = offer.unidentified;
         for (int j = 0; j < offer.n && j < COOP_MAX_MEMBERS; j++)
             for (int k = 0; k < out->n; k++)
                 if (out->member[k].id == offer.member[j].id && !out->member[k].self) {
@@ -262,8 +248,6 @@ int hos_coop_menu_command(int cmd, const char *text, uint32_t number) {
         }
         return coop_command(cmd == HOS_COOP_CMD_HOST ? COOP_CMD_HOST : COOP_CMD_JOIN, addr);
     }
-    case HOS_COOP_CMD_ACCEPT:   /* (progress sync copies the save first, then takes the room's values) */
-        return hos_oot_coop_accept(number);
     case HOS_COOP_CMD_REMOVE:
         return text && *text && hos_oot_coop_remove_key(text);
     case HOS_COOP_CMD_RESET_POOLS:

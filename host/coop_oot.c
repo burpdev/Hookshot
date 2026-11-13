@@ -42,7 +42,6 @@
    host/coop.c's session reads them), else from the session's first callback, when the Co-op tab switches co-op on
    later (sync_on). Other switches (read at the first present): HOS_COOP_PROGRESS, _ITEMS,
    _SONGS, _QUEST (shared|own), HOS_COOP_KEYS, _RUPEES, _AMMO (pool|own) the rules a room this game makes uses,
-   HOS_COOP_ACCEPT=always (every room's offer accepted: tests; the environment only, hookshot_env.txt cannot set it),
    HOS_COOP_TRACE (a line per value sent, received and applied), and for tests HOS_COOP_PROBE=1 (with or without co-op:
    the table, its check against the getter and the gate logged; nothing written unless HOS_COOP_TEST_SET) and
    HOS_COOP_TEST_SET="hash=value@frame,..." (that flag set through the game's routine at that frame of play; the
@@ -222,7 +221,6 @@ static struct {
     CoopContributor pub_contrib[PUB_CONTRIBUTORS];
     int pub_ncontrib;
     uint64_t pub_contrib_at;
-    uint32_t want_accept;   /* atomic */
     uint64_t want_reset;    /* atomic: when (ms) */
     char want_remove[24];   /* pub_lock */
     uint64_t want_remove_at;
@@ -739,13 +737,6 @@ static void on_view(const CoopView *v, void *user) {
     view_changed(v);
 }
 
-/* HOS_COOP_ACCEPT=always: every offer accepted, from the environment only (hookshot_env.txt, a file players hand each
-   other, cannot set it: host/hos_main.c env_line_allowed), so a file nobody checked cannot make a game take a room. */
-static int accept_always(void) {
-    const char *v = getenv("HOS_COOP_ACCEPT");
-    return v && !strcmp(v, "always");
-}
-
 /* The engine's offer, with the roster's names for members not identified yet (G.lock held). */
 static int offer_of(CoopOffer *o, uint64_t now) {
     const int has = coop_sync_offer(G.eng, o, now);
@@ -777,15 +768,15 @@ static void publish_none(void) {
     ReleaseSRWLockExclusive(&G.pub_lock);
 }
 
-/* The offer of the room (the co-op thread, G.lock held): accepted by the menu or the switch, logged when it changed and
-   is not accepted, and published for the menu. */
+/* The offer of the room (the co-op thread, G.lock held): joining shares at once, so the offer is accepted as it
+   appears — the save is copied first when the room's values touch this game — and it still waits while any member
+   goes unidentified (the engine takes nothing from a player it cannot name). Logged when it changed and is not
+   there yet, and published for the tab. */
 static void offer_update(uint64_t now) {
     CoopOffer o;
-    const uint32_t menu = __atomic_exchange_n(&G.want_accept, 0, __ATOMIC_ACQ_REL);   /* of the offer the menu showed */
     int has = offer_of(&o, now);
-    const char *how = !has || o.accepted ? NULL : menu == o.token ? "in the menu" : accept_always() ? "HOS_COOP_ACCEPT=always" : NULL;
-    if (how && coop_sync_accept(G.eng, o.token)) {
-        hos_log("coop: sync: room accepted (%s); %s", how, coop_sync_copy_wanted(G.eng) ? "the save is copied first" : "values from it are applied");
+    if (has && !o.accepted && coop_sync_accept(G.eng, o.token)) {
+        hos_log("coop: sync: room accepted; %s", coop_sync_copy_wanted(G.eng) ? "the save is copied first" : "values from it are applied");
         has = offer_of(&o, now);
     }
     if (o.token && !o.accepted && (o.token != G.logged || o.unidentified != G.logged_unid)) {
@@ -803,7 +794,7 @@ static void offer_update(uint64_t now) {
         hos_log("coop: sync: %s; in the room: %s; rules: %s, signed by key %s",
                 o.new_save ? "another save is played in the room: it gets the room's progress, which holds what the last save brought"
                 : again    ? "the room changed (a member, the rules or the key that signs them)"
-                           : "a room to accept",
+                           : "a room joined: taking what it shares",
                 o.n ? who : "nobody else", rules, o.maker_key);
         if (o.maker_moved) hos_log("coop: sync: the roster names another member as the maker than the one whose key signs the rules; the signed rules stay");
         if (o.disagree)
@@ -811,13 +802,12 @@ static void offer_update(uint64_t now) {
                     "maker's, by voice or chat");
         if (o.unidentified)
             hos_log("coop: sync: %d member(s) in the room are not identified (never said who they are, or two keys present themselves for "
-                    "one): the room cannot be accepted while they are in it (the maker can remove them, or everyone moves to a new room)",
+                    "one): nothing of theirs is shared while they are in it (the maker can remove them, or everyone moves to a new room)",
                     o.unidentified);
         else
-            hos_log("coop: sync: nothing from the room is applied to this game until you accept it on the Co-op tab (offer %08x); the "
-                    "save is copied to coop-backup in the user folder first. Your key pools count only the players you accept, among "
-                    "those the maker lets use the pools at all; your story flags take what the players you accept took from the "
-                    "players they accepted", o.token);
+            hos_log("coop: sync: what the room shares is taken from it now: the save is copied to coop-backup in the user folder first. Your key pools "
+                    "count only the players whose keys the room holds, among those the maker lets use the pools at all; your story flags take "
+                    "what the players you share with took from the players they shared with");
     }
     if (!o.token && o.disagree && !G.said_disagree)
         hos_log("coop: sync: the members carry rules signed by different keys, so this game takes no rules and applies nothing; ask the "
@@ -833,15 +823,6 @@ int hos_oot_coop_offer(CoopOffer *out) {
     const int has = G.pub_has;
     ReleaseSRWLockShared(&G.pub_lock);
     return has;
-}
-
-int hos_oot_coop_accept(uint32_t token) {
-    AcquireSRWLockShared(&G.pub_lock);
-    const int same = token && G.pub_has && token == G.pub.token, done = same && G.pub.accepted;
-    const int ok = same && !G.pub.accepted && !G.pub.unidentified;
-    ReleaseSRWLockShared(&G.pub_lock);
-    if (ok) __atomic_store_n(&G.want_accept, token, __ATOMIC_RELEASE);
-    return ok || done;
 }
 
 int hos_oot_coop_is_maker(void) {

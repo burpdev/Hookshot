@@ -1547,9 +1547,6 @@ Row rows[] = {
     {TAB_COOP, "Status", nullptr, 0, 0, 0, nullptr,
      "Hosting, Joined, Connecting, or In no room and why. It also shows in the top left corner of the screen while in a room, "
      "with a longer note when something is wrong."},
-    {TAB_COOP, "Accept the room", nullptr, 0, 0, 0, nullptr,
-     "Shares your progress with the players below, under the rules the host's key signed. Your save is copied first. Read "
-     "your key fingerprints aloud to each other before: a name can be anyone's. Press twice."},
     {TAB_COOP, "Remove a player", nullptr, 0, 0, 0, nullptr,
      "The host's remedy: the player chosen with Left and Right is dropped from the room, and every game forgets its key and "
      "what it took from the pools. Press twice."},
@@ -1816,9 +1813,9 @@ bool is_motion_row(const Row& r) { return r.tab == TAB_CONTROLS && !r.value && !
 // ---- (hookshot) the Co-op tab: the room as host/coop_menu.c says it is (read at every frame while the menu is open:
 // coop_refresh), its rows known by their names (as is_motion_row), its three text fields ----
 MkwVkCoopView coop_now{};
-enum { kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus, kCoopAccept, kCoopRemove, kCoopReset, kCoopRules, kCoopRows };
+enum { kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus, kCoopRemove, kCoopReset, kCoopRules, kCoopRows };
 const char* const coop_row_names[kCoopRows] = {"Host",   "Join",   "Host address", "Player name", "Status",
-                                                "Accept the room", "Remove a player", "Reset the pools", "Room rules"};
+                                                "Remove a player", "Reset the pools", "Room rules"};
 int coop_remove_at = 0;   // (Remove a player: which of the others with a key, Left and Right choose)
 /// The other members with a key (those the room's maker can remove): their count, and the one coop_remove_at chooses (*chosen)
 int coop_removable(const MkwVkCoopView& v, const MkwVkCoopMember** chosen) {
@@ -1840,15 +1837,13 @@ bool coop_in_room(const MkwVkCoopView& v) {
     return v.state == HOS_COOP_STATE_CONNECTING || v.state == HOS_COOP_STATE_JOINED || v.state == HOS_COOP_STATE_RECONNECTING;
 }
 /// A Co-op row in the room's state v: Host, Join, the two fields, Status and Go to player are always there, so the tab does
-/// not move under the player's hands; Accept while the room is offered and not yet accepted; the host's remedies to the game
-/// that holds the room's key (Remove a player while another has a key); Room rules outside a room and to that game. While the
-/// room waits to be accepted, the remedies and Room rules stand back: the members and their keys, which are what is being
-/// accepted, get the room under the rows (draw_coop_rows)
+/// not move under the player's hands; the host's remedies to the game that holds the room's key (Remove a player while
+/// another has a key); Room rules outside a room and to that game. The members and their keys get the room under the
+/// rows (draw_coop_rows); joining shares progress at once, the save copied first (host/coop_oot.c)
 bool coop_row_shown(const Row& r, const MkwVkCoopView& v) {
     const MkwVkCoopMember* chosen;
-    const bool makers = v.state == HOS_COOP_STATE_JOINED && v.remedies && !(v.offer && !v.accepted);
+    const bool makers = v.state == HOS_COOP_STATE_JOINED && v.remedies;
     switch (coop_kind(r)) {
-    case kCoopAccept: return v.state == HOS_COOP_STATE_JOINED && v.offer && !v.accepted;
     case kCoopRemove: return makers && coop_removable(v, &chosen) > 0;
     case kCoopReset: return makers;
     case kCoopRules: return makers || !coop_in_room(v);
@@ -2799,15 +2794,15 @@ void edit_end(bool done) {
     if (!done) text_set(*editing, edit_kept), edit_why = nullptr;
     editing = nullptr, edit_apply = nullptr;
 }
-/// (hookshot) Enter (or a click) on a Co-op row that is no field: Make a room at once; Room secret shown or hidden; Accept, the
+/// (hookshot) Enter (or a click) on a Co-op row that is no field: Host at once; Remove, Reset and the two-confirm rows
 /// maker's remedies and Leave at their second press, the first arming them (pending, as Restart and Quit)
 void coop_press(const Row& r) {
     const int k = coop_kind(r);
     const int in_room = coop_in_room(coop_now);
     const bool toggle = k == kCoopHost || k == kCoopJoin;
     /* (Host while hosting, Join while joined: the row again leaves the room, which is what everyone else is playing in, so
-       it is asked for twice. Accept, Remove and Reset the same.) */
-    if ((toggle && in_room) || k == kCoopAccept || k == kCoopRemove || k == kCoopReset) {
+       it is asked for twice, Remove and Reset the same.) */
+    if ((toggle && in_room) || k == kCoopRemove || k == kCoopReset) {
         if (pending != &r) {
             pending = &r;
             return;
@@ -2818,7 +2813,6 @@ void coop_press(const Row& r) {
     const MkwVkCoopMember* chosen = nullptr;
     if (k == kCoopHost) host->coop_command(HOS_COOP_CMD_HOST, nullptr, 0);
     else if (k == kCoopJoin) host->coop_command(HOS_COOP_CMD_JOIN, coop_addr_field.text, 0);
-    else if (k == kCoopAccept) host->coop_command(HOS_COOP_CMD_ACCEPT, nullptr, coop_now.offer);
     else if (k == kCoopRemove && coop_removable(coop_now, &chosen) && chosen) host->coop_command(HOS_COOP_CMD_REMOVE, chosen->key, 0);
     else if (k == kCoopReset) host->coop_command(HOS_COOP_CMD_RESET_POOLS, nullptr, 0);
 }
@@ -2842,7 +2836,7 @@ void coop_refresh(bool* changed) {
         shown++;
     }
     tab_selected[TAB_COOP] = at >= 0 ? at : std::min(2, shown - 1);
-    if (pending && coop_kind(*pending) >= 0 && !row_shown((int)(pending - rows))) pending = nullptr;   // (Accept: taken, or gone)
+    if (pending && coop_kind(*pending) >= 0 && !row_shown((int)(pending - rows))) pending = nullptr;   // (a pending row that vanished or was taken elsewhere)
 }
 
 // ---- (hookshot) the Controls page: what presses each of the Switch's buttons, a gamepad input and up to two keys ----
@@ -3543,8 +3537,14 @@ void draw_coop_rows(ui::Ctx& c, float cx0, float cx1, float top, float bottom, i
     if (const char* line = v.status[0] ? v.status : known ? meaning[v.state] : nullptr)
         ui::text_mid(c, c.f.body, 16 * s, left + 20 * s, top + 50 * s, ui::kSoft, fit(c, c.f.body, 16 * s, right - left - 40 * s, line, false).c_str());
     const int count = tab_row_count(TAB_COOP);
-    float y = top + box_h + 16 * s;
+    const float rows_top = top + box_h + 16 * s;   // (the rows and the members below them are one scrollable list:
+    const int extra = v.n > 0 ? 1 + v.n + (v.unidentified ? 1 : 0) : 0;   // "In the room", a line per member, the note
+    int shown = 0;
+    const float first = scroll_rows(TAB_COOP, count + extra, sel, rows_top, bottom, pitch, &shown);
+    scroll_bar(c, cx0 + 20 * s, rows_top, rows_top + (float)shown * pitch - (pitch - rh), count + extra, shown, first);
+    float y = rows_top - first * pitch;
     for (int i = 0; i < count; i++, y += pitch) {
+        if (y + rh < rows_top - 8 * s || y > bottom + 8 * s) continue;   // (scrolled out of the list)
         const Row& r = rows[tab_row_to_global(TAB_COOP, i)];
         const bool selected = i == sel;
         const int k = coop_kind(r);
@@ -3577,12 +3577,13 @@ void draw_coop_rows(ui::Ctx& c, float cx0, float cx1, float top, float bottom, i
         } else if (const int link = coop_row_kind(r)) {   // (Go to player: what the host's presence layer sends back)
             choice_cell(c, va, vb, coop_row_text(link), selected, false, false);
         } else {
-            const char* says = k == kCoopAccept ? "Accept" : k == kCoopReset ? "Reset" : "Press";
+            const char* says = k == kCoopReset ? "Reset" : "Press";
             choice_cell(c, va, vb, pending == &r ? "Press again to confirm" : says, selected, false, false);
         }
-        hits.add(left, y, right, std::min(y + rh, bottom + 8 * s), menu_hit::kRow, i, va.x, vb.x);
+        hits.add(left, std::max(y, rows_top - 8 * s), right, std::min(y + rh, bottom + 8 * s), menu_hit::kRow, i, va.x, vb.x);
     }
-    if (v.n > 0) {
+    y = rows_top + (float)count * pitch - first * pitch;
+    if (v.n > 0 && y <= bottom + 8 * s) {
         const float ty = y + 20 * s, tw = ui::size_of(c.f.heading, 19 * s, "In the room").x;
         ui::text_mid(c, c.f.heading, 19 * s, left + 2 * s, ty, ui::kGoldHi, "In the room");
         c.d->AddLine(ImVec2(left + tw + 16 * s, ty), ImVec2(right, ty), ui::alpha(ui::kEdge, 0.9f), std::max(1.0f, s));
@@ -3602,7 +3603,7 @@ void draw_coop_rows(ui::Ctx& c, float cx0, float cx1, float top, float bottom, i
         }
         if (v.unidentified)
             ui::text_mid(c, c.f.body, 16 * s, left + 2 * s, y + 8 * s, ui::kGoldHi,
-                         "Not identified yet: Accept is held until every player has a key.");
+                         "Not identified yet: nothing of theirs is shared until every player has a key.");
     }
     c.d->PopClipRect();
 }
@@ -3690,8 +3691,8 @@ void draw_options(ui::Ctx& c) {
             std::string says;
             if (k == kCoopHost) says = mine ? "Stop hosting" : "Host";
             else if (k == kCoopJoin) says = mine ? "Leave the room" : "Join";
-            else says = k == kCoopAccept ? "Accept" : k == kCoopRemove ? "Remove" : "Reset";
-            prompt_list[prompts_n++] = {ui::kConfirm, (coop_in_room(coop_now) && mine) || k == kCoopAccept || k == kCoopRemove ||
+            else says = k == kCoopRemove ? "Remove" : "Reset";
+            prompt_list[prompts_n++] = {ui::kConfirm, (coop_in_room(coop_now) && mine) || k == kCoopRemove ||
                                                   k == kCoopReset ? (pending == &selr ? "Confirm" : says.c_str()) : says.c_str()};
             if (k == kCoopRemove) prompt_list[prompts_n++] = {ui::kLeftRight, "Player"};
         } else if (selr.value || (selr.cheat >= 0 && (selr.cheat <= 1 || selr.cheat == 7 || cheat_chooses(selr.cheat) || age_shown(selr.cheat)))) {

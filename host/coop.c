@@ -1158,11 +1158,12 @@ static void on_member_frame(CoopSess *s, int id, const CoopFrame *f, const uint8
         return;
     }
     case COOP_F_PING: {
-        uint8_t token[4];
-        const size_t n = coop_u32_pack(token, sizeof token, (uint32_t)now);
         CoopFrame g = {COOP_F_PONG, 0, (uint8_t)id, 0, 0};
         uint8_t frame[COOP_MAX_FRAME];
-        const size_t k = coop_frame_pack(frame, sizeof frame, &g, token, n);
+        const size_t k = coop_frame_pack(frame, sizeof frame, &g, p, f->len);   // (echo the sender's own stamp back, untouched:
+                                                                                // the two games do not share a clock, so a PONG that
+                                                                                // carried this host's time would subtract two clocks and
+                                                                                // answer with 0 ms here and 24 days there)
         if (k) coop_tcp_send(s->link[id], frame, k);
         return;
     }

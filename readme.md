@@ -390,12 +390,11 @@ HDR, Detail, and GPU and memory (last: the rows to change when something is wron
 | | Developer: Robust buffers | Auto, Off, On (after a restart) | Auto |
 | | Developer: ASTC as RGBA8 | Off, On (after a restart) | Off |
 | Co-op | Host | This game holds the room, on the Port below; in a room the row reads Stop hosting (press twice) | Off |
-| | Join | Reach the room at the Host address below; in a room the row reads Leave the room (press twice) | Off |
+| | Join | Reach the room at the Host address below: sharing starts as you join, after your save is copied; in a room the row reads Leave the room (press twice) | Off |
 | | Host address | Typed: Enter, `host`, `host:port` or `[IPv6]:port`, Enter again. While hosting: what the others type | None |
 | | Port | 1024 to 65535: hosted on, or joined at. A port typed into the address wins over it | 43400 |
 | | Player name | Typed: Enter, the name, Enter again | Player |
 | | Status | The room's own words: what is going on, or what went wrong, and the round trip to the host | |
-| | Accept the room | While the room is offered: share progress with the players listed, after your save is copied (press twice; compare the key fingerprints first) | |
 | | Remove a player, Reset the pools | The game that hosts only: drop the player chosen with Left and Right, or start the shared keys, rupees and ammunition again (press twice) | |
 | | Room rules | For the game that hosts, and outside a room: opens the Room rules page, the rules of a room this game makes: Progress, Items, Songs, Quest items (Shared, Per player; Shared), Small keys (One pool, Per player; One pool), Rupees, Ammunition (One pool, Per player; Per player), and Co-op at start (Off, On; Off): see [co-op](docs/coop.md) | |
 | | Go to player | A row for each other player in the room: travels to them | |
@@ -403,7 +402,8 @@ HDR, Detail, and GPU and memory (last: the rows to change when something is wron
 - **Co-op** is one room: one player's game hosts it and the others join at its address and port, up to 8 players, on
   Windows and on Linux. Each keeps their own save; the games share one adventure — progress, items, songs, quest items,
   small keys, rupees and ammunition under the room's rules (its Room rules page), and where everyone stands, their
-  enemies and their hearts ([co-op](docs/coop.md)). It is experimental.
+  enemies and their hearts ([co-op](docs/coop.md)). Joining copies your save before the room's values reach it, and only
+  players whose keys the room holds contribute. It is experimental.
 - **Quality preset** sets Render resolution, Window scaling filter, Sharpness, Frame pacing, Game speed, Profile
   and the video memory limits for a card with that much memory. It leaves the Upscaler and Frame generation as
   you chose them: with DLSS, FSR 3.1 or FSR 4, the preset's resolution becomes their nearest mode. Changing most other

@@ -16,10 +16,9 @@ void hos_oot_coop_present(Ctx *c);
 void hos_oot_coop_rom_open(const char *guest_path);
 
 /* For the menu (any thread, never waiting on the game): the room's offer as the co-op thread last saw it (1 when there
-   is one), the player's acceptance of the offer of that number (1 when taken or already accepted), the maker's remedies
-   (1 when this game is the maker and the request was queued) and the pools' contributors (their count, at most max). */
+   is one; joining shares at once, so it is accepted as it appears), the maker's remedies (1 when this game is the maker
+   and the request was queued) and the pools' contributors (their count, at most max). */
 int hos_oot_coop_offer(CoopOffer *out);
-int hos_oot_coop_accept(uint32_t token);
 int hos_oot_coop_is_maker(void);
 int hos_oot_coop_reset_pools(void);
 int hos_oot_coop_remove_key(const char *fingerprint);

@@ -652,6 +652,7 @@ static void co_current_map(Ctx *c, char *buf, size_t size) {
     recomp_store64_sp(c, out, 0);
     c->x[31] = out;
     c->x[0] = mgr, c->x[1] = out, c->x[2] = 0x1d6189dau;
+    get(c);
     const int found = (int)(c->x[0] & 1);
     const uint64_t text = recomp_load64(c, out);
     *c = saved;

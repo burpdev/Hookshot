@@ -109,11 +109,11 @@ digits and `.` `-` `:` `[` `]` `_`; `host:port` sets the port too), **Port** is 
 `coop_name`. **Status** is the room's own words — what is going on, or what went wrong, with the round trip to the host.
 
 In a room the tab shows a line per player: its number, its name, `you`, `the room` for the host, `away`, and the
-fingerprint of the key that player's game signed (gold once you accepted it, "not identified yet" while the room waits
-for it). **Accept the room** shows while the room waits for your acceptance (see "What joining a room means for your
-save"); **Go to player** travels to one of the others. The game that holds the room gets **Remove a player** and **Reset
-the pools**. **Room rules** — for the host, and for a game not in a room — opens the page of the rules a room this game
-makes (`coop_progress` .. `coop_ammo`, see "What is shared"). Accept, the remedies and leaving take a second press.
+fingerprint of the key that player's game signed (gold once the room has it in force with that name, "not identified
+yet" while the room waits for it); **Go to player** travels to one of the others. The game that holds the room gets
+**Remove a player** and **Reset the pools**. **Room rules** — for the host, and for a game not in a room — opens the
+page of the rules a room this game makes (`coop_progress` .. `coop_ammo`, see "What is shared"). The remedies and
+leaving take a second press.
 `HOS_COOP_DEMO=1` runs the tab on a made-up room, for screenshots: no session starts and nothing is sent.
 ## The log
 
@@ -225,10 +225,13 @@ cases remain; the concurrent caller also runs under ThreadSanitizer on Linux whe
 
 ### Accepted members
 
-Layers call `coop_member_accepted(id)`. A roster entry alone is not consent. The answer is false before this player
-accepted that member's signed identity and name, when that identity is disputed, ignored or removed, after a new save
-needs acceptance, and outside a joined session. A roster's changed session immediately loses the old binding. An
-accepted key can prove its new session with its signed identity; merely claiming the old name or member number cannot.
+Layers call `coop_member_accepted(id)`. A roster entry alone is not consent. The answer is false before that member's
+signed identity and name are in force with this player, when that identity is disputed, ignored or removed, after a new
+save needs its own consent, and outside a joined session. A roster's changed session immediately loses the old binding.
+An accepted key can prove its new session with its signed identity; merely claiming the old name or member number
+cannot. The game layer gives the consent itself: `host/coop_oot.c` puts a member in force as soon as the room's signed
+key list names it, so the tab has nothing to ask — the offer is accepted as it appears, and the copy of the save is its
+first step.
 
 The knowledge lives in `coop_sync_member_accepted(engine, id, session)` in the game-free progress engine.
 `oot_coop.c` publishes those answers with the current roster sessions through `coop_accept_members`. Incoming progress,
@@ -380,19 +383,18 @@ delivery ("Reliable events"), and a kind of `0xF0` and above is free for tests, 
 
 Read this before you join a room.
 
-- **Nothing from a room reaches your game until you accept it.** When you join, the Co-op tab names the other players
-  (each by the name and the key fingerprint their game signed), the room's rules and the key that signs them, and asks
-  you to accept. Until then your game takes nothing from the room. You accept players by their keys, not their names:
-  a new player, a player whose game restarted, a second player with a name you know, other rules, rules signed by
-  another key, and another save loaded in the room are each a new offer. A player in the room whose game never says who
-  it is keeps the room from being accepted at all. Accepting every room without asking (`HOS_COOP_ACCEPT=always`, for
-  tests) works only from the environment, never from `hookshot_env.txt`.
-- **Your game takes values only from players you accepted.** Every message that can change your save is signed by the
+- **Sharing starts as you join, and its first thing is to copy your save.** There is nothing to accept: the room takes
+  what it shares right away. It still checks who is in it, by the key each game signs rather than by the name: until
+  every player in the room has said who they are, nothing of theirs moves. A new player, a player whose game restarted,
+  a second player with a name you know, other rules, rules signed by another key, and another save loaded in the room
+  each change what the room shares. A player in the room whose game never says who it is holds the sharing back for
+  everyone, until the maker removes them or the room starts again.
+- **Your game takes values only from players whose keys the room holds.** Every message that can change your save is signed by the
   key of the player it came from, and the host stamps which member sent it, so neither another player nor the host can
-  make one in someone else's name that changes your save. For story flags and items acceptance is passed along (a player you accepted
-  hands on what they took from the players they accepted); pools count only what you and the players you accepted
-  brought, picked up and spent.
-- **Your save is copied first.** The moment you accept a room, the game copies your whole save folder (every slot) to
+  make one in someone else's name that changes your save. A key that presents itself under a name the room has for
+  another key is not in force. For story flags and items consent is passed along (a player the room holds hands on what
+  they took from the players they hold); pools count only what you and the players in force brought, picked up and spent.
+- **Your save is copied first.** The moment sharing starts, the game copies your whole save folder (every slot) to
   `coop-backup/` in the user folder (beside `save/`), and applies nothing from the room until the copy is made. The
   copy waits while the game is writing its save (a file open for writing, or a change in the last half second), and a
   save the game starts meanwhile waits for the copy, so a copy never holds half a save. The first copy for a room in
@@ -413,8 +415,8 @@ Read this before you join a room.
 
 1. Close the game.
 2. In the user folder (`user` beside the game on Windows, `~/.local/share/hookshot` on Linux, or the one `--user`
-   names), open `coop-backup` and pick the copy: `first-<date-time>` is the save as it was before you first accepted
-   that room, `<date-time>` a later acceptance.
+   names), open `coop-backup` and pick the copy: `first-<date-time>` is the save as it was before you first shared with
+   that room, `<date-time>` a later change of what the room shares.
 3. Move the folder `save/<numbers>` aside (keep it until you are sure), and copy the contents of the backup folder into
    a new `save/<numbers>` of the same name. `python -I scripts/oot_saves.py import --from <backup folder>` does this
    step and keeps a backup of its own first.
@@ -504,7 +506,6 @@ them or require migrating a player's saved settings.
 | Switch | What it does |
 |---|---|
 | `HOS_COOP_TRACE=1` | Also a line per value sent, received and applied, and what the game shows for each flag that changed (with its getter's reading) |
-| `HOS_COOP_ACCEPT=always` | Every room's offer accepted without asking (tests); the environment only |
 | `HOS_COOP_PROBE=1` | Once a save is played, the flag table as the runtime reads it, checked against the game's getter; nothing written. Co-op need not be on |
 | `HOS_COOP_TEST_SET=<hash>=<value>@<frame>,...` | That flag (hex hash) set through the game's own routine at that frame of play (tests); the environment only |
 

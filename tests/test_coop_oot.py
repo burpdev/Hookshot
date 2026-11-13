@@ -22,7 +22,7 @@ flag database in a fake guest memory (a getter and setters stand in for the game
   session's hooks registered at the first present whether co-op is on or not; switched on after the title screen came
   back, nothing read until a save is loaded; the read-only probe alone shares nothing;
 - and the wiring: one call at the end of the present (host/nvn_native.c), the RomFS open hook and the save-writer
-  bookkeeping in host/nn_fs.c, no direct write of the flag table (HOS_COOP_ACCEPT and HOS_COOP_TEST_SET refused from
+  bookkeeping in host/nn_fs.c, no direct write of the flag table (every HOS_COOP* name is refused from
   hookshot_env.txt: tests/test_env_file.py).
 
     python -I -B tests/test_coop_oot.py [--cc gcc]

@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define MKWVK_API_VERSION 24
+#define MKWVK_API_VERSION 25
 enum { HOS_OPT_CHEAT_HEARTS = 32, HOS_OPT_CHEAT_FLIGHT, HOS_OPT_CHEAT_ACTION, HOS_OPT_CHEAT_CAMERA, HOS_OPT_CHEAT_SPEED };
 /* (hookshot) the Gameplay tab's Text size (host/oot_text_size.c): 0 the game's, 1 110%, 2 125%, 3 150%, 4 175% */
 enum { HOS_OPT_TEXT_SIZE = 10 };
@@ -109,14 +109,15 @@ typedef struct MkwVkSetting {
 enum { HOS_TEXT_KEY = 0x40000000 };
 enum { HOS_TEXT_OFF, HOS_TEXT_ON, HOS_TEXT_PASTE };
 
-/* (hookshot, version 24) the Insert menu's Co-op tab (MkwVkHost.coop_view and coop_command, host/coop_menu.c): the room as
-   the tab shows it. There is one way in: one player's game hosts, the others join that game's address and port. state:
-   host/coop.h's CoopState, in order. hosting: this game holds the room (its Host), whose port it is and what a joiner
-   types to reach it (addr, "" when none of this PC's addresses stands out); joined, addr is the host as it was reached.
-   A member's key is its identity key's fingerprint (xxxx-xxxx-xxxx-xxxx, "" until it is known) and accepted whether this
-   player accepted it; offer is the number of the room's offer to accept (0: none, or it waits for unidentified members),
-   accepted whether it was; remedies 1 when this game holds the key the room's rules are signed with (the host's: it may
-   remove a player or reset the pools). version changes with anything in the view */
+/* (hookshot, version 25) the Insert menu's Co-op tab (MkwVkHost.coop_view and coop_command, host/coop_menu.c): the room as
+   the tab shows it. There is one way in: one player's game hosts, the others join that game's address and port; joining
+   shares progress at once (host/coop_oot.c accepts the room for its own, the save copied first). state: host/coop.h's
+   CoopState, in order. hosting: this game holds the room (its Host), whose port it is and what a joiner types to reach
+   it (addr, "" when none of this PC's addresses stands out); joined, addr is the host as it was reached. A member's key
+   is its identity key's fingerprint (xxxx-xxxx-xxxx-xxxx, "" until it is known) and accepted whether its values are in
+   force with it; unidentified counts the members with no key yet (nothing of theirs is shared while one is in the room);
+   remedies 1 when this game holds the key the room's rules are signed with (the host's: it may remove a player or reset
+   the pools). version changes with anything in the view */
 enum { HOS_COOP_STATE_OFF, HOS_COOP_STATE_LEFT, HOS_COOP_STATE_CONNECTING, HOS_COOP_STATE_JOINED, HOS_COOP_STATE_RECONNECTING };
 enum { HOS_COOP_MEMBERS = 8 };
 typedef struct MkwVkCoopMember {
@@ -135,18 +136,17 @@ typedef struct MkwVkCoopView {
     uint32_t ping_ms;   /* the round trip to the host; 0 not measured */
     int32_t n;          /* members, this player included */
     MkwVkCoopMember member[HOS_COOP_MEMBERS];
-    uint32_t offer;
-    int32_t accepted, unidentified;
+    int32_t unidentified;
     int32_t remedies;
 } MkwVkCoopView;
 /* what the tab asks (coop_command's cmd): Host (this game holds the room; pressed again while hosting, it stops), Join
    (text: the host's address as typed, "" when the field is empty: the one saved; pressed again while joined to it, this
    player leaves), the player's name (text) and the host's address (text) as the fields set them (number 1: the field's
    Enter, applied at once to a session that runs, 0: the saved value at the start, kept for the next Host or Join), the
-   port as its row sets it (text: its digits), the room's offer to accept (number: its offer), the host's remedies: remove
-   the player of that key (text: its fingerprint), reset the pools */
+   port as its row sets it (text: its digits), the host's remedies: remove the player of that key (text: its fingerprint),
+   reset the pools */
 enum { HOS_COOP_CMD_HOST = 1, HOS_COOP_CMD_JOIN, HOS_COOP_CMD_NAME, HOS_COOP_CMD_ADDRESS, HOS_COOP_CMD_PORT,
-       HOS_COOP_CMD_ACCEPT, HOS_COOP_CMD_REMOVE, HOS_COOP_CMD_RESET_POOLS };
+       HOS_COOP_CMD_REMOVE, HOS_COOP_CMD_RESET_POOLS };
 
 /* what the executable gives the back end */
 typedef struct MkwVkHost {
@@ -248,9 +248,9 @@ typedef struct MkwVkHost {
        max, in order (characters and HOS_TEXT_KEY editing keys, repeats included; Ctrl+V and Shift+Insert paste): the count.
        host/display.c (WM_CHAR, WM_KEYDOWN) and host/posix/display_sdl.c (SDL's text input and key events) put them in */
     int (*take_text)(int focus, uint32_t *out, int max);
-    /* (hookshot, version 24) the Co-op tab (host/coop_menu.c; the types above): the room as it is now, and what the tab asks,
+    /* (hookshot, version 25) the Co-op tab (host/coop_menu.c; the types above): the room as it is now, and what the tab asks,
        from the menu's thread. coop_command: 1 when taken, 0 when not (an address that is not host or host:port, a port that
-       is not one, an offer that is not the current one, co-op that could not start) */
+       is not one, co-op that could not start) */
     void (*coop_view)(MkwVkCoopView *out);
     int (*coop_command)(int cmd, const char *text, uint32_t number);
 } MkwVkHost;

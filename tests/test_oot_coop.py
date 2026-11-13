@@ -176,9 +176,10 @@ def check_ids():
 def check_rows():
     menu = read("gpu", "vk", "vk_menu.cpp")
     rows = re.findall(r'\{TAB_COOP, "([^"]+)", (&?\w+),', menu)
-    # (the Co-op tab is one room: Host and Join, where to reach the host, its port, the name, the status, the room's
-    #  consent and its pools, then the seven ways to follow a player and PvP. In the order they are in the table.)
-    direct = (["Host", "Join", "Host address", "Port", "Player name", "Status", "Accept the room", "Remove a player",
+    # (the Co-op tab is one room: Host and Join, where to reach the host, its port, the name, the status, then the
+    #  maker's remedies and the rules page, the seven ways to follow a player and PvP. In the order they are in the
+    #  table. There is no Accept row: joining shares at once, the save copied first, so the tab has nothing to ask.)
+    direct = (["Host", "Join", "Host address", "Port", "Player name", "Status", "Remove a player",
                "Reset the pools", "Room rules"] + ["Go to player"] * 7 + ["PvP"])
     names = [name for name, _ in rows]
     check(names == direct, "the Co-op tab's rows are not the ones expected: %s" % names)

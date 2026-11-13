@@ -2,10 +2,9 @@
 
 The menu's side is cut out of gpu/vk/vk_menu.cpp by its text and driven as menu_tick drives it: which rows the tab shows in
 each state of the room (Host, Join, Host address, Port, Player name and Status always; Room rules outside a room and to the
-game that holds its key; Accept while the room is offered and not yet accepted; the host's remedies while it has them and
-another player has a key), what each press asks of the host (Host and Join at once outside a room, at the second press
-inside one, since leaving is what the others are playing in; Accept, Remove a player and Reset the pools always at the
-second), which of the others Left and Right choose for Remove, the name and host address fields (what they take, an address
+game that holds its key; the host's remedies while it has them and another player has a key), what each press asks of the
+host (Host and Join at once outside a room, at the second press inside one, since leaving is what the others are playing
+in; Remove a player and Reset the pools always at the second), which of the others Left and Right choose for Remove, the name and host address fields (what they take, an address
 the host refuses not kept, a name told to the room this game is in), and the selection staying on its row while rows come
 and go. The host's side, host/coop_menu.c, is compiled as C with the wire format (host/coop_proto.c, Monocypher) and the
 session stubbed: the view as the tab gets it (you, the room's maker, the others' keys), the commands turned into
@@ -130,22 +129,22 @@ static int tab_index(int kind) {
 }
 /// The room as host/coop_menu.c would give it: its state, who holds it, its offer and whether it was accepted, the maker's
 /// remedies, and n_other others (the first Saria with her key, the second Darunia with his)
-static void set_room(int state, int hosting, uint32_t offer, int accepted, int remedies, int n_other, int with_keys) {
+static void set_room(int state, int hosting, int remedies, int n_other, int with_keys) {
     room = MkwVkCoopView{};
-    room.state = state, room.hosting = hosting, room.offer = offer, room.accepted = accepted, room.remedies = remedies;
-    room.port = 43400, room.version = (uint32_t)(state * 100 + offer + accepted + remedies + n_other);
+    room.state = state, room.hosting = hosting, room.remedies = remedies;
+    room.port = 43400, room.version = (uint32_t)(state * 100 + remedies + n_other);
     std::snprintf(room.status, sizeof room.status, hosting ? "Hosting" : "Joined");
     std::snprintf(room.name, sizeof room.name, "You");
     std::snprintf(room.addr, sizeof room.addr, "192.168.1.20:43400");
     room.n = 1 + n_other;
     room.member[0].id = 1, room.member[0].self = 1, room.member[0].maker = (uint8_t)hosting;
-    room.member[0].accepted = (uint8_t)accepted;
+    room.member[0].accepted = (uint8_t)with_keys;   /* (accepted as soon as the keys are in the room) */
     std::snprintf(room.member[0].name, sizeof room.member[0].name, "You");
     std::snprintf(room.member[0].key, sizeof room.member[0].key, with_keys ? "4be1-07d2-9a3f-c615" : "");
     for (int i = 0; i < n_other; i++) {
         MkwVkCoopMember& m = room.member[1 + i];
         m.id = 2 + i;
-        m.accepted = (uint8_t)accepted;
+        m.accepted = (uint8_t)with_keys;
         std::snprintf(m.name, sizeof m.name, i ? "Darunia" : "Saria");
         std::snprintf(m.key, sizeof m.key, with_keys ? (i ? "d03a-5f17-c2e9-8b44" : "7c1d-e842-3b90-a5f6") : "");
     }
@@ -173,22 +172,20 @@ int main() {
 
     // ---- the rows by the room's state ----
     CHECK(shows({kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus, kCoopRules}));   // (before anything)
-    set_room(HOS_COOP_STATE_LEFT, 0, 0, 0, 0, 0, 0);
+    set_room(HOS_COOP_STATE_LEFT, 0, 0, 0, 0);
     CHECK(shows({kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus, kCoopRules}));
     tab_selected[TAB_COOP] = tab_index(kCoopRules);   // (on Room rules)
-    set_room(HOS_COOP_STATE_CONNECTING, 1, 0, 0, 0, 0, 0);
+    set_room(HOS_COOP_STATE_CONNECTING, 1, 0, 0, 0);
     CHECK(shows({kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus}) && selected_kind() == kCoopAddress);   // (its row gone: the third of the tab)
-    set_room(HOS_COOP_STATE_JOINED, 1, 0, 0, 1, 0, 1);   // (hosting, alone, this game's key known)
+    set_room(HOS_COOP_STATE_JOINED, 1, 1, 0, 1);   // (hosting, alone, this game's key known)
     CHECK(shows({kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus, kCoopReset, kCoopRules}));
-    set_room(HOS_COOP_STATE_JOINED, 1, 0, 0, 1, 1, 1);   // (Saria in, with her key: a player can be removed)
+    set_room(HOS_COOP_STATE_JOINED, 1, 1, 1, 1);   // (Saria in, with her key: a player can be removed)
     CHECK(shows({kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus, kCoopRemove, kCoopReset, kCoopRules}));
-    set_room(HOS_COOP_STATE_JOINED, 1, 0x5eed, 0, 1, 2, 1);   // (offered: only Accept, the remedies stand back)
-    CHECK(shows({kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus, kCoopAccept}));
-    set_room(HOS_COOP_STATE_JOINED, 1, 0x5eed, 1, 1, 2, 1);   // (accepted: the room's values are in force)
+    set_room(HOS_COOP_STATE_JOINED, 1, 1, 2, 1);   // (the room shares at once: nothing to accept, the remedies are the room's rows)
     CHECK(shows({kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus, kCoopRemove, kCoopReset, kCoopRules}));
-    set_room(HOS_COOP_STATE_JOINED, 0, 0, 0, 0, 2, 1);   // (joined another player's room, and not its maker: no remedies)
+    set_room(HOS_COOP_STATE_JOINED, 0, 0, 2, 1);   // (joined another player's room, and not its maker: no remedies)
     CHECK(shows({kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus}));
-    set_room(HOS_COOP_STATE_RECONNECTING, 1, 0x5eed, 0, 0, 0, 0);   // (not offered, and nothing known, while reconnecting)
+    set_room(HOS_COOP_STATE_RECONNECTING, 1, 0, 0, 0);   // (nothing known, while reconnecting)
     CHECK(shows({kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus}));
     {   // (the same view again: nothing changed, nothing to draw)
         bool changed = false;
@@ -197,14 +194,14 @@ int main() {
     }
 
     // ---- what each press asks of the host ----
-    set_room(HOS_COOP_STATE_LEFT, 0, 0, 0, 0, 0, 0);
+    set_room(HOS_COOP_STATE_LEFT, 0, 0, 0, 0);
     n_asked = 0;
     coop_press(row(kCoopHost));   // (outside a room: at once, and with nothing to say: host/coop_menu.c listens on its own)
     CHECK(n_asked == 1 && asked[0].cmd == HOS_COOP_CMD_HOST && !std::strcmp(asked[0].text, "(null)") && !pending);
     text_set(coop_addr_field, "10.0.0.2:43400");
     coop_press(row(kCoopJoin));
     CHECK(n_asked == 2 && asked[1].cmd == HOS_COOP_CMD_JOIN && !std::strcmp(asked[1].text, "10.0.0.2:43400") && !pending);
-    set_room(HOS_COOP_STATE_JOINED, 1, 0, 0, 1, 0, 1);   // (in a room this game holds: leaving is asked for twice)
+    set_room(HOS_COOP_STATE_JOINED, 1, 1, 0, 1);   // (in a room this game holds: leaving is asked for twice)
     n_asked = 0;
     coop_press(row(kCoopHost));
     CHECK(pending == &row(kCoopHost) && n_asked == 0);
@@ -213,17 +210,9 @@ int main() {
     coop_press(row(kCoopJoin));
     CHECK(!pending && n_asked == 1 && asked[0].cmd == HOS_COOP_CMD_JOIN);
     pending = &row(kCoopHost);
-    set_room(HOS_COOP_STATE_LEFT, 0, 0, 0, 0, 0, 0);   // (the room went: what was armed for it goes with it)
+    set_room(HOS_COOP_STATE_LEFT, 0, 0, 0, 0);   // (the room went: what was armed for it goes with it)
     CHECK(!pending);
-    set_room(HOS_COOP_STATE_JOINED, 1, 0x5eed, 0, 1, 2, 1);
-    n_asked = 0;
-    coop_press(row(kCoopAccept));   // (armed: nothing asked yet)
-    CHECK(pending == &row(kCoopAccept) && n_asked == 0);
-    coop_press(row(kCoopAccept));
-    CHECK(!pending && n_asked == 1 && asked[0].cmd == HOS_COOP_CMD_ACCEPT && asked[0].number == 0x5eed);
-    pending = &row(kCoopAccept);
-    set_room(HOS_COOP_STATE_JOINED, 1, 0x5eed, 1, 1, 2, 1);   // (accepted elsewhere: the armed Accept goes with its row)
-    CHECK(!pending);
+    set_room(HOS_COOP_STATE_JOINED, 1, 1, 2, 1);
     coop_remove_at = 0, n_asked = 0;
     press_twice(row(kCoopRemove));
     CHECK(n_asked == 1 && asked[0].cmd == HOS_COOP_CMD_REMOVE && !std::strcmp(asked[0].text, "7c1d-e842-3b90-a5f6"));
@@ -248,16 +237,16 @@ int main() {
         CHECK(coop_removable(coop_now, &chosen) == 0 && !chosen);
     }
     tab_selected[TAB_COOP] = tab_index(kCoopReset);   // (on Reset the pools)
-    room.offer = 0x5eee, room.accepted = 0, room.version++;   // (a new offer, a player came: the remedies stand back)
+    room.remedies = 0, room.version++;   // (this game does not hold the room's key: the remedies stand back)
     {
         bool changed = false;
         coop_refresh(&changed);
-        CHECK(shows({kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus, kCoopAccept}));
+        CHECK(shows({kCoopHost, kCoopJoin, kCoopAddress, kCoopName, kCoopStatus}));
         CHECK(selected_kind() == kCoopAddress);   // (its row gone: the third of the tab, after Host and Join)
     }
     tab_selected[TAB_COOP] = tab_index(kCoopName);   // (on Player name, which is always there)
     std::snprintf(room.member[1].key, sizeof room.member[1].key, "7c1d-e842-3b90-a5f6");   // (Saria's key is known again)
-    room.accepted = 1, room.version++;   // (accepted: the remedies are back)
+    room.remedies = 1, room.version++;   // (the key is back: the remedies are back)
     {
         bool changed = false;
         coop_refresh(&changed);
@@ -359,10 +348,8 @@ int coop_server_parse(const char *text, char *host, size_t cap, uint16_t *port) 
 /* (progress sync, stubbed: its offer, acceptance, remedies and the pools' list, as host/coop_oot.c gives them) */
 static CoopOffer sync_offer;
 static int sync_has, sync_maker, resets, sync_refused;
-static uint32_t accepted_token;
 static char removed_key[32];
 int hos_oot_coop_offer(CoopOffer *out) { *out = sync_offer; return sync_has; }
-int hos_oot_coop_accept(uint32_t token) { accepted_token = token; return sync_has && token == sync_offer.token; }
 int hos_oot_coop_is_maker(void) { return sync_maker; }
 int hos_oot_coop_reset_pools(void) {   /* (host/coop_oot.c: the maker's, and only the maker's is asked for) */
     if (sync_maker) resets++;
@@ -381,7 +368,7 @@ static void real(void) {
     set_env("HOS_COOP_SERVER", NULL), set_env("HOS_COOP_NAME", NULL), set_env("HOS_COOP_PORT", NULL);
     MkwVkCoopView v;
     hos_coop_menu_view(&v);
-    CHECK(v.state == HOS_COOP_STATE_OFF && v.n == 0 && v.offer == 0 && !v.remedies && !v.hosting);
+    CHECK(v.state == HOS_COOP_STATE_OFF && v.n == 0 && !v.remedies && !v.hosting);
     /* (the saved name and address at the start (number 0): kept for the next Host or Join, nothing switched on) */
     CHECK(hos_coop_menu_command(HOS_COOP_CMD_NAME, "Malon", 0) && hos_coop_menu_command(HOS_COOP_CMD_ADDRESS, "", 0) &&
           configures == 0 && commands == 0);
@@ -421,7 +408,7 @@ static void real(void) {
     sync_offer.member[0] = (CoopOfferMember){1, 1, 1, 0, "Malon", "a9e0-31c7-6d58-f2b4", ""};
     sync_offer.member[1] = (CoopOfferMember){3, 1, 0, 0, "Darunia", "d03a-5f17-c2e9-8b44", "Darunia"};
     hos_coop_menu_view(&v);
-    CHECK(v.state == HOS_COOP_STATE_JOINED && v.n == 3 && v.offer == 0x5eed0c0b && !v.accepted && !v.unidentified);
+    CHECK(v.state == HOS_COOP_STATE_JOINED && v.n == 3 && !v.unidentified);
     CHECK(v.remedies && v.port == 43400);
     /* (in the roster's order: 1 Malon the room's maker, 2 this player, 3 Darunia. The others' keys come from the offer,
        this player's from the pools' list; a key accepted under another name is a new offer) */
@@ -430,10 +417,11 @@ static void real(void) {
     CHECK(v.member[1].self && !strcmp(v.member[1].name, "Talon") && !strcmp(v.member[1].key, "4be1-07d2-9a3f-c615") &&
           v.member[1].away);
     CHECK(!strcmp(v.member[2].name, "Darunia") && !strcmp(v.member[2].key, "d03a-5f17-c2e9-8b44") && !v.member[2].accepted);
-    /* (Accept, and the host's remedies) */
+    /* (the members' keys are in force as soon as the room has them: it accepts itself, host/coop_oot.c. A key the room
+       holds under another name than this one is not in force yet, and the host's remedies) */
     sync_offer.accepted = 1;
-    CHECK(hos_coop_menu_command(HOS_COOP_CMD_ACCEPT, NULL, 0x5eed0c0b) && accepted_token == 0x5eed0c0b);
-    CHECK(!hos_coop_menu_command(HOS_COOP_CMD_ACCEPT, NULL, 1234));   /* (not this room's offer) */
+    hos_coop_menu_view(&v);
+    CHECK(v.member[0].accepted && !v.member[2].accepted);   /* (Malon's own key is; Darunia's, held as "Darunia", is not) */
     CHECK(hos_coop_menu_command(HOS_COOP_CMD_REMOVE, "d03a-5f17-c2e9-8b44", 0) && !strcmp(removed_key, "d03a-5f17-c2e9-8b44"));
     CHECK(!hos_coop_menu_command(HOS_COOP_CMD_REMOVE, "", 0));
     CHECK(hos_coop_menu_command(HOS_COOP_CMD_RESET_POOLS, NULL, 0) && resets == 1);
@@ -441,7 +429,7 @@ static void real(void) {
     CHECK(!hos_coop_menu_command(HOS_COOP_CMD_RESET_POOLS, NULL, 0) && resets == 1 && sync_refused == 1);   /* (refused: only the room's maker resets the pools) */
     hos_coop_menu_view(&v);
     CHECK(!v.remedies);
-    puts("PASS: host/coop_menu.c: the room as the tab gets it, its commands to the session, the fields, the port, Accept");
+    puts("PASS: host/coop_menu.c: the room as the tab gets it, its commands to the session, the fields and the port");
 }
 static void demo(void) {
     set_env("HOS_COOP_SERVER", NULL), set_env("HOS_COOP_NAME", NULL), set_env("HOS_COOP_PORT", NULL);
@@ -452,16 +440,13 @@ static void demo(void) {
     CHECK(v.state == HOS_COOP_STATE_CONNECTING && v.hosting && configures == 0 && commands == 0);   /* (the session never asked) */
     clock_ms = 1300;
     hos_coop_menu_view(&v);
-    CHECK(v.state == HOS_COOP_STATE_JOINED && v.remedies && v.n == 1 && v.member[0].self && v.member[0].maker && !v.offer);
+    CHECK(v.state == HOS_COOP_STATE_JOINED && v.remedies && v.n == 1 && v.member[0].self && v.member[0].maker);
     clock_ms = 3100;
     hos_coop_menu_view(&v);
-    CHECK(v.n == 2 && v.unidentified && !v.offer && !strcmp(v.member[1].name, "Saria") && !v.member[1].key[0]);
+    CHECK(v.n == 2 && v.unidentified && !strcmp(v.member[1].name, "Saria") && !v.member[1].key[0]);
     clock_ms = 6100;
     hos_coop_menu_view(&v);
-    CHECK(v.n == 3 && !v.unidentified && v.offer && v.member[1].key[0] && !v.accepted);
-    CHECK(hos_coop_menu_command(HOS_COOP_CMD_ACCEPT, NULL, v.offer) && v.accepted == 0);   /* (the view is what it was) */
-    hos_coop_menu_view(&v);
-    CHECK(v.accepted && v.member[1].accepted && v.member[2].accepted);
+    CHECK(v.n == 3 && !v.unidentified && v.member[1].key[0] && v.member[1].accepted && v.member[2].accepted);   /* (in force the moment the keys are in) */
     clock_ms = 9500;
     hos_coop_menu_view(&v);
     CHECK(v.member[2].away);   /* (Darunia has not been heard from) */
@@ -479,7 +464,7 @@ static void demo(void) {
     CHECK(hos_coop_menu_command(HOS_COOP_CMD_JOIN, "192.168.1.20:43400", 0));
     clock_ms = 20000;
     hos_coop_menu_view(&v);
-    CHECK(v.state == HOS_COOP_STATE_JOINED && !v.hosting && v.n == 3 && v.member[2].self && v.member[0].maker && v.offer);
+    CHECK(v.state == HOS_COOP_STATE_JOINED && !v.hosting && v.n == 3 && v.member[2].self && v.member[0].maker);
     CHECK(hos_coop_menu_command(HOS_COOP_CMD_JOIN, "192.168.1.20:43400", 0));   /* (the row again: left the room) */
     hos_coop_menu_view(&v);
     CHECK(v.state == HOS_COOP_STATE_LEFT);

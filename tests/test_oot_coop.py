@@ -10,9 +10,10 @@ component's two, and the three equipment user's calls the game makes on Link (wh
 calls the frame's and the player's, and the menu and the host agree on the option ids: one header (gpu/vk/oot_coop_opts.h), whose numbers are
 no other row's, each answered or taken by the menu.
 
-The data builders (nx2/coop_bodies.py with nx2/byml_rw.py) are run by hand on a built game folder; what of them needs no game
-is checked here: a BYML document written and read back is the same, node types kept; an actor pack written and read back holds
-the same files; a size table takes a new entry in its place by hash and only ever raises one.
+The game build (nx2/make_game.py) runs the data builders (nx2/coop_bodies.py with nx2/byml_rw.py) into the game folder it
+finishes, so no co-op game ships without the other players' bodies; what of them needs no game is checked here, and that the
+build makes them: a BYML document written and read back is the same, node types kept; an actor pack written and read back
+holds the same files; a size table takes a new entry in its place by hash and only ever raises one.
 
 python -I -B tests/test_oot_coop.py
 """
@@ -267,8 +268,20 @@ def check_builders():
     check(bodies.table_get(table, "Pack/Actor/Nobody.pack")[1] is None, "the size table found an entry it does not have")
 
 
+def check_build():
+    """The game build (nx2/make_game.py) makes the bodies into the game folder it finishes, so no folder needs a step by
+    hand for them; when it cannot, the build says what the game will be missing and ships the game anyway."""
+    text = (ROOT / "nx2" / "make_game.py").read_text(encoding="utf-8")
+    check('run(PY + [os.path.join(HERE, "coop_bodies.py"), out], check=False, output=sys.stderr)' in text,
+          "the game build does not make the other players' bodies into the game folder")
+    check("the co-op bodies were not made: the other players will stand and slide" in text and
+          "the co-op bodies were not made (no zstandard)" in text,
+          "a build that could not make the co-op bodies does not say what is missing")
+
+
 def main():
     check_builders()
+    check_build()
     check_pickup()
     check_life()
     check_equip()

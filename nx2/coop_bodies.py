@@ -21,6 +21,9 @@ host/mods.c loads them:
 Without the mod co-op draws the other players as PouchPlayer, and there is no PvP. Another mod that carries the same tables
 and sorts after 00-coop wins over them: run sizes() on its table then, or the bodies are dropped.
 
+The game build (nx2/make_game.py) runs this into the game folder it finishes, every build and every update, so a folder needs
+no step by hand. Run this file yourself to put the bodies into a folder built before the build did this, or to remake them:
+
     python -I nx2/coop_bodies.py <game folder>
 
 Needs zstandard. Everything written is made from the player's own game files and stays in the game folder: never commit or

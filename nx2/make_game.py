@@ -2464,6 +2464,15 @@ def main(a=None):
              ([] if launcher else ["--incremental"]), check=False, output=sys.stderr):
         print("the button prompts of other controllers were not made: the game shows its own", flush=True)
         shutil.rmtree(prompts, ignore_errors=True)
+    # (hookshot) co-op (host/oot_coop.c): the bodies the other players are drawn as (CoopPlayer_, CoopFoe_) are made from
+    # this folder's own game files into mods/00-coop, so no game folder ships without them and nobody has to know the step
+    # exists. Without the mod the other players stand and slide, hold nothing, and there is no PvP (the game's log says so).
+    # Made again each build, from the romfs in the folder, so updating a folder built before this installs them too. Soft
+    # like the prompts (nx2/coop_bodies.py): single-player needs none of this, so a failure only says what is missing.
+    if importlib.util.find_spec("zstandard") is None:
+        print("the co-op bodies were not made (no zstandard): the other players will stand and slide", flush=True)
+    elif run(PY + [os.path.join(HERE, "coop_bodies.py"), out], check=False, output=sys.stderr):
+        print("the co-op bodies were not made: the other players will stand and slide", flush=True)
     icon = os.path.join(ROOT, "assets", "hookshot.png")
     if LINUX and os.path.exists(icon):   # (the window's icon: host/posix/display_sdl.c)
         copy_writable(icon, os.path.join(out, "hookshot.png"))   # (a second build overwrites the first's)

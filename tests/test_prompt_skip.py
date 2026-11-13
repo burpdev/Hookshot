@@ -88,6 +88,8 @@ class PromptSkipTests(unittest.TestCase):
             self.during(out)
 
     def child(self, command, **kwargs):
+        if "--out" not in command:
+            return 0   # a soft step of the finish stage that is not the prompts (the co-op bodies, nx2/coop_bodies.py)
         a = types.SimpleNamespace(**vars(self.args))
         a.out = command[command.index("--out") + 1]
         try:

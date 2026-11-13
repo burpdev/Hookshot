@@ -1,7 +1,7 @@
 """hookshot_env.txt sets none of co-op's switches.
 
 hookshot_env.txt is a file beside the game that players pass around and packs bring. One that could set HOS_COOP,
-HOS_COOP_SERVER or HOS_COOP_AUTO with HOS_COOP_ROOM would switch co-op on, name its author's relay and put whoever
+HOS_COOP_SERVER or HOS_COOP_AUTO with HOS_COOP_ROOM would switch co-op on, name its author's host and put whoever
 uses it into its author's room. So no name that begins HOS_COOP is taken from it (env_line_allowed in host/hos_main.c):
 co-op is switched on in hookshot_options.ini or the menu, and the variables are for the player's own environment and
 for tests. The file HOS_ENV_FILE names, a test run's own, still sets them.
@@ -43,7 +43,7 @@ def main():
     if not session <= names:
         raise SystemExit("FAIL: host/*.c no longer names %s: this test's list is out of date" % ", ".join(sorted(session - names)))
     names = sorted(names | {"HOS_COOP_ANYTHING_LATER"})
-    values = {"HOS_COOP_SERVER": "relay.example:24680", "HOS_COOP_AUTO": "join", "HOS_COOP_ROOM": "H7K3WM-BCDFGH-234567",
+    values = {"HOS_COOP_SERVER": "host.example:24680", "HOS_COOP_AUTO": "join", "HOS_COOP_ROOM": "H7K3WM-BCDFGH-234567",
               "HOS_COOP_NAME": "Link", "HOS_COOP_PORT": "4000", "HOS_COOP_DROP": "30"}
     lines = "".join("%s=%s\n" % (n, values.get(n, "1")) for n in names)
 

@@ -1,20 +1,24 @@
 """host/coop.c, co-op's session layer, and host/coop_net.c, its sockets, threads and random bytes, without the game
 (tests/coop_session_test.c, compiled with host/coop_proto.c and Monocypher; on Linux with AddressSanitizer and UBSan,
-and a second time with ThreadSanitizer, when the compiler has them). Eight runs at once, each its own process:
+and a second time with ThreadSanitizer, when the compiler has them). Seven runs at once, each its own process:
 
   unit        the operating-system layer on loopback, coop_server_parse, a stop's order, and the process's session off
               (no thread, no socket) unless HOS_COOP or the options file's coop=1 switches it on, and ended (no thread
               left) when the game closes
   unit, menu  co-op off at start, switched on and off by coop_configure (the menu's Co-op tab) while the game runs:
-              off, on, off cycles with a socket open, each off leaving no thread (counted in /proc/self/task) and no
+              off, on, off cycles with a link open, each off leaving no thread (counted in /proc/self/task) and no
               socket (/proc/self/fd), and stops the thread is too slow for. Before taking a baseline, each joined
               fixture helper's specific Linux TID must disappear within a bounded wait; no count range is allowed.
   the same two under ThreadSanitizer (Linux): the co-op thread started, ended and started again beside its callers
-  mock 0/30   two sessions through the test's own relay, which also acts as a hostile one (changed, forged and replayed
-              datagrams, garbage, forged rosters, lies), with 0 % and 30 % of the received datagrams thrown away
-  relay 0/30  the same two through scripts/coop_relay.py on 127.0.0.1, restarted midway, plus the process's session
-              started from the settings by coop_init and, on Linux, a child process ended by SIGTERM, which says
-              nothing (co-op installs no signal handler): the relay drops it for its silence, as its log must say
+  hostile   the hostile host's scenarios alone, each on a port of its own: what a host does to a player that trusts it
+              when it answers nothing, sends bytes that are not a frame, a frame of another version, every refusal it
+              has, a message sealed with another room's key or one it has already sent, or a roster that makes the
+              player the maker
+  mock 0/30   sessions of this process, one hosting on a port of its own and the others reaching it by address, with
+              0 % and 30 % of the frames each receives thrown away: a room hosted, joined, filled, lost and made again
+              on the same port, messages both ways, a member whose link closed abruptly coming back with the id it
+              held, the maker removing a member, the process's own session started from the settings, and on Linux a
+              child process in the room ended by SIGTERM, which says nothing and is dropped when its link closes
 
 Also checks the wiring: the game starts co-op beside the Discord status on both platforms (host/hos_main.c), says
 goodbye when its window closes (host/hos_relaunch.c), and links Winsock and BCrypt on Windows (nx2/build.py).
@@ -22,17 +26,18 @@ goodbye when its window closes (host/hos_relaunch.c), and links Winsock and BCry
 A compiled boundary fixture also checks the actual sender with the real encryption code: the last counter is sent
 once, and exhaustion leaves the room without emitting a wrapped counter.
 The actual Windows socket-opening function is also compiled against a call-recording Winsock stand-in: it must
-request exclusive ownership before binding and close the socket if that request fails. Real cross-family bind
-checks run in unit mode on Windows and Linux; no parallel mode or existing assertion is removed.
+request exclusive ownership before binding and close the socket if that request, the bind, the listen or the move to
+nonblocking fails. Real cross-family bind checks run in unit mode on Windows and Linux, which is where the POSIX
+branch's SO_REUSEADDR is checked (the stand-in is compiled as Windows, so it cannot see that branch); no parallel
+mode or existing assertion is removed.
 
-    python -I -B tests/test_coop_session.py [--cc gcc] [--only unit|mock|relay]   (COOP_TEST_VERBOSE=1: every log line)
+    python -I -B tests/test_coop_session.py [--cc gcc] [--only unit|menu|hostile|mock]   (COOP_TEST_VERBOSE=1: every log line)
 """
 import argparse
 import concurrent.futures
 import os
 from pathlib import Path
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -43,7 +48,6 @@ RUN_ALL_ARGS = ["--cc", "gcc"]
 
 ROOT = Path(__file__).resolve().parents[1]
 MONOCYPHER = ROOT / "third_party" / "monocypher"
-RELAY = ROOT / "scripts" / "coop_relay.py"
 
 
 def compile_fixture(cc, folder, thread_sanitizer=False):
@@ -65,7 +69,6 @@ def compile_fixture(cc, folder, thread_sanitizer=False):
         if r.returncode == 0:
             r = run([cc, "-std=c11", "-D_GNU_SOURCE", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-I" + str(ROOT / "host"),
                      str(ROOT / "tests" / "coop_session_test.c"), str(ROOT / "host" / "coop.c"), str(ROOT / "host" / "coop_net.c"),
-                     str(ROOT / "host" / "coop_relay.c"),
                      str(ROOT / "host" / "coop_proto.c"), str(mono), "-o", str(exe)] + extra + libs)
         if r.returncode == 0:
             print("compiled%s" % (" with " + " ".join(extra) if extra else ""))
@@ -77,7 +80,6 @@ def compile_fixture(cc, folder, thread_sanitizer=False):
             print(r.stdout + r.stderr)
             raise SystemExit("FAIL: the fixture does not compile")
         print("(not with %s: %s)" % (" ".join(extra), ((r.stdout + r.stderr).strip().splitlines() or [""])[-1]))
-
 
 
 
@@ -180,6 +182,11 @@ def check_counter(cc, folder, flags, source):
     subprocess.run([str(exe)], check=True, timeout=30)
 
 
+# host/coop_net.c's coop_tcp_listen, compiled as the Windows branch with every socket call recorded: the port must be
+# owned before it is bound, and a socket that cannot be owned, bound, listened on or made nonblocking is closed rather
+# than left open. The POSIX branch (SO_REUSEADDR, which lets a port be hosted on again right after a game closed
+# without letting a second socket share a live one) is checked by the real binds of tests/coop_session_test.c's
+# check_listen_ownership, which run in unit mode on both platforms.
 BIND_FIXTURE = r'''
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
@@ -194,26 +201,25 @@ BIND_FIXTURE = r'''
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL bind: %s\n", #x); exit(1); } } while (0)
 typedef int Sock;
 typedef int socklen_t;
-typedef int BOOL;
-typedef unsigned long DWORD;
-typedef unsigned long u_long;
-enum { SOCK_NONE = -1, AF_INET6 = 10, SOCK_DGRAM = 2, IPPROTO_UDP = 17, IPPROTO_IPV6 = 41,
-       IPV6_V6ONLY = 27, SOL_SOCKET = 1, SO_EXCLUSIVEADDRUSE = 100, FIONBIO = 200, IOC_VENDOR = 300, FALSE = 0 };
-#define _WSAIOW(a, b) ((a) + (b))
+enum { SOCK_NONE = -1, AF_INET6 = 10, SOCK_STREAM = 1, IPPROTO_TCP = 6, IPPROTO_IPV6 = 41,
+       IPV6_V6ONLY = 27, SOL_SOCKET = 1, SO_EXCLUSIVEADDRUSE = 100 };
 struct in6_addr { unsigned char bytes[16]; };
 static const struct in6_addr in6addr_any = {{0}};
 struct sockaddr { unsigned short family; };
 struct sockaddr_in6 { unsigned short sin6_family; uint16_t sin6_port; struct in6_addr sin6_addr; };
-typedef struct { Sock s; uint16_t port; } CoopUdp;
-static int exclusive, bound, closed, fail_exclusive, fail_bind;
+typedef struct { Sock s; uint16_t port; } CoopTcpListen;
+enum { COOP_TCP_MAX = 32 };
+static int exclusive, bound, listed, nonblocking, closed;
+static int fail_exclusive, fail_bind, fail_listen, fail_nonblock;
+static uint16_t want;
 static int net_up(void) { return 1; }
 static Sock socket(int family, int kind, int protocol) {
-    CHECK(family == AF_INET6 && kind == SOCK_DGRAM && protocol == IPPROTO_UDP);
-    exclusive = bound = closed = 0;
+    CHECK(family == AF_INET6 && kind == SOCK_STREAM && protocol == IPPROTO_TCP);
+    exclusive = bound = listed = nonblocking = closed = 0;
     return 7;
 }
 static int setsockopt(Sock s, int level, int option, const char *value, int size) {
-    CHECK(s == 7 && !bound && size == sizeof(int));
+    CHECK(s == 7 && !bound && size == sizeof(int));   /* (every option is set before the bind) */
     if (option == SO_EXCLUSIVEADDRUSE) {
         CHECK(level == SOL_SOCKET && *(const int *)value == 1);
         if (fail_exclusive) return -1;
@@ -222,39 +228,49 @@ static int setsockopt(Sock s, int level, int option, const char *value, int size
     return 0;
 }
 static int bind(Sock s, const struct sockaddr *address, int size) {
+    const struct sockaddr_in6 *six = (const struct sockaddr_in6 *)address;
     CHECK(s == 7 && exclusive && !closed && address && size == sizeof(struct sockaddr_in6));
+    CHECK(six->sin6_family == AF_INET6 && six->sin6_port == want && !memcmp(six->sin6_addr.bytes, in6addr_any.bytes, 16));
     bound++;
     return fail_bind ? -1 : 0;
 }
+static int listen(Sock s, int backlog) {
+    CHECK(s == 7 && bound && !closed && backlog == COOP_TCP_MAX);
+    if (fail_listen) return -1;
+    listed = 1;
+    return 0;
+}
 static int getsockname(Sock s, struct sockaddr *address, socklen_t *size) {
-    CHECK(s == 7 && bound && *size == sizeof(struct sockaddr_in6));
-    ((struct sockaddr_in6 *)address)->sin6_port = 32123;
+    CHECK(s == 7 && listed && !closed && *size == sizeof(struct sockaddr_in6));
+    ((struct sockaddr_in6 *)address)->sin6_port = 32123;   /* (the port the stand-in gave the wildcard bind) */
     return 0;
 }
 static void sock_close(Sock s) { CHECK(s == 7 && !closed); closed++; }
 static uint16_t htons(uint16_t n) { return n; }
 static uint16_t ntohs(uint16_t n) { return n; }
-static int WSAIoctl(Sock s, int code, BOOL *input, int input_size, void *output, int output_size,
-                    DWORD *got, void *overlapped, void *completion) {
-    CHECK(s == 7 && bound && code && input && input_size && got);
-    (void)output; (void)output_size; (void)overlapped; (void)completion;
-    return 0;
+static int sock_nonblock(Sock s) {
+    CHECK(s == 7 && listed && !closed);
+    if (fail_nonblock) return 0;
+    nonblocking = 1;
+    return 1;
 }
-static int ioctlsocket(Sock s, int command, u_long *on) {
-    CHECK(s == 7 && bound && command == FIONBIO && *on == 1);
-    return 0;
-}
-@@OPEN@@
+@@LISTEN@@
 int main(void) {
-    CoopUdp *u = coop_udp_open(0);
-    CHECK(u && exclusive && bound == 1 && !closed && u->port == 32123);
-    sock_close(u->s);
-    free(u);
+    want = 0;
+    CoopTcpListen *l = coop_tcp_listen(0);
+    CHECK(l && exclusive && bound == 1 && listed && nonblocking && !closed && l->port == 32123);
+    sock_close(l->s);
+    free(l);
     fail_exclusive = 1;
-    CHECK(!coop_udp_open(0) && !bound && closed == 1);
-    fail_exclusive = 0, fail_bind = 1;
-    CHECK(!coop_udp_open(0) && bound == 1 && closed == 1);
-    puts("PASS: Windows UDP ownership precedes bind; failed exclusivity and bind close the socket");
+    CHECK(!coop_tcp_listen(0) && !bound && closed == 1);
+    fail_exclusive = 0, fail_bind = 1, want = 32123;
+    CHECK(!coop_tcp_listen(32123) && bound == 1 && closed == 1);
+    fail_bind = 0, fail_listen = 1;
+    CHECK(!coop_tcp_listen(32123) && bound == 1 && !listed && closed == 1);
+    fail_listen = 0, fail_nonblock = 1;
+    CHECK(!coop_tcp_listen(32123) && listed && !nonblocking && closed == 1);
+    puts("PASS: Windows port ownership precedes bind; a socket that cannot be owned, bound, listened on or made "
+         "nonblocking is closed");
     return 0;
 }
 '''
@@ -262,103 +278,41 @@ int main(void) {
 
 def check_bind(cc, folder, flags, source):
     src, exe = folder / "bind.c", folder / "bind.exe"
-    # The two platform branches each open an if, with one shared closer: raw brace counting cannot extract it.
-    start = source.index("CoopUdp *coop_udp_open(")
-    opened = source[start:source.index("\nuint16_t coop_udp_port(", start)]
-    src.write_text(BIND_FIXTURE.replace("@@OPEN@@", opened), encoding="utf-8")
+    start = source.index("CoopTcpListen *coop_tcp_listen(")
+    opened = source[start:source.index("\nuint16_t coop_tcp_listen_port(", start)]
+    src.write_text(BIND_FIXTURE.replace("@@LISTEN@@", opened), encoding="utf-8")
     subprocess.run([cc, "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", str(src), "-o", str(exe)] + flags,
                    check=True, timeout=300)
     subprocess.run([str(exe)], check=True, timeout=30)
 
 
-def free_udp_port():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-
-class RelayProc:
-    """scripts/coop_relay.py as a process on a fixed port, so that it can be stopped and started again. Its log is kept
-    across restarts, for a failure's message."""
-
-    def __init__(self, port):
-        self.port, self.p, self.log, self.reader = port, None, [], None
-
-    def _read(self, out):
-        try:
-            for line in out:
-                self.log.append(line.rstrip())
-        except (OSError, ValueError):
-            pass   # closed by stop()
-
-    def start(self):
-        self.p = subprocess.Popen([sys.executable, "-I", str(RELAY), "--host", "127.0.0.1", "--port", str(self.port), "--log-joins",
-                                   "--log-addrs"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        line = self.p.stdout.readline()
-        self.log.append(line.rstrip())
-        if "listening" not in line:
-            raise RuntimeError("the relay did not start: " + line)
-        self.reader = threading.Thread(target=self._read, args=(self.p.stdout,), daemon=True)
-        self.reader.start()
-
-    def stop(self):
-        if self.p:
-            self.p.kill()
-            self.p.wait()
-            self.reader.join(5)
-            self.p.stdout.close()
-            self.p = None
-            self.log.append("(the relay stopped)")
-
-
-def run_mode(exe, name, args, relay_drop=None, work=None):
+def run_mode(exe, name, args, work):
     """One run of the fixture: (name, passed, its output)."""
-    relay = None
     cmd = [str(exe)] + (args or [])
-    if relay_drop is not None:
-        relay = RelayProc(free_udp_port())
-        relay.start()
-        cmd += ["--relay", "127.0.0.1:%d" % relay.port, "--drop", str(relay_drop), "--work", str(work)]
+    if work:
+        cmd += ["--work", str(work)]
     started = time.monotonic()
-    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(ROOT))
-    lines, restarted = [], False
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(ROOT))
+    lines = []
     timer = threading.Timer(480, p.kill)
     timer.start()
     try:
         for line in p.stdout:
             lines.append(line.rstrip())
-            if "coop-session-test: restart the relay now" in line and relay:
-                relay.stop()
-                time.sleep(0.3)
-                relay.start()
-                restarted = True
-                p.stdin.write("restarted\n")
-                p.stdin.flush()
         code = p.wait()
     finally:
         timer.cancel()
-        p.stdin.close()
         p.stdout.close()
-        if relay:
-            relay.stop()
     text = "\n".join(lines)
-    # (the child ended by SIGTERM said no goodbye: the relay's own line for it is "dropped, silent 15 s", not "left")
-    dropped = relay is None or os.name == "nt" or any("Player-" in l and "dropped, silent 15 s" in l for l in relay.log)
-    if not dropped:
-        text += "\nFAIL: the relay's log has no 'Player-xxxx (member 3) dropped, silent 15 s' line for the child ended by SIGTERM"
-    ok = code == 0 and "coop-session-test: passed" in text and (relay is None or restarted) and dropped
+    ok = code == 0 and "coop-session-test: passed" in text
     head = "--- %s: %s in %.1f s (exit %d)" % (name, "passed" if ok else "FAILED", time.monotonic() - started, code)
-    if relay and (not ok or os.environ.get("COOP_TEST_VERBOSE")):
-        text += "\n--- the relay's log ---\n" + "\n".join(relay.log[-300:])
     return name, ok, head + "\n" + text
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--cc", default=os.environ.get("CC") or shutil.which("gcc") or shutil.which("clang") or "gcc")
-    p.add_argument("--only", choices=("unit", "mock", "relay"))
+    p.add_argument("--only", choices=("unit", "menu", "hostile", "mock"))
     a = p.parse_args()
     check_wiring()
     with tempfile.TemporaryDirectory(prefix="hookshot-coop-session-") as temp:
@@ -366,20 +320,25 @@ def main():
         exe, flags = compile_fixture(a.cc, temp)
         check_counter(a.cc, temp, flags, (ROOT / "host/coop.c").read_text(encoding="utf-8"))
         check_bind(a.cc, temp, flags, (ROOT / "host" / "coop_net.c").read_text(encoding="utf-8"))
-        runs = [("unit", exe, ["--unit"], None), ("unit, menu", exe, ["--unit-menu"], None),
-                ("mock, 0 % lost", exe, ["--mock", "--drop", "0"], None), ("mock, 30 % lost", exe, ["--mock", "--drop", "30"], None),
-                ("relay, 0 % lost", exe, None, 0), ("relay, 30 % lost", exe, None, 30)]
+        # (the first field is what --only selects by; the second is the name the run is reported under)
+        runs = [({"unit"}, "unit", exe, ["--unit"], None),
+                ({"unit", "menu"}, "unit, menu", exe, ["--unit-menu"], None),
+                ({"hostile"}, "hostile", exe, ["--hostile"], None),
+                ({"mock"}, "mock, 0 % lost", exe, ["--mock", "--drop", "0"], True),
+                ({"mock"}, "mock, 30 % lost", exe, ["--mock", "--drop", "30"], True)]
         tsan_build = compile_fixture(a.cc, temp, thread_sanitizer=True)
         if tsan_build:   # (a data race it reports ends the run with exit 66)
             tsan, _ = tsan_build
-            runs[2:2] = [("unit, ThreadSanitizer", tsan, ["--unit"], None), ("unit, menu, ThreadSanitizer", tsan, ["--unit-menu"], None)]
-        runs = [r for r in runs if not a.only or r[0].startswith(a.only)]
+            runs[2:2] = [({"unit"}, "unit, ThreadSanitizer", tsan, ["--unit"], None),
+                         ({"unit", "menu"}, "unit, menu, ThreadSanitizer", tsan, ["--unit-menu"], None)]
+        runs = [r for r in runs if not a.only or a.only in r[0]]
         works = []
         for i in range(len(runs)):
             works.append(temp / ("work%d" % i))
             works[-1].mkdir()
         with concurrent.futures.ThreadPoolExecutor(len(runs)) as pool:
-            results = list(pool.map(lambda ir: run_mode(ir[1][1], ir[1][0], ir[1][2], ir[1][3], works[ir[0]]), enumerate(runs)))
+            results = list(pool.map(lambda ir: run_mode(ir[1][2], ir[1][1], ir[1][3], works[ir[0]] if ir[1][4] else None),
+                                    enumerate(runs)))
     failed = [name for name, ok, _ in results if not ok]
     for _, _, text in results:
         print(text)

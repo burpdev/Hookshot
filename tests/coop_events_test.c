@@ -1,5 +1,5 @@
-// Game-free session event tests. The real session sender, envelope and receiver run over loopback;
-// only the relay's scheduling is simulated, so loss and reordering are deterministic.
+// Game-free session event tests. The real session sender, envelope and receiver run over loopback TCP; the fixture
+// holds the other end of each link, so loss and reordering are its own choice and stay deterministic.
 #ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
 #endif
@@ -11,7 +11,8 @@ int hos_ini_option(const char *key, int otherwise) { (void)key; return otherwise
 int hos_ini_text(const char *key, char *out, size_t n) { (void)key; (void)out; (void)n; return 0; }
 
 static CoopSess *a, *b;
-static CoopUdp *relay;
+static CoopTcpListen *bus_port[2];   // (the fixture's listening end of each session's link)
+static CoopTcpSet *bus[2];           // (the connection each session's frames arrive on)
 static unsigned received, raw_received, dropped, forwarded;
 static uint64_t last_id, clock_ms;
 static uint8_t expected[COOP_EVENT_MAX];
@@ -46,18 +47,35 @@ static void grant(CoopSess *s, uint32_t members) {
     coop_sess_accept_members(s, &v, members);
 }
 
+/* A session's link and the fixture's end of it: what the session sends is read back here as whole frames. */
+static void link_up(CoopSess *s, int which) {
+    CoopAddr at;
+    assert(coop_net_resolve("127.0.0.1", coop_tcp_listen_port(bus_port[which]), &at));
+    CoopTcp *mine = coop_tcp_connect(&at, 3000);
+    assert(mine);
+    CoopTcp *theirs = NULL;
+    for (int i = 0; i < 200 && !(theirs = coop_tcp_accept(bus_port[which], NULL)); i++) coop_sleep_ms(5);
+    assert(theirs);
+    s->link = coop_tcp_set_new(NULL, LINK_SLOTS);
+    bus[which] = coop_tcp_set_new(NULL, 1);
+    assert(s->link && bus[which]);
+    s->own_slot = coop_tcp_add(s->link, mine);
+    assert(s->own_slot && coop_tcp_add(bus[which], theirs));
+}
+
 static void setup(void) {
     CoopParams p = {.name = "test", .on = 0};
     a = coop_sess_new(&p), b = coop_sess_new(&p);
-    relay = coop_udp_open(0);
-    assert(a && b && relay);
+    bus_port[0] = coop_tcp_listen(0);
+    bus_port[1] = coop_tcp_listen(0);
+    assert(a && b && bus_port[0] && bus_port[1] &&
+           coop_tcp_listen_port(bus_port[0]) != coop_tcp_listen_port(bus_port[1]));
     CoopRoster roster = {.n = 2, .m = {{.id = 1, .session = 101}, {.id = 2, .session = 202}}};
     CoopSess *pair[] = {a, b};
     for (int i = 0; i < 2; i++) {
         CoopSess *s = pair[i];
-        s->sock = coop_udp_open(0);
-        assert(s->sock && coop_net_resolve("127.0.0.1", coop_udp_port(relay), &s->relay));
-        s->relay_known = 1, s->room = 17, s->self = i + 1;
+        link_up(s, i);
+        s->room = 17, s->self = i + 1;
         s->session = s->room_session = i ? 202 : 101;
         memcpy(s->secret, "H7K3WMBCDFGH234567", COOP_SECRET_LEN + 1);
         coop_room_keys(s->secret, s->locator, s->msg_key);
@@ -81,29 +99,51 @@ static void deliver(const uint8_t *bytes, size_t n) {
     forwarded++;
 }
 
+/* One frame taken off a link: what it holds, and whether the fixture lets it through. */
+static void take(const uint8_t *bytes, size_t n, unsigned loss) {
+    CoopHdr h;
+    const uint8_t *payload;
+    uint8_t plain[COOP_MAX_MESSAGE], kind;
+    size_t count;
+    assert(coop_dgram_parse(bytes, n, &h, &payload));
+    assert(coop_open(payload, h.len, a->msg_key, h.src, h.dst, &kind, plain, sizeof plain, &count));
+    if (kind == COOP_K_EVENT) {
+        CoopEventPart part;
+        assert(coop_event_part_parse(plain, count, &part));
+        sent_parts[part.part]++;
+        if (!saved_n) memcpy(saved, bytes, n), saved_n = n;
+        if (part.part == lose_part && !lost_part) { lost_part = 1; dropped++; return; }
+    }
+    if (kind == COOP_K_EVENT_ACK && ack_loss) { dropped++; return; }
+    rng = rng * 1664525u + 1013904223u;
+    if (rng % 100 < loss) { dropped++; return; }
+    assert(npending < 256);
+    memcpy(pending[npending].bytes, bytes, n);
+    pending[npending++].n = n;
+}
+
 static void collect(unsigned loss) {
-    uint8_t bytes[COOP_MAX_DGRAM], plain[COOP_MAX_MESSAGE], kind;
-    CoopAddr from;
-    int n;
-    while ((n = coop_udp_recv(relay, bytes, sizeof bytes, &from, 0)) > 0) {
-        CoopHdr h;
-        const uint8_t *payload;
-        size_t count;
-        assert(coop_dgram_parse(bytes, (size_t)n, &h, &payload));
-        assert(coop_open(payload, h.len, a->msg_key, h.src, h.dst, &kind, plain, sizeof plain, &count));
-        if (kind == COOP_K_EVENT) {
-            CoopEventPart part;
-            assert(coop_event_part_parse(plain, count, &part));
-            sent_parts[part.part]++;
-            if (!saved_n) memcpy(saved, bytes, (size_t)n), saved_n = (size_t)n;
-            if (part.part == lose_part && !lost_part) { lost_part = 1; dropped++; continue; }
-        }
-        if (kind == COOP_K_EVENT_ACK && ack_loss) { dropped++; continue; }
-        rng = rng * 1664525u + 1013904223u;
-        if (rng % 100 < loss) { dropped++; continue; }
-        assert(npending < 256);
-        memcpy(pending[npending].bytes, bytes, (size_t)n);
-        pending[npending++].n = (size_t)n;
+    uint8_t bytes[COOP_MAX_DGRAM];
+    for (int which = 0; which < 2; which++) {
+        int slot, n;
+        while ((n = coop_tcp_next(bus[which], bytes, sizeof bytes, &slot, 0)) > 0) take(bytes, (size_t)n, loss);
+    }
+}
+
+/* A frame still on its way over the loopback link: waited for, so a case never reads a counter too early. */
+static void settle(void) {
+    uint8_t bytes[COOP_MAX_DGRAM];
+    for (int which = 0; which < 2; which++) {
+        int slot, n;
+        while ((n = coop_tcp_next(bus[which], bytes, sizeof bytes, &slot, 50)) > 0) take(bytes, (size_t)n, 0);
+    }
+}
+
+static void flush(int reorder) {
+    if (reorder) while (npending) { Packet *p = &pending[--npending]; deliver(p->bytes, p->n); }
+    else {
+        for (unsigned i = 0; i < npending; i++) deliver(pending[i].bytes, pending[i].n);
+        npending = 0;
     }
 }
 
@@ -112,14 +152,10 @@ static void pump(unsigned milliseconds, unsigned loss, int reorder) {
         clock_ms += 8;
         events_tick(a, clock_ms), events_tick(b, clock_ms);
         collect(loss);
-        if (!reorder || tick % 128 == 120 || tick + 8 >= milliseconds) {
-            if (reorder) while (npending) { Packet *p = &pending[--npending]; deliver(p->bytes, p->n); }
-            else {
-                for (unsigned i = 0; i < npending; i++) deliver(pending[i].bytes, pending[i].n);
-                npending = 0;
-            }
-        }
+        if (!reorder || tick % 128 == 120 || tick + 8 >= milliseconds) flush(reorder);
     }
+    settle();
+    flush(reorder);
 }
 
 static unsigned queued(void) {
@@ -372,6 +408,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[1], "delayed-ack")) test_receiver_reset(1);
     else if (!strcmp(argv[1], "reaccept-step")) test_reaccept_between_steps();
     else assert(0);
-    coop_sess_free(a), coop_sess_free(b), coop_udp_close(relay);
+    coop_sess_free(a), coop_sess_free(b);
+    coop_tcp_set_free(bus[0]), coop_tcp_set_free(bus[1]);
+    coop_tcp_listen_close(bus_port[0]), coop_tcp_listen_close(bus_port[1]);
     return 0;
 }

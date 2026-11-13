@@ -1,6 +1,6 @@
-# Byte vectors of the co-op wire format, protocol 2. Written by `python -I -B tests/test_coop_relay.py --write-vectors`,
-# read by tests/test_coop_relay.py and by tests/coop_proto_test.c (tests/test_coop_proto.py); each side checks its codec
-# against them. Hex is lower case, "-" is empty. Fields are tokens; a name is hex of its UTF-8 bytes.
+# Byte vectors of the co-op wire format, protocol 2. Read by tests/coop_proto_test.c (tests/test_coop_proto.py), which
+# checks coop_proto.c against them: every one parses to its fields and packs back to the same bytes. Hex is lower case,
+# "-" is empty. Fields are tokens; a name is hex of its UTF-8 bytes.
 #
 # tag <name> <key> <message> <BLAKE2b-64>                    keyed BLAKE2b with 8 bytes of output: the datagram tag
 # secret <canonical|-> <text, the rest of the line>          normalisation: the secret a text means, - for none

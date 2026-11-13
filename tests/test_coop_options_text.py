@@ -1,6 +1,6 @@
 """hookshot_options.ini's text values (host/nn_applet.c ini_text, hos_ini_text): a long line is read whole.
 
-Co-op keeps the relay's address in the options file (coop_server=, up to 159 bytes in host/coop.c; a host name alone may
+Co-op keeps the host it joins in the options file (coop_server=, up to 159 bytes in host/coop.c; a host name alone may
 be 253). The reader took a line in pieces of 79 bytes: a longer value was cut, and the rest of the line was read as a
 line of its own, so text inside a value could be taken for a setting. Its buffer is 256 bytes now, the size the menu's
 own save (gpu/vk/vk_menu.cpp) reads the lines it keeps with.
@@ -33,14 +33,14 @@ def main():
     fn = block(applet, "static int ini_text(const char *key, char *out, size_t size) {")
     if "int hos_ini_text(const char *key, char *out, size_t size) { return ini_text(key, out, size); }" not in applet:
         raise SystemExit("FAIL: host/nn_applet.c's hos_ini_text is not ini_text any more: this test reads the wrong function")
-    # (159 bytes, the longest relay text host/coop.c keeps; from its 68th byte on it reads like a line that switches co-op off)
-    relay = "a" * 67 + "coop=0." + "b" * (159 - 67 - 7 - 6) + ":24680"
-    assert len(relay) == 159
+    # (159 bytes, the longest coop_server value host/coop.c keeps; from its 68th byte on it reads like a line that switches co-op off)
+    server = "a" * 67 + "coop=0." + "b" * (159 - 67 - 7 - 6) + ":24680"
+    assert len(server) == 159
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         (tmp / "hookshot_options.ini").write_bytes(("resolution=3\ncoop=1\ncoop_name=first\ncoop_server=%s\ncoop_name=Link\r\n"
-                                                    "coop_port=4000" % relay).encode())
+                                                    "coop_port=4000" % server).encode())
         exe = str(tmp / "hookshot").replace("\\", "\\\\")
         fixture = r'''#define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
@@ -56,10 +56,10 @@ static DWORD hos_game_path_a(char *out, DWORD size) {   /* (host/hos_paths.h: th
 }
 ''' + fn + r'''
 int main(void) {
-    static const char relay[] = "''' + relay + r'''";
+    static const char server[] = "''' + server + r'''";
     char text[256] = "";
-    CHECK(ini_text("coop_server", text, sizeof text) && !strcmp(text, relay), "coop_server= of %d bytes is read whole (%d bytes read: %s)",
-          (int)strlen(relay), (int)strlen(text), text);
+    CHECK(ini_text("coop_server", text, sizeof text) && !strcmp(text, server), "coop_server= of %d bytes is read whole (%d bytes read: %s)",
+          (int)strlen(server), (int)strlen(text), text);
     CHECK(ini_text("coop", text, sizeof text) && !strcmp(text, "1"), "coop= is its own line's 1, not text inside a longer line (%s)", text);
     CHECK(ini_text("coop_name", text, sizeof text) && !strcmp(text, "Link"), "the last line that sets a key is taken, its line end cut (%s)", text);
     CHECK(ini_text("coop_port", text, sizeof text) && !strcmp(text, "4000"), "a last line without a line end (%s)", text);
@@ -67,7 +67,7 @@ int main(void) {
     char small[8] = "";
     CHECK(ini_text("coop_server", small, sizeof small) && !strcmp(small, "aaaaaaa"), "a value is cut to the caller's buffer (%s)", small);
     CHECK(!ini_text("coop_serve", text, sizeof text) && !ini_text("missing", text, sizeof text), "a key that is not there");
-    if (!fails) printf("PASS: hookshot_options.ini's text values: a relay address of %d bytes is read whole\n", (int)strlen(relay));
+    if (!fails) printf("PASS: hookshot_options.ini's text values: a host address of %d bytes is read whole\n", (int)strlen(server));
     return fails != 0;
 }
 '''

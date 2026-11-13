@@ -1,14 +1,12 @@
 // host/coop_proto.c, the co-op wire format, without the game: compiled by tests/test_coop_proto.py with Monocypher.
 //
 //   coop_proto_test <tests/coop_vectors.txt>   every check below; exit 1 when one fails
-//   coop_proto_test --sealed                   the "sealed" vectors' payloads, made by this codec (Python's standard
-//                                              library has no XChaCha20-Poly1305: tests/test_coop_relay.py keeps them)
 //
 // 1. Known answers: XChaCha20-Poly1305 (Monocypher's own test vector); sealing and opening (the largest message round
 //    trips; a changed byte, another sender, receiver or room key opens nothing); EdDSA signatures (a changed byte or
 //    another key does not check); random secrets (every one valid, every symbol about as often), how one is shown.
-// 2. The byte vectors of tests/coop_vectors.txt, which scripts/coop_relay.py is checked against too: every message
-//    parses to its fields and packs to the same bytes, every datagram's tag verifies, and every malformed one is refused.
+// 2. The byte vectors of tests/coop_vectors.txt: every message parses to its fields and packs to the same bytes,
+//    every datagram's tag verifies, and every malformed one is refused.
 // 3. Random bytes and changed copies of valid datagrams into every parser: nothing crashes, a POS that parses packs to the
 //    same bytes, and a changed datagram's tag does not verify.
 // 4. The POS counter (coop_pos_fresh): a pose sent again or older is dropped, also 35000 poses back; another session in
@@ -43,11 +41,6 @@ static int unhex(const char *text, uint8_t *out, size_t cap) {
         out[i] = (uint8_t)(a << 4 | b);
     }
     return (int)(n / 2);
-}
-
-static void print_hex(const uint8_t *p, size_t n) {
-    if (!n) fputs("-", stdout);
-    for (size_t i = 0; i < n; i++) printf("%02x", p[i]);
 }
 
 static uint64_t rng_state = 0x9E3779B97F4A7C15ull;
@@ -526,33 +519,9 @@ static void check_pos_counter(void) {
            "a pose forged 30000 ahead held the sender's own out %lld ms (%d poses)\n", waited, held);
 }
 
-// ---- the sealed vectors, for tests/test_coop_relay.py's SEALED table
-
-static void print_sealed(void) {
-    static const struct { const char *name; uint8_t src, dst; uint64_t session; uint32_t counter; uint8_t kind; const char *message; } v[] = {
-        {"test", 3, 255, 0x0123456789abcdefull, 1, 0xf0, "hello"},
-        {"empty", 1, 2, 0xfedcba9876543210ull, 0xffffffffu, 0x03, ""},
-    };
-    uint8_t mk[COOP_MSG_KEY_LEN], box[COOP_MAX_PAYLOAD];
-    coop_room_keys(ROOM_SECRET, NULL, mk);
-    for (size_t i = 0; i < sizeof v / sizeof *v; i++) {
-        size_t m = strlen(v[i].message);
-        size_t n = coop_seal(box, sizeof box, mk, v[i].src, v[i].dst, v[i].session, v[i].counter, v[i].kind, v[i].message, m);
-        printf("%s %u %u %016llx %u %u ", v[i].name, v[i].src, v[i].dst, (unsigned long long)v[i].session, v[i].counter, v[i].kind);
-        print_hex((const uint8_t *)v[i].message, m);
-        putchar(' ');
-        print_hex(box, n);
-        putchar('\n');
-    }
-}
-
 int main(int argc, char **argv) {
-    if (argc == 2 && !strcmp(argv[1], "--sealed")) {
-        print_sealed();
-        return 0;
-    }
     if (argc != 2) {
-        fprintf(stderr, "usage: coop_proto_test <tests/coop_vectors.txt> | --sealed\n");
+        fprintf(stderr, "usage: coop_proto_test <tests/coop_vectors.txt>\n");
         return 2;
     }
     check_crypto();

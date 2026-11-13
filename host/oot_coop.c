@@ -920,6 +920,8 @@ static void co_events(void) {
             }
             if (!quiet[0]) co_note("%s found %s", who, label);
         } else if (text[0] == 'E' && text[1] == ' ') {   /* that player's Link holds this: kept for their body */
+            static int heard;                             /* (a few lines each run: did the room really bring them) */
+            if (heard < 40) heard++, hos_log("coop: heard from the room: %s", text), hos_log_flush();
             int slot = 0, num = 0;
             char name[CO_AS_NAME] = "";
             if (sscanf(text + 2, "%d %47s %d", &slot, name, &num) >= 2 && slot >= 0 && slot < CO_EQ_SLOTS) {

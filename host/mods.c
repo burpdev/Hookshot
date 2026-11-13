@@ -207,6 +207,16 @@ int hos_mods_file(const char *rel, char *out, size_t cap) {
     return 1;
 }
 
+/* host/oot_coop.c: does a mod provide this exact RomFS file, for a caller that names it in two parts (the folder and
+   the file, then the extension: "pack/actor/coopplayer_child" and ".pack.zs"). The mod table only, not the game's own
+   files: this asks whether someone installed the thing. */
+int hos_mods_has(const char *prefix, const char *suffix) {
+    char rel[MAX_PATH];
+    snprintf(rel, sizeof rel, "%s%s", prefix, suffix);
+    char host[MAX_PATH];
+    return hos_mods_file(rel, host, sizeof host);
+}
+
 /* nn_fs.c, listing a RomFS folder: fn(arg, name, is_dir, size) for each mod entry directly in it that the game's own
    folder (base_dir, a host path; may not exist) does not have. Returns how many. */
 int hos_mods_dir_extras(const char *rel, const char *base_dir, void (*fn)(void *, const char *, int, uint64_t),

@@ -607,6 +607,8 @@ static void forward_data(CoopSess *s, int from, uint8_t dst, const uint8_t *p, u
     if (k) {
         for (int id = 2; id <= COOP_MAX_MEMBERS; id++) {
             if (!s->link[id]) continue;
+            if (id == from) continue;   // (the sender wrote this line and has it already: sending it back makes
+                                        //  their game take its own position and equipment as another player's)
             if (dst != COOP_DST_ALL && dst != id) continue;
             if (coop_tcp_send(s->link[id], frame, k)) bump(&s->n_tx);
         }

@@ -358,10 +358,15 @@ typedef struct {
 static Room room;
 
 static void on_message(int from, const uint8_t *bytes, size_t n, void *user) {
-    (void)user;
     room.messages++;
     if (from == 1 && n >= 1) room.seen[0] = bytes[0];
     if (from == 0) room.from_self++;
+    if (user) {   // (and what this session itself wrote, thrown back at it: the room must never do that, or the
+                  //  game takes its own place and holds as another player's)
+        CoopView v;
+        coop_sess_view((CoopSess *)user, &v);
+        if (v.state == COOP_JOINED && v.self && from == v.self) room.from_self++;
+    }
 }
 static void on_event(int from, uint64_t session, uint64_t id, const uint8_t *bytes, size_t n, void *user) {
     (void)user; (void)session;
@@ -431,8 +436,8 @@ static void test_room(void) {
     CHECK(a && b && c, "a session would not be made");
     if (!a || !b || !c) return;
     Runner ra, rb, rc;
-    assert(coop_sess_on_message(b, COOP_K_LINE, on_message, NULL) == 1);
-    assert(coop_sess_on_message(c, COOP_K_LINE, on_message, NULL) == 1);
+    assert(coop_sess_on_message(b, COOP_K_LINE, on_message, b) == 1);
+    assert(coop_sess_on_message(c, COOP_K_LINE, on_message, c) == 1);
     assert(coop_sess_on_event(b, COOP_K_TEST, on_event, NULL) == 1);
     assert(coop_sess_on_event(c, COOP_K_TEST, on_event, NULL) == 1);
     assert(coop_sess_on_view(a, on_view, NULL) == 1);
@@ -469,6 +474,14 @@ static void test_room(void) {
     CHECK(coop_sess_send(a, COOP_DST_ALL, COOP_K_LINE, hello, 1) == 1, "the host's message was not queued");
     CHECK(WAIT_FOR(room.messages >= 2, 6000), "the message reached %u players", room.messages);
     CHECK(room.from_self == 0, "a player heard its own message");
+    room.messages = 0;
+    CHECK(coop_sess_send(b, COOP_DST_ALL, COOP_K_LINE, hello, 1) == 1, "a joiner could not write to the room");
+    CHECK(WAIT_FOR(room.messages >= 1, 6000), "the joiner's message did not reach the other player");
+    (void)WAIT_FOR(0, 400);   // (an echo, if the room makes one, rides the same relay: give it time to turn up)
+    CHECK(room.from_self == 0, "the room threw a joiner its own message back");   // (the place and holds lines are
+                                                                                   //  written exactly this way: a
+                                                                                   //  game hearing its own line draws
+                                                                                   //  itself as a second player)
     room.messages = 0;
     const uint8_t ping[1] = {0x7f};
     CHECK(coop_sess_send(b, id_c, COOP_K_LINE, ping, 1) == 1, "a joiner could not write to another");

@@ -361,8 +361,10 @@ static void co_on_room(const CoopView *v, void *user) {
     uint8_t here[COOP_MAX_MEMBERS + 1] = {0};
     for (int i = 0; i < v->n && i < COOP_MAX_MEMBERS; i++) {
         const CoopPeer *m = &v->member[i];
+        if (m->id == v->self) continue;                /* (the others only: my own place and name are the game's side's,
+                                                            and my own id is never marked here, so a peer that was somehow
+                                                            made about myself is swept away with the departed) */
         here[m->id] = 1;
-        if (m->id == v->self) continue;                /* (the others only: my own place and name are the game's side's) */
         CoPeer *p = co_peer((int)m->id, 1);
         if (!p) continue;
         if (strcmp(p->name, m->name)) {
@@ -414,6 +416,9 @@ static uint8_t co_eq_state_have[CO_PEERS][3];
 static char co_said_name[CO_EQ_SLOTS][CO_AS_NAME];
 static int co_said_num[CO_EQ_SLOTS];
 static int co_said_state[3] = {CO_EQ_NO, CO_EQ_NO, CO_EQ_NO};
+/* (how much of this holds-and-hangs chain went to the log: the lines are changes, not frames, and a game left
+   swinging still has to stop talking eventually) */
+static int co_eq_put_said;
 
 static CoPeer *co_peer(int id, int make) {             /* (under co.lock) */
     CoPeer *free_slot = NULL;
@@ -530,6 +535,9 @@ static void co_command_take(int from, const char *text) {   /* (the net thread) 
 /* What every side does with a line from player `from` (the net thread): positions are kept
    here, the comings and goings set the table, the rest is the game side's. */
 static void co_take(int from, const char *text) {
+    if ((long)from == co.my_id) return;                /* (my own line: I wrote it and my game has done it already.
+                                                            Should the room ever throw it back, my place, hearts and
+                                                            what I hold would come at me as another player's) */
     if (text[0] == 'Y' && text[1] == ' ') { co_inputs_take(from, text + 2); return; }
     if (text[0] == 'T' && text[1] == ' ') { co_command_take(from, text + 2); return; }
     if (text[0] == 'Q' && text[1] == ' ') { co_enemy_led(from, text + 2); return; }
@@ -1527,12 +1535,24 @@ static void co_equip_put(Ctx *c, uint64_t actor, CoBody *b, int peer) {
     memcpy(state, co_eq_state[peer], sizeof state), memcpy(state_have, co_eq_state_have[peer], sizeof state_have);
     LeaveCriticalSection(&co.lock);
     for (int kind = 1; kind <= 2; kind++)          /* (the hangs first: they say where the sword and the shield sit) */
-        if (state_have[kind] && b->eq_state[kind] != state[kind])
-            b->eq_state[kind] = state[kind], co_equip_state(c, actor, kind, state[kind]);
+        if (state_have[kind] && b->eq_state[kind] != state[kind]) {
+            b->eq_state[kind] = state[kind];
+            const int got = co_equip_state(c, actor, kind, state[kind]);
+            if (co_eq_put_said < 400) {              /* (a hang changes when a Link reaches for or puts away a thing:
+                                                        -1 means this body had no equipment user to change) */
+                co_eq_put_said++;
+                hos_log("coop: body %llx hang %d to %d: %d", (unsigned long long)actor, kind, state[kind], got);
+            }
+        }
     for (int s = 0; s < CO_EQ_SLOTS; s++) {
         if (!want[s][0] || !strcmp(b->eq_name[s], want[s])) continue;
         snprintf(b->eq_name[s], CO_AS_NAME, "%s", want[s]), b->eq_num[s] = num[s];
-        co_equip(c, actor, s, want[s], num[s]);
+        const int got = co_equip(c, actor, s, want[s], num[s]);
+        if (co_eq_put_said < 400) {                  /* (ditto: a hold asked for and what the game's own make said;
+                                                        -1: no equipment user, or no room for it) */
+            co_eq_put_said++;
+            hos_log("coop: body %llx slot %d holds '%s' %d: %d", (unsigned long long)actor, s, want[s], num[s], got);
+        }
     }
 }
 
@@ -1541,6 +1561,21 @@ static void co_equip_put(Ctx *c, uint64_t actor, CoBody *b, int peer) {
 void oot_coop_equip_seen(Ctx *c, int kind) {
     if (!co.ready || co.links <= 0 || (unsigned)kind > 2u) return;
     const uint64_t user = co.my_user;
+    static int first, first_mine;                  /* (once each per run: did my game's own equipment calls reach here
+                                                        at all (no line: the build has no equipment hooks), and is the
+                                                        user in one my Link's? where this says no is where a swing
+                                                        shows up empty on the other side) */
+    if (!first) {
+        first = 1;
+        hos_log("coop: equip: the game's equipment calls are seen (%s, kind %d): the call's user %llx, my Link's %llx",
+                kind ? "a hang" : "a thing", kind, (unsigned long long)c->x[0], (unsigned long long)user);
+        hos_log_flush();
+    }
+    if (!first_mine && user && c->x[0] == user) {
+        first_mine = 1;
+        hos_log("coop: equip: that is my Link's equipment user");
+        hos_log_flush();
+    }
     if (!user || c->x[0] != user) return;          /* (not my Link's equipment user: an enemy's, a body's, nobody's) */
     char line[96] = "";
     EnterCriticalSection(&co.lock);
@@ -1566,7 +1601,14 @@ void oot_coop_equip_seen(Ctx *c, int kind) {
             co_said_state[kind] = state, snprintf(line, sizeof line, "S %d %d", kind, state);
     }
     LeaveCriticalSection(&co.lock);
-    if (line[0]) co_send("%s", line);
+    if (line[0]) {
+        co_send("%s", line);
+        if (co_eq_put_said < 400) {                  /* (the line as the room will see it; the receiver logs what its
+                                                        bodies do with it) */
+            co_eq_put_said++;
+            hos_log("coop: said to the room: %s", line), hos_log_flush();
+        }
+    }
 }
 
 /* (a player joined: their game opened its ears after my Link's holds and hangs changed; say the state whole again) */
@@ -1648,7 +1690,7 @@ static void co_bodies_step(Ctx *c, uint64_t link, int64_t now) {
     if (link != co_link_actor) {                       /* another map: the game took the bodies with the old one */
         co_link_actor = link;
         memset(co_body, 0, sizeof co_body);
-        for (int i = 0; i < CO_PEERS; i++) co_body[i].eq_state[0] = co_body[i].eq_state[1] = CO_EQ_NO;
+        for (int i = 0; i < CO_PEERS; i++) co_body[i].eq_state[1] = co_body[i].eq_state[2] = CO_EQ_NO;
     }
     if (co_test_go[0]) {                               /* (test runs: "G <map>") */
         float to[3];
@@ -1754,7 +1796,7 @@ static void co_bodies_step(Ctx *c, uint64_t link, int64_t now) {
             b->made_of = b->actor ? G64(b->actor) : 0, b->child = who[i].child, b->posed = 0;
             b->child_want = who[i].child, b->child_at = 0;
             b->foe = own && who[i].foe, b->life_full = 0, b->struck = 0;
-            memset(b->eq_name, 0, sizeof b->eq_name), b->eq_state[0] = b->eq_state[1] = CO_EQ_NO;
+            memset(b->eq_name, 0, sizeof b->eq_name), b->eq_state[1] = b->eq_state[2] = CO_EQ_NO;
             hos_log("coop: %s drawn as %s: actor %llx", who[i].name, name, (unsigned long long)b->actor);
             hos_log_flush();
         }

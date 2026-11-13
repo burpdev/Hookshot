@@ -1,6 +1,6 @@
 """host/coop_proto.c, co-op's wire format, compiled with Monocypher (third_party/monocypher) and tests/coop_proto_test.c:
 known answers for BLAKE2b and the signatures, every byte vector of tests/coop_vectors.txt, 400000 random buffers and one
-changed byte of every vector into each parser, the POS counter and the parts an event of a given size has. On Linux with
+changed byte of every vector into each parser, and the parts an event of a given size has. On Linux with
 AddressSanitizer and UBSan when the compiler has them. Also checks that the runtime's build compiles Monocypher
 (nx2/build.py), without which the game does not link.
 

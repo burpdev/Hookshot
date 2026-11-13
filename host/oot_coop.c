@@ -14,8 +14,9 @@
  *
  * WHAT THIS LAYER SHARES
  *   where      Thirty times a second each player says which map they are on, where they stand, which way they face and
- *              what Link plays; the menu and the corner of the screen show it, and each other player is drawn there as a
- *              Link of their age (co_bodies_step). A Go to player row travels to one of them.
+ *              what Link plays; as his game puts equipment in his hands or hangs it on him, he says that too. The menu
+ *              and the corner of the screen show it, and each other player is drawn there as a Link of their age,
+ *              holding and wearing what their Link does (co_bodies_step). A Go to player row travels to one of them.
  *   enemies    An enemy's life is one for all, and it stands in one place for all: the game of the player nearest to it
  *              leads it, the others' copies follow ("one enemy for everyone", further down).
  *   PvP        A hit that reaches another player takes hearts from them, between players who both have the row on.
@@ -41,7 +42,10 @@
  *   Q <enemy> <x y z> ...    I lead that enemy: where it stands and what it plays (co_enemy_lead_step)
  *   T <slot> <command>       what my Link plays in an animation slot ("-": nothing)
  *   Y <words> <base64>       my Link's animation inputs: the words that changed
- *   G, A, Z, E, S            test runs only (HOS_COOP_TEST=1): travel, an animation, an actor, equipment
+ *   E <slot> <name> <number> my Link's game put that equipment in that slot: what he holds (said from the game's own
+ *                            equipment user call, hooked in nx2/oot_patches.py)
+ *   S <kind> <state>         my Link's equipment state changed (kind 1 and kind 2, the game's own two)
+ *   G, A, Z                  test runs only (HOS_COOP_TEST=1): travel, an animation, an actor
  *
  * THREADS: the room's own thread hears (co_on_line, co_on_room); the game's side speaks (oot_coop_frame every frame
  * shown, co_tick from Link's own update while a save is played). Between them two queues under co.lock, and co.game keeps
@@ -218,6 +222,7 @@ static struct {
     CoEvent *in; size_t in_len, in_cap; /* what came (the room's thread -> the game's) */
     /* me, from oot_coop_player */
     volatile int64_t player_seen;
+    volatile uint64_t my_user;              /* my Link's equipment user: the equipment hooks compare against it */
     float pos[3], yaw;
 } co;
 
@@ -241,8 +246,6 @@ static int co_playing;
 static volatile LONG co_test_play;      /* (test runs) play co_test_play_name in slot co_test_play_slot on the bodies */
 static char co_test_play_name[CO_AS_NAME];
 static int co_test_play_slot;
-static volatile LONG co_test_equip;     /* (test runs) "E <slot> <name> <kind>" and "S <mode> <state>": tried on the bodies */
-static char co_test_equip_line[96];
 static int64_t co_flinch_until[CO_PEERS];   /* (PvP) a body I just hit plays the hit until then, before its player's own game says so */
 static int co_flinch_hard[CO_PEERS];
 static char co_test_go[64];          /* (test runs: a map to travel to) */
@@ -393,6 +396,19 @@ static uint32_t co_in_words[CO_PEERS];                   /* how many words their
 static char co_cmd_name[CO_PEERS][CO_AS_SLOTS][CO_AS_NAME];   /* what their Link plays in each slot ("" nothing) */
 static uint8_t co_cmd_have[CO_PEERS][CO_AS_SLOTS];
 
+#define CO_EQ_SLOTS 18          /* (the equipment user's slots: the game's own request numbers them) */
+#define CO_EQ_NO    0x7fffffc0  /* (a state nothing has said yet) */
+/* What another player's Link holds and how it hangs, as their game last said it (under co.lock); a body takes it on
+   its next step, and a new body takes it all again. */
+static char co_eq_name[CO_PEERS][CO_EQ_SLOTS][CO_AS_NAME];
+static int co_eq_num[CO_PEERS][CO_EQ_SLOTS];
+static int co_eq_state[CO_PEERS][3];
+static uint8_t co_eq_state_have[CO_PEERS][3];
+/* Mine, already said: changes go out once, as they happen; someone joining gets them whole again. */
+static char co_said_name[CO_EQ_SLOTS][CO_AS_NAME];
+static int co_said_num[CO_EQ_SLOTS];
+static int co_said_state[3] = {CO_EQ_NO, CO_EQ_NO, CO_EQ_NO};
+
 static CoPeer *co_peer(int id, int make) {             /* (under co.lock) */
     CoPeer *free_slot = NULL;
     for (int i = 0; i < CO_PEERS; i++) {
@@ -404,7 +420,8 @@ static CoPeer *co_peer(int id, int make) {             /* (under co.lock) */
     free_slot->used = 1, free_slot->id = id;
     {   /* (another player's movement was here) */
         const size_t at = (size_t)(free_slot - co.peer);
-        memset(co_in_have[at], 0, CO_INPUTS), co_in_words[at] = 0, memset(co_cmd_have[at], 0, CO_AS_SLOTS);
+        memset(co_in_have[at], 0, CO_INPUTS), co_in_words[at] = 0, memset(co_cmd_have[at], 0, CO_AS_SLOTS),
+        memset(co_eq_name[at], 0, sizeof co_eq_name[at]), memset(co_eq_state_have[at], 0, sizeof co_eq_state_have[at]);
     }
     return free_slot;
 }
@@ -881,9 +898,29 @@ static void co_events(void) {
                       : !strncmp(canon, "Item_", 5) ? canon + 5 : canon;
             }
             if (!quiet[0]) co_note("%s found %s", who, label);
-        } else if ((text[0] == 'E' || text[0] == 'S') && text[1] == ' ') {   /* (test runs only: equipment tried on the bodies) */
-            const char *e = getenv("HOS_COOP_TEST");
-            if (e && !strcmp(e, "1")) snprintf(co_test_equip_line, sizeof co_test_equip_line, "%s", text), InterlockedExchange(&co_test_equip, 1);
+        } else if (text[0] == 'E' && text[1] == ' ') {   /* that player's Link holds this: kept for their body */
+            int slot = 0, num = 0;
+            char name[CO_AS_NAME] = "";
+            if (sscanf(text + 2, "%d %47s %d", &slot, name, &num) >= 2 && slot >= 0 && slot < CO_EQ_SLOTS) {
+                EnterCriticalSection(&co.lock);
+                const CoPeer *p = co_peer(list[e].from, 1);
+                if (p) {
+                    const size_t at = (size_t)(p - co.peer);
+                    snprintf(co_eq_name[at][slot], CO_AS_NAME, "%s", name), co_eq_num[at][slot] = num;
+                }
+                LeaveCriticalSection(&co.lock);
+            }
+        } else if (text[0] == 'S' && text[1] == ' ') {   /* that player's equipment state changed */
+            int kind = 0, st = 0;
+            if (sscanf(text + 2, "%d %d", &kind, &st) == 2 && kind >= 1 && kind <= 2) {
+                EnterCriticalSection(&co.lock);
+                const CoPeer *p = co_peer(list[e].from, 1);
+                if (p) {
+                    const size_t at = (size_t)(p - co.peer);
+                    co_eq_state[at][kind] = st, co_eq_state_have[at][kind] = 1;
+                }
+                LeaveCriticalSection(&co.lock);
+            }
         } else if (text[0] == 'G' && text[1] == ' ') {     /* (test runs only: travel to this map) */
             const char *e = getenv("HOS_COOP_TEST");
             if (e && !strcmp(e, "1")) snprintf(co_test_go, sizeof co_test_go, "%s", text + 2);
@@ -1088,7 +1125,8 @@ static uint64_t co_create(Ctx *c, const char *name, const float place[3], float 
     return hos_guest_range(actor, 0x360) ? actor : 0;
 }
 
-typedef struct { uint64_t actor, made_of; int child, posed, foe; uint32_t life_full; int64_t tried, struck; float push[2], push_far; } CoBody;
+typedef struct { uint64_t actor, made_of; int child, posed, foe; uint32_t life_full; int64_t tried, struck; float push[2], push_far;
+                 char eq_name[CO_EQ_SLOTS][CO_AS_NAME]; int eq_num[CO_EQ_SLOTS]; int eq_state[3]; } CoBody;
 static CoBody co_body[CO_PEERS];
 static uint64_t co_link_actor;                        /* Link's own actor when the bodies were made */
 
@@ -1466,6 +1504,71 @@ static int co_equip_state(Ctx *c, uint64_t actor, int kind, int state) {
     return result;
 }
 
+/* (every frame) a body takes what that player's Link holds and how it hangs, as the body takes what it plays: the game's
+   own equipment calls, on the body's user, each thing only when the body does not have it yet. A thing its graph has no
+   use for is remembered as said anyway, so it is not asked every frame; a new body hears it all again. */
+static void co_equip_put(Ctx *c, uint64_t actor, CoBody *b, int peer) {
+    char want[CO_EQ_SLOTS][CO_AS_NAME];
+    int num[CO_EQ_SLOTS], state[3];
+    uint8_t state_have[3];
+    EnterCriticalSection(&co.lock);
+    memcpy(want, co_eq_name[peer], sizeof want), memcpy(num, co_eq_num[peer], sizeof num);
+    memcpy(state, co_eq_state[peer], sizeof state), memcpy(state_have, co_eq_state_have[peer], sizeof state_have);
+    LeaveCriticalSection(&co.lock);
+    for (int kind = 1; kind <= 2; kind++)          /* (the hangs first: they say where the sword and the shield sit) */
+        if (state_have[kind] && b->eq_state[kind] != state[kind])
+            b->eq_state[kind] = state[kind], co_equip_state(c, actor, kind, state[kind]);
+    for (int s = 0; s < CO_EQ_SLOTS; s++) {
+        if (!want[s][0] || !strcmp(b->eq_name[s], want[s])) continue;
+        snprintf(b->eq_name[s], CO_AS_NAME, "%s", want[s]), b->eq_num[s] = num[s];
+        co_equip(c, actor, s, want[s], num[s]);
+    }
+}
+
+/* (nx2/oot_patches.py: at the head of each of the three equipment user's calls, on whatever thread the game made them)
+   What reaches my Link's user is what the others must draw; said once, as it changes. Their bodies hear it. */
+void oot_coop_equip_seen(Ctx *c, int kind) {
+    if (!co.ready || co.links <= 0 || (unsigned)kind > 2u) return;
+    const uint64_t user = co.my_user;
+    if (!user || c->x[0] != user) return;          /* (not my Link's equipment user: an enemy's, a body's, nobody's) */
+    char line[96] = "";
+    EnterCriticalSection(&co.lock);
+    if (kind == 0) {
+        const int slot = (int)(int32_t)c->x[1];
+        const uint64_t at = co_ok(c->x[2], 8) ? G64(c->x[2]) : 0;   /* (the game passes a pointer to the name) */
+        char name[CO_AS_NAME] = "";
+        if (at && co_ok(at, CO_AS_NAME)) {
+            const unsigned char *p = (const unsigned char *)GP(at);
+            int i = 0;
+            while (i < CO_AS_NAME - 1 && p[i] >= 0x21 && p[i] <= 0x7e) name[i] = p[i], i++;
+            if (i > 0 && !p[i] && slot >= 0 && slot < CO_EQ_SLOTS) {
+                const int num = (int)(int32_t)c->x[3];
+                if (strcmp(co_said_name[slot], name) || co_said_num[slot] != num) {
+                    snprintf(co_said_name[slot], CO_AS_NAME, "%s", name), co_said_num[slot] = num;
+                    snprintf(line, sizeof line, "E %d %s %d", slot, name, num);
+                }
+            }
+        }
+    } else {
+        const int state = (int)(int32_t)c->x[1];
+        if (co_said_state[kind] != state)
+            co_said_state[kind] = state, snprintf(line, sizeof line, "S %d %d", kind, state);
+    }
+    LeaveCriticalSection(&co.lock);
+    if (line[0]) co_send("%s", line);
+}
+
+/* (a player joined: their game opened its ears after my Link's holds and hangs changed; say the state whole again) */
+static void co_equip_say_again(void) {
+    char names[CO_EQ_SLOTS][CO_AS_NAME];
+    int num[CO_EQ_SLOTS], state[3];
+    EnterCriticalSection(&co.lock);
+    memcpy(names, co_said_name, sizeof names), memcpy(num, co_said_num, sizeof num), memcpy(state, co_said_state, sizeof state);
+    LeaveCriticalSection(&co.lock);
+    for (int s = 0; s < CO_EQ_SLOTS; s++) if (names[s][0]) co_send("E %d %s %d", s, names[s], num[s]);
+    for (int kind = 1; kind <= 2; kind++) if (state[kind] != CO_EQ_NO) co_send("S %d %d", kind, state[kind]);
+}
+
 /* (test runs) what Link plays, said to the log each time it changes; and a "A <slot> <command>" line plays one on the bodies */
 static void co_as_test(Ctx *c, uint64_t link, int allowed) {
     if (!allowed) return;
@@ -1534,6 +1637,7 @@ static void co_bodies_step(Ctx *c, uint64_t link, int64_t now) {
     if (link != co_link_actor) {                       /* another map: the game took the bodies with the old one */
         co_link_actor = link;
         memset(co_body, 0, sizeof co_body);
+        for (int i = 0; i < CO_PEERS; i++) co_body[i].eq_state[0] = co_body[i].eq_state[1] = CO_EQ_NO;
     }
     if (co_test_go[0]) {                               /* (test runs: "G <map>") */
         float to[3];
@@ -1626,6 +1730,7 @@ static void co_bodies_step(Ctx *c, uint64_t link, int64_t now) {
             b->actor = co_create(c, name, who[i].place, who[i].yaw, 0);
             b->made_of = b->actor ? G64(b->actor) : 0, b->child = who[i].child, b->posed = 0;
             b->foe = own && who[i].foe, b->life_full = 0, b->struck = 0;
+            memset(b->eq_name, 0, sizeof b->eq_name), b->eq_state[0] = b->eq_state[1] = CO_EQ_NO;
             hos_log("coop: %s drawn as %s: actor %llx", who[i].name, name, (unsigned long long)b->actor);
             hos_log_flush();
         }
@@ -1668,18 +1773,6 @@ static void co_bodies_step(Ctx *c, uint64_t link, int64_t now) {
                 }
             }
         }
-        if (co_test_equip) {                            /* (test runs) */
-            int a = 0, n = 0;
-            char name[64] = "";
-            if (co_test_equip_line[0] == 'E' && sscanf(co_test_equip_line + 2, "%d %63s %d", &a, name, &n) >= 2) {
-                const int r = co_equip(c, b->actor, a, name, n);
-                hos_log("coop: test: body %d equip slot %d %s number %d -> %d (user %llx)", i, a, name, n, r, (unsigned long long)co_equipment_user(b->actor));
-            } else if (co_test_equip_line[0] == 'S' && sscanf(co_test_equip_line + 2, "%d %d", &a, &n) == 2) {
-                const int r = co_equip_state(c, b->actor, a, n);
-                hos_log("coop: test: body %d equipment state kind %d state %d -> %d", i, a, n, r);
-            }
-            hos_log_flush();
-        }
         if (i == 0 || co_test_play) {                   /* (test runs) */
             static int test = -1;
             if (test < 0) { const char *e = getenv("HOS_COOP_TEST"); test = e && !strcmp(e, "1"); }
@@ -1704,6 +1797,7 @@ static void co_bodies_step(Ctx *c, uint64_t link, int64_t now) {
             }
             co_body_put(b->actor, who[i].place, who[i].yaw);
             co_anim_put(c, b->actor, i);
+            co_equip_put(c, b->actor, b, i);
             b->posed = 1;
         } else { const float under[3] = {0, -5000, 0}; co_body_put(b->actor, under, 0); }
     }
@@ -2216,6 +2310,7 @@ static void co_tick(Ctx *c, uint64_t link) {
     if (playing_now) last_playing = now;
     const int playing = playing_now && now - playing_since > 3000000000LL;
     co_playing = playing;
+    co.my_user = co_equipment_user(link);   /* (two reads, every tick: what my game's equipment calls may compare to) */
     {   /* (Link is another actor: another map. Its name is read at once, so no body is made for the map just left) */
         static uint64_t last_link;
         if (link != last_link) last_link = link, next_map = 0;
@@ -2245,14 +2340,13 @@ static void co_tick(Ctx *c, uint64_t link) {
         const int quiet = now < quiet_until;
         if (now >= next_flags && !quiet) {
             next_flags = now + 500000000LL;
-            if (co_level && co.links > 0) co_level = 0, co_say_hearts(c);   /* (a player joined: my hearts, so theirs catch up) */
+            if (co_level && co.links > 0) co_level = 0, co_say_hearts(c), co_equip_say_again();   /* (a player joined: my hearts and what my Link holds, so theirs catch up) */
         }
         if (!quiet) co_items_step(c, now);
         if (!quiet) co_trade_step(c, now);
         co_bodies_step(c, link, now);
         co_pvp_step(c, link, now);
         InterlockedExchange(&co_test_play, 0);
-        InterlockedExchange(&co_test_equip, 0);
         { static int test = -1; if (test < 0) { const char *e = getenv("HOS_COOP_TEST"); test = e && !strcmp(e, "1"); } co_as_test(c, link, test); }
         co_goto_step(c, link, now);
     }

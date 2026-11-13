@@ -129,7 +129,7 @@ These change parts of it or stand in for the tab in test runs:
 | `HOS_COOP_ENEMY_PLACE=0` | Enemies are not kept in one place for all players: each game moves its own copies (their life is still shared) |
 | `HOS_COOP_BOSS=0` | Bosses are left to each game: no leader, no hand-over (their life is still shared) |
 | `HOS_COOP_AUTO=host` or `join`, `HOS_COOP_PORT=<port>` | Test runs: connected from the start without the Connection row; the port, over the Port row |
-| `HOS_COOP_TEST=1` | Test runs: the link also takes the test lines (`G` travel or stand at a place, `A` an animation on the bodies, `Z` an actor beside Link, `E` and `S` equipment on the bodies); `HOS_COOP_FOLLOW=1` or `2` with it: this game never leads an enemy, or only a boss it took over by its own hit |
+| `HOS_COOP_TEST=1` | Test runs: the link also takes the test lines (`G` travel or stand at a place, `A` an animation on the bodies, `Z` an actor beside Link); `HOS_COOP_FOLLOW=1` or `2` with it: this game never leads an enemy, or only a boss it took over by its own hit |
 
 ### Input for scripted runs
 

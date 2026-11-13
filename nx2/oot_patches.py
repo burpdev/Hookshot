@@ -26,7 +26,9 @@ Each is a runtime switch where it can be, so the game's own path stays reachable
 - Co-op (host/oot_coop.c, the F1 menu's Co-op tab; the supported build only): the pouch's add by name (f_8112d570) calls
   oot_coop_pouch_add first, so a pickup can be told to the other players, and the Life component's update (f_804bd8c0, the
   function the heart protection guards) calls oot_coop_life_seen at its head and oot_coop_life_write where it takes life away,
-  so an enemy's life is one for all. Each returns at once while no link is up.
+  so an enemy's life is one for all. Each returns at once while no link is up. The three calls the game makes on an actor's
+  equipment user — to put dynamic equipment in a slot (f_82e17b20) and to change its equipment state (f_806d6820, f_80e54c70)
+  — call oot_coop_equip_seen at their heads, so what a player's Link holds and how it hangs is said to the others.
 """
 import collections
 import glob
@@ -391,6 +393,35 @@ def patch_coop_life(source):
     return (source[:start] + body + source[end:]).replace(
         '#include "a64.h"\n', '#include "a64.h"\nextern void oot_coop_life_seen(Ctx *c, uint64_t life);\n'
         'extern void oot_coop_life_write(Ctx *c, uint64_t life, uint32_t was, uint32_t now);\n', 1)
+
+
+# The game tells an actor's equipment user what it holds and how it hangs: f_82e17b20(user, slot, &name, number, -1, 1, 0)
+# puts dynamic equipment in a slot (host/oot_coop.c, "what a body holds"), f_806d6820(user, state) and f_80e54c70(user, state)
+# change its equipment state. What reaches Link's own user is what the others must draw (oot_coop_equip_seen).
+EQUIP_MAKE_HEAD = "void f_82e17b20(Ctx *__restrict A64_NOESC c) {\n"
+EQUIP_STATE_HEADS = ("void f_806d6820(Ctx *__restrict A64_NOESC c) {\n", "void f_80e54c70(Ctx *__restrict A64_NOESC c) {\n")
+
+
+def patch_coop_equip(source):
+    """the equipment user's calls call oot_coop_equip_seen (kind 0 for the dynamic equipment request, kinds 1 and 2 for the
+    two state changes) at their heads, so what a player's Link holds goes to the others (host/oot_coop.c). The three
+    functions can sit in different lifted files, so each head a file holds gets its own call; a file patched before is
+    given back as it is; None when the file holds none of the three"""
+    heads = (EQUIP_MAKE_HEAD,) + EQUIP_STATE_HEADS
+    if not any(h in source for h in heads):
+        return None
+    out = source
+    for k, h in enumerate(heads):
+        if h not in out:
+            continue
+        if "oot_coop_equip_seen(c, %d)" % k in out:   # (this one made before: a lift patched again)
+            continue
+        at = out.index(h) + len(h)
+        out = out[:at] + ("    oot_coop_equip_seen(c, %d);   /* (nx2/oot_patches.py: co-op, what Link holds) */\n" % k) + out[at:]
+    decl = 'extern void oot_coop_equip_seen(Ctx *c, int kind);\n'   # (once per file, whatever patched before)
+    if decl not in out:
+        out = out.replace('#include "a64.h"\n', '#include "a64.h"\n' + decl, 1)
+    return out
 
 
 def patch_dynres(s):
@@ -910,6 +941,13 @@ def patch_file(s, name, protect_hearts=False):
         out = shared
         counts["co-op life hooks"] += 1
         lines.append("oot_patches: co-op's enemy life hooks in " + name)
+    equip = patch_coop_equip(out) if protect_hearts else None
+    if equip is not None:
+        out = equip
+        # (count by the calls present, so a lifted file patched before counts, and split files add up)
+        for k in (0, 1, 2):
+            counts["co-op equipment hooks"] += out.count("oot_coop_equip_seen(c, %d)" % k)
+        lines.append("oot_patches: co-op's equipment hooks in " + name)
     move = patch_movement(out) if protect_hearts else None
     if move is not None:
         out = move
@@ -1033,6 +1071,9 @@ def report(paths, counts, protect_hearts=False):
         print("oot_patches: WARNING: the movement speed's places were found %d times, not %d" % (speed_hooks, len(SPEED_PLACES)))
     if protect_hearts and total["opening skip"] != 3:
         print("oot_patches: WARNING: the opening skip was found at %d of 3 functions" % total["opening skip"])
+    if protect_hearts and total["co-op equipment hooks"] != 3:
+        print("oot_patches: WARNING: the equipment user's three calls were found %d times, not three (patch_coop_equip: "
+              "another player's Link will hold nothing)" % total["co-op equipment hooks"])
     if protect_hearts and camera_speed != len(CAMERA_SPEED_HEADS):
         print("oot_patches: WARNING: the camera's turn speed was found in %d of %d functions (the Camera speed row turns only "
               "those)" % (camera_speed, len(CAMERA_SPEED_HEADS)))

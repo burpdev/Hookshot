@@ -13,7 +13,7 @@ game's address and port with **Join**. No relay to run, no room to name, no code
 | `host/coop_net.c`, `host/coop_net.h` | its TCP sockets (listen, accept, connect, one frame at a time), portable through `host/posix/` |
 | `host/coop_proto.h`, `host/coop_proto.c` | the frames and the player messages, as pure functions on bytes ([below](#the-link-and-the-wire)) |
 | `host/coop_state.c`, `host/coop_oot.c` | the room's rules and progress sync: what a room shares, its pools, each player's accepted key, its signed rules ([below](#progress-sync)) |
-| `host/oot_coop.c` | the players in the world: where each stands, their bodies and animations, the enemies' one life and one place, PvP, and hearts and Gold Skulltula tokens one for one |
+| `host/oot_coop.c` | the players in the world: where each stands, their bodies and animations and what each Link holds, the enemies' one life and one place, PvP, and hearts and Gold Skulltula tokens one for one |
 | `host/coop_menu.c` | the Co-op tab's rows, and the settings that carry them to the room |
 ## One room: Host and Join
 
@@ -241,29 +241,19 @@ the save-backup gate; progress continues to use `coop_sync_open` before handing 
 
 ## Adding a layer
 
-Keep gameplay in its own file; the session knows bytes, members and consent, not actors. Allocate a kind in the shared
-co-op registry before using it. This is the allocation table; a reservation is not an implemented feature in this base.
+Keep gameplay in its own file; the session knows bytes, members and consent, not actors. Pick an unassigned kind in the shared
+co-op registry before using it. This is the allocation table.
 
-| Kind | Name | Owner / status |
+| Kind | Name | Owner |
 |---|---|---|
-| 1 | HELLO | Draft definition; current progress identities ride in DIGEST |
-| 2 | POS | Small position/area codec; `coop-players` sends it |
-| 3 | DIGEST | Progress identities, signed room rules and section sums |
-| 4 | SECTION | Signed progress values |
-| 5 | SYNC_NEED | Draft definition; not emitted by current progress |
-| 6 | NOTICE | Draft definition; not emitted by current progress |
-| 7 | BYE | Session goodbye |
-| 8 | HIT | Reserved by `coop-hits` (committed-hit observations there) |
-| 9 | COMBAT_CONTROL | Reserved by `coop-hits` |
-| 10 | ATTACK | Reserved by `coop-hits` |
-| 11 | WORLD | Reserved by `coop-world` (batched enemy state) |
-| 12 | WORLD_EVENT | Reserved by `coop-world` (authority/lifecycle events) |
-| 13 | AREA | Reserved by `coop-area` (optional room clock) |
-| 14 | WARP | Reserved by `coop-warp`; that branch currently uses POS |
-| 15 | CHAT | Reserved for chat; no branch implements it |
+| 3 | DIGEST | Progress identities, signed room rules and section sums (`host/coop_oot.c`) |
+| 4 | SECTION | Signed progress values (`host/coop_oot.c`) |
+| 7 | BYE | Session goodbye (`host/coop.c`) |
 | 16 | EVENT | Session helper, not an application payload |
 | 17 | EVENT_ACK | Session helper, not an application payload |
-| 0xF0 | TEST | Fixtures only; 0xF0–0xFF are not production allocations |
+| 32 | LINE | The players in the world: place, hits, an enemy's life, animations, equipment, hearts (`host/oot_coop.c`) |
+
+Other numbers are unassigned. A kind of `0xF0` or above is a fixture, not a production layer.
 
 Use `coop_send(kind, bytes, n)` for a replaceable state broadcast, `coop_send_to(member, kind, bytes, n)` for one peer,
 and `coop_on_message(kind, fn, user)` to receive it. Both sends return 1 when copied to the bounded outbox, not when
@@ -276,8 +266,8 @@ counting state or events. The session helper already checks it for events, but g
 when it runs.
 
 Design to 1,146 payload bytes per message (a frame is 1,168 bytes on the link at most), about 30 state messages per
-second per player, and one batch for **all** enemies that game leads at 10–15 Hz. Keep POS small; a richer body
-description uses another registered kind, not a larger POS. Pace progress, events and state within the room's ceilings
+second per player, and one batch for **all** enemies that game leads at 10–15 Hz. Presence rides as short text lines;
+a body's own look, animation graph and equipment rows come from its mod pack, not from the wire. Pace progress, events and state within the room's ceilings
 (the 32 KB/s and 480 messages a second per member), not as separate bandwidth allowances. State should heal itself: for damage, keep a running total per player and enemy, merge
 each player's total by taking the highest value seen, then add the players' totals together (one shared total merged
 by "highest wins" loses a hit when two players strike at once: totals of 2 and 2 would stay 2, not 4; and a
@@ -367,12 +357,6 @@ is how it recovers from a counter far ahead); from then on the window has forgot
 member's messages of its present session can have them delivered again, in order. So the envelope does not make a message
 arrive once: a layer for which a repeat matters checks a counter of its own, and signs what only one player may make
 (`coop_state.c` does this for progress, and `coop_oot.c` for what a player's game gained).
-
-**POS** (kind 2), where a player is and what Link plays, for showing the other players in the world: the area's name,
-child or adult, position, facing, and the node and frame of Link's first four animation slots, with a counter one higher
-for each POS sent (`coop_proto.h`). A POS with a name that is not printable ASCII or a number that is not finite is
-refused. A receiver takes a pose only above the last one it took from the same member in the same session, and, once none
-was taken for 3 s, the next whatever its counter (`coop_pos_fresh`).
 
 **LINE** (kind 32) is `host/oot_coop.c`'s layer: one short line of text — a place, a hit, an enemy's life, an animation,
 what was found — as the room's message. The room gives it the sender's member id; the layer's own names, hits and hearts

@@ -5,8 +5,9 @@ name (f_8112d570), and in the Life component's update (f_804bd8c0) oot_coop_life
 of its two writes of the life, after the heart protection's guard when that is there. Each is made once, declared, left alone in
 a file patched before, and made only in the supported build's lift (protect_hearts): those addresses are its functions.
 
-The host has every entry point on every platform (the lifted C calls them wherever it is built), the runtime calls the frame's
-and the player's, and the menu and the host agree on the option ids: one header (gpu/vk/oot_coop_opts.h), whose numbers are
+The host has every entry point on every platform (the lifted C calls them wherever it is built): the pouch's add, the Life
+component's two, and the three equipment user's calls the game makes on Link (what he holds goes to the others). The runtime
+calls the frame's and the player's, and the menu and the host agree on the option ids: one header (gpu/vk/oot_coop_opts.h), whose numbers are
 no other row's, each answered or taken by the menu.
 
 The data builders (nx2/coop_bodies.py with nx2/byml_rw.py) are run by hand on a built game folder; what of them needs no game
@@ -79,6 +80,27 @@ def check_life():
           "the life hook does not come after the heart protection's guard")
 
 
+def check_equip():
+    heads = (oot_patches.EQUIP_MAKE_HEAD,) + oot_patches.EQUIP_STATE_HEADS
+    src = '#include "a64.h"\n' + "".join(h + "    return;\n}\n\n" for h in heads)
+    out = oot_patches.patch_coop_equip(src)
+    check(out is not None, "the equipment user's calls were not patched")
+    for k, h in enumerate(heads):
+        call = "    oot_coop_equip_seen(c, %d);" % k
+        check(out.count(call) == 1 and h + call in out,
+              "oot_coop_equip_seen(c, %d) is not first in its function, once" % k)
+    check(out.count("extern void oot_coop_equip_seen(Ctx *c, int kind);") == 1, "the equipment hook is not declared exactly once")
+    check(oot_patches.patch_coop_equip(out) == out, "a file patched before got the equipment hooks again")
+    check(oot_patches.patch_coop_equip('#include "a64.h"\n' + oot_patches.POUCH_ADD_HEAD + BODY) is None,
+          "a file without the equipment user's calls was patched")
+    two = '#include "a64.h"\n' + heads[0] + "    return;\n}\n\n" + heads[1] + "    return;\n}\n\n"
+    got = oot_patches.patch_coop_equip(two)   # (the three lifted functions can sit in different files)
+    check(got is not None and got.count("oot_coop_equip_seen(c, 0);") == 1 and got.count("oot_coop_equip_seen(c, 1);") == 1
+          and "oot_coop_equip_seen(c, 2);" not in got,
+          "the equipment user's calls present in a file were not each patched at their head")
+    check(oot_patches.patch_coop_equip(got) == got, "a file patched before got its equipment hooks again")
+
+
 def applied(protect_hearts):
     with tempfile.TemporaryDirectory() as gen:
         path = os.path.join(gen, "code_000.c")
@@ -104,7 +126,8 @@ def check_apply():
 
 
 ENTRY = ("void oot_coop_frame(void)", "void oot_coop_player(Ctx *c, uint64_t actor)", "void oot_coop_pouch_add(Ctx *c)",
-         "void oot_coop_life_seen(Ctx *c, uint64_t life)", "void oot_coop_life_write(Ctx *c, uint64_t life, uint32_t was, uint32_t now")
+         "void oot_coop_life_seen(Ctx *c, uint64_t life)", "void oot_coop_life_write(Ctx *c, uint64_t life, uint32_t was, uint32_t now",
+         "void oot_coop_equip_seen(Ctx *c, int kind)")
 
 
 def check_host():
@@ -223,6 +246,7 @@ def main():
     check_builders()
     check_pickup()
     check_life()
+    check_equip()
     check_apply()
     check_host()
     check_ids()

@@ -1,5 +1,5 @@
 // host/coop_proto.c, co-op's wire format, with this fixture: the frames between a game and the room it hosts, the
-// player messages they carry, the POS, the reliable events, the signatures, and BLAKE2b.
+// player messages they carry, the reliable events, the signatures, and BLAKE2b.
 //
 //   coop_proto_test <tests/coop_vectors.txt>   every check below; exit 1 when one fails
 //   coop_proto_test --write-vectors            write those byte vectors (docs/coop.md, "The link and the wire")
@@ -11,7 +11,7 @@
 //    not printable ASCII, a number that is not finite, a roster of more members than a room holds.
 // 4. 400000 random buffers, and the vectors with one byte changed, into every parser: no crash, and nothing accepted that
 //    its own length rules would not allow.
-// 5. The POS counter (coop_pos_fresh) and the parts an event of a given size has.
+// 5. The parts an event of a given size has.
 #include "../host/coop_proto.h"
 
 #include <stdio.h>
@@ -43,7 +43,6 @@ static size_t unhex(const char *text, uint8_t *out, size_t cap) {
     return n;
 }
 static uint64_t num(const char *text) { return strtoull(text, NULL, 10); }
-static uint32_t bits(const char *text) { return (uint32_t)strtoul(text, NULL, 16); }   /* an IEEE-754 float's bits */
 
 // ---- 1. known answers
 static void known_answers(void) {
@@ -215,23 +214,7 @@ static int vector_msg(const char *name, const char *session, const char *counter
     return 1;
 }
 
-static int vector_pos(const char *name, const char *pseq, const char *t_ms, const char *flags, const char *area,
-                      const char *x, const char *y, const char *z, const char *yaw, const char *payload) {
-    uint8_t bytes[1024];
-    const size_t n = unhex(payload, bytes, sizeof bytes);
-    CoopPos p;
-    if (!coop_pos_parse(bytes, n, &p)) { CHECK(0, "%s: the POS does not parse", name); return 0; }
-    const uint32_t hx = bits(x), hy = bits(y), hz = bits(z), hyaw = bits(yaw);
-    CHECK(p.pseq == (uint32_t)num(pseq) && p.t_ms == (uint32_t)num(t_ms) && p.flags == (uint8_t)num(flags),
-          "%s: pseq %u t_ms %u flags %u", name, p.pseq, p.t_ms, p.flags);
-    CHECK(!strcmp(hex((const uint8_t *)p.area, strlen(p.area)), strcmp(area, "-") ? area : ""), "%s: the area is %s", name, p.area);
-    uint32_t gx, gy, gz, gyaw;
-    memcpy(&gx, &p.pos[0], 4), memcpy(&gy, &p.pos[1], 4), memcpy(&gz, &p.pos[2], 4), memcpy(&gyaw, &p.yaw, 4);
-    CHECK(gx == hx && gy == hy && gz == hz && gyaw == hyaw, "%s: the place is %08x %08x %08x %08x", name, gx, gy, gz, gyaw);
-    uint8_t again[1024];
-    CHECK(coop_pos_pack(again, sizeof again, &p) == n && !memcmp(again, bytes, n), "%s: packed again differs", name);
-    return 1;
-}
+
 
 static int vector_event(const char *name, const char *kind, const char *recipient, const char *id, const char *total,
                         const char *part, const char *bytes_hex, const char *payload) {
@@ -330,7 +313,6 @@ static int check_vectors(const char *path) {
         else if (!strcmp(kind, "kick")) fields = 4;
         else if (!strcmp(kind, "u32")) fields = 3;
         else if (!strcmp(kind, "msg")) fields = 6;
-        else if (!strcmp(kind, "pos")) fields = 10;
         else if (!strcmp(kind, "event")) fields = 8;
         else if (!strcmp(kind, "eventack")) fields = 6;
         else if (!strcmp(kind, "nameclean")) fields = 3;
@@ -348,7 +330,6 @@ static int check_vectors(const char *path) {
         else if (!strcmp(kind, "kick")) vector_kick(v[0], v[1], v[2], v[3]);
         else if (!strcmp(kind, "u32")) vector_u32(v[0], v[1], v[2]);
         else if (!strcmp(kind, "msg")) vector_msg(v[0], v[1], v[2], v[3], v[4], v[5]);
-        else if (!strcmp(kind, "pos")) vector_pos(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9]);
         else if (!strcmp(kind, "event")) vector_event(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
         else if (!strcmp(kind, "eventack")) vector_event_ack(v[0], v[1], v[2], v[3], v[4], v[5]);
         else if (!strcmp(kind, "nameclean")) vector_name_clean(v[0], v[1], v[2]);
@@ -362,7 +343,6 @@ static int check_vectors(const char *path) {
             CoopWelcome we;
             CoopRoster ro;
             CoopError er;
-            CoopPos po;
             CoopEventPart ep;
             CoopEventAck ea;
             uint64_t ss;
@@ -371,7 +351,7 @@ static int check_vectors(const char *path) {
             const uint8_t *bb;
             size_t nn, used;
             int refused = 0;
-            const char *what = v[0];   /* the parser that must refuse: frame, hello, welcome, roster, error, kick, u32, msg, pos, event, eventack */
+            const char *what = v[0];   /* the parser that must refuse: frame, hello, welcome, roster, error, kick, u32, msg, event, eventack */
             if (!strcmp(what, "frame")) refused = !coop_frame_parse(vbuf, n, &fr, &pl);
             else if (!strcmp(what, "hello")) refused = !coop_hello_parse(vbuf, n, &he);
             else if (!strcmp(what, "welcome")) refused = !coop_welcome_parse(vbuf, n, &we);
@@ -380,7 +360,6 @@ static int check_vectors(const char *path) {
             else if (!strcmp(what, "kick")) refused = !coop_kick_parse(vbuf, n, &id, &ss);
             else if (!strcmp(what, "u32")) refused = !coop_u32_parse(vbuf, n, &cc);
             else if (!strcmp(what, "msg")) refused = !coop_msg_parse(vbuf, n, &ss, &cc, &kk, &bb, &nn);
-            else if (!strcmp(what, "pos")) refused = !coop_pos_parse(vbuf, n, &po);
             else if (!strcmp(what, "event")) refused = !coop_event_part_parse(vbuf, n, &ep);
             else if (!strcmp(what, "eventack")) refused = !coop_event_ack_parse(vbuf, n, &ea);
             else CHECK(0, "reject vector of a parser this fixture does not know: %s", what);
@@ -514,52 +493,13 @@ static void codecs(void) {
     CHECK(!coop_msg_parse(out, mn, &msess, &mcount, &mkind, &mbytes, &mlen), "an unknown envelope version parsed");
     out[0] = COOP_MSG_V1;
     CHECK(!coop_msg_parse(out, COOP_MSG_HDR, &msess, &mcount, &mkind, &mbytes, &mlen), "an envelope cut short parsed");
-    CHECK(!coop_msg_pack(out, sizeof out, 1, 1, COOP_K_POS, text, COOP_MAX_MESSAGE + 1), "a message over COOP_MAX_MESSAGE was packed");
+    CHECK(!coop_msg_pack(out, sizeof out, 1, 1, COOP_K_LINE, text, COOP_MAX_MESSAGE + 1), "a message over COOP_MAX_MESSAGE was packed");
     const size_t max_m = coop_msg_pack(out, sizeof out, 1, 1, COOP_K_TEST, out + 3000, COOP_MAX_MESSAGE);
     CHECK(max_m == COOP_MSG_HDR + 1 + COOP_MAX_MESSAGE && coop_msg_parse(out, max_m, &msess, &mcount, &mkind, &mbytes, &mlen) &&
           mkind == COOP_K_TEST, "the longest message is %zu bytes", max_m);
     coop_msg_pack(out, sizeof out, 1, 1, COOP_K_NOTICE, "", 0);
     CHECK(coop_msg_parse(out, COOP_MSG_HDR + 1, &msess, &mcount, &mkind, &mbytes, &mlen) && mlen == 0 && mkind == COOP_K_NOTICE,
           "an empty message did not come back");
-
-    /* the POS: where a player is and what Link plays */
-    CoopPos p = { 0 };
-    p.pseq = 7, p.t_ms = 123456, p.flags = COOP_POS_ADULT | COOP_POS_IN_WORLD;
-    strcpy(p.area, "Kokiri Forest");
-    p.pos[0] = 1.5f, p.pos[1] = 2.5f, p.pos[2] = -3.5f, p.yaw = 0.25f;
-    p.nslots = 2;
-    strcpy(p.slot[0].node, "idle"), p.slot[0].frame = 12.5f;
-    strcpy(p.slot[1].node, "walk"), p.slot[1].frame = 3.25f;
-    const size_t pn = coop_pos_pack(out, sizeof out, &p);
-    CoopPos p2;
-    CHECK(pn && coop_pos_parse(out, pn, &p2) && p2.pseq == 7 && p2.t_ms == 123456 && p2.nslots == 2 &&
-          !strcmp(p2.area, "Kokiri Forest") && p2.pos[2] == -3.5f && p2.yaw == 0.25f && !strcmp(p2.slot[1].node, "walk") &&
-          p2.slot[1].frame == 3.25f, "the POS did not come back");
-    CoopPos bad = p;
-    strcpy(bad.area, "Kokiri\nForest");   /* the name comes from another player's game */
-    const size_t bad_n = coop_pos_pack(out, sizeof out, &bad);
-    CHECK(bad_n && !coop_pos_parse(out, bad_n, &p2), "a POS whose area has a control byte was taken");
-    bad = p;
-    bad.pos[0] = 1.0f / 0.0f;   /* infinity is not a place */
-    const size_t inf_n = coop_pos_pack(out, sizeof out, &bad);
-    CHECK(inf_n && !coop_pos_parse(out, inf_n, &p2), "a POS with a number that is not finite was taken");
-    bad = p;
-    bad.pos[0] = 0.0f / 0.0f;   /* not a number either */
-    const size_t nan_n = coop_pos_pack(out, sizeof out, &bad);
-    CHECK(nan_n && !coop_pos_parse(out, nan_n, &p2), "a POS with a number that is not a number was taken");
-    bad = p;
-    bad.slot[0].node[0] = '\r';
-    const size_t crlf_n = coop_pos_pack(out, sizeof out, &bad);
-    CHECK(crlf_n && !coop_pos_parse(out, crlf_n, &p2), "a POS whose animation name has a control byte was taken");
-    bad = p;
-    bad.nslots = COOP_POS_SLOTS + 1;   /* more animations than a POS carries */
-    const size_t many_n = coop_pos_pack(out, sizeof out, &bad);
-    CHECK(many_n && coop_pos_parse(out, many_n, &p2) && p2.nslots == COOP_POS_SLOTS, "a POS of %u slots was taken as %u",
-          bad.nslots, p2.nslots);
-    CoopPos plain = p;
-    plain.nslots = 0, plain.area[0] = 0, plain.flags = 0;
-    const size_t plain_n = coop_pos_pack(out, sizeof out, &plain);
-    CHECK(plain_n && coop_pos_parse(out, plain_n, &p2) && p2.nslots == 0 && p2.area[0] == 0, "a POS with no area or slot is %zu bytes", plain_n);
 
     /* the reliable events: parts of a thing one player owes another */
     CHECK(coop_event_kind(COOP_K_SECTION) && coop_event_kind(COOP_K_LINE) && coop_event_kind(COOP_K_TEST),
@@ -617,7 +557,6 @@ static void parse_any(const uint8_t *b, size_t n) {   /* what matters: no crash,
     CoopWelcome w;
     CoopRoster r;
     CoopError e;
-    CoopPos p;
     CoopEventPart ep;
     CoopEventAck ea;
     uint64_t s;
@@ -648,16 +587,6 @@ static void parse_any(const uint8_t *b, size_t n) {   /* what matters: no crash,
     if (coop_u32_parse(b, n, &c)) CHECK(n >= 4, "a token of %zu bytes parsed", n);
     if (coop_msg_parse(b, n, &s, &c, &k, &by, &nn)) CHECK(nn + COOP_MSG_HDR + 1 == n && nn <= COOP_MAX_MESSAGE,
                                                           "a message of %zu bytes in a %zu-byte envelope parsed", nn, n);
-    if (coop_pos_parse(b, n, &p)) {
-        CHECK(p.nslots <= COOP_POS_SLOTS, "a POS with %u animation slots parsed", p.nslots);
-        CHECK(strlen(p.area) <= COOP_POS_TEXT, "a POS with an area of %zu characters parsed", strlen(p.area));
-        for (int i = 0; i < p.nslots; i++)
-            CHECK(strlen(p.slot[i].node) <= COOP_POS_TEXT, "a POS with an animation name of %zu characters parsed", strlen(p.slot[i].node));
-        for (int i = 0; i < 3; i++) CHECK(p.pos[i] == p.pos[i], "a POS with a number that is not a number parsed");
-        CHECK(p.yaw == p.yaw, "a POS with a yaw that is not a number parsed");
-        for (size_t i = 0; i < strlen(p.area); i++) CHECK((unsigned char)p.area[i] >= 0x20 && (unsigned char)p.area[i] < 0x7f,
-                                                          "a POS whose area has byte %02x parsed", (unsigned char)p.area[i]);
-    }
     if (coop_event_part_parse(b, n, &ep)) {
         CHECK(ep.part < 16 && ep.total <= COOP_EVENT_MAX, "an event part of %u of %u bytes parsed", ep.part, ep.total);
         CHECK(coop_event_parts(ep.total) & (1u << ep.part), "an event part %u of an event of %u bytes parsed", ep.part, ep.total);
@@ -705,24 +634,7 @@ static void fuzz(const char *path) {
     printf("coop_proto: %d changed vectors walked\n", changed);
 }
 
-// ---- 5. the POS counter: a message can arrive more than once (docs/coop.md, "Replay")
-static void pos_counter(void) {
-    CoopPosSeen s = { 0 };
-    CHECK(coop_pos_fresh(&s, 11, 1, 1000) == 2, "the first pose of a session was not taken, with what was kept dropped");
-    CHECK(coop_pos_fresh(&s, 11, 2, 1033) == 1, "the next pose was not taken");
-    CHECK(coop_pos_fresh(&s, 11, 2, 1066) == 0, "a pose sent again was taken");
-    CHECK(coop_pos_fresh(&s, 11, 1, 1100) == 0, "an older pose of the same session was taken");
-    CHECK(coop_pos_fresh(&s, 12, 1, 1133) == 2, "another session's first pose did not start the counter again");
-    CHECK(coop_pos_fresh(&s, 12, 9, 1166) == 1, "a higher pose was not taken");
-    CHECK(coop_pos_fresh(&s, 12, 9, 1166 + COOP_POS_QUIET_MS) == 2,
-          "after the quiet time the session's recorded poses cannot be taken again");
-    CHECK(coop_pos_fresh(&s, 12, 5, 1166 + COOP_POS_QUIET_MS + 1) == 0, "a pose below the one that reopened the window was taken");
-    CHECK(coop_pos_fresh(&s, 12, 10, 4168) == 1, "the counter did not keep going after the quiet time");
-    CHECK(coop_pos_fresh(&s, 12, 4, 4168 + COOP_POS_QUIET_MS) == 2, "the session's recorded poses could not be taken again");
-    CHECK(coop_pos_fresh(&s, 12, 3, 4168 + COOP_POS_QUIET_MS + 1) == 0, "a pose below the window's first was taken");
-    CHECK(coop_pos_fresh(&s, 13, 4000000000u, 5000) == 2, "a session's first high counter was not taken");
-    CHECK(coop_pos_fresh(&s, 13, 4000000001u, 5100) == 1, "the counter did not keep going");
-}
+
 
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--write-vectors")) {
@@ -741,7 +653,6 @@ int main(int argc, char **argv) {
         printf("# kick <name> <member> <session> <payload>                               the host removed one\n");
         printf("# u32 <name> <value> <payload>                                           a PING or PONG token\n");
         printf("# msg <name> <session> <counter> <kind> <message> <payload>              a player message in its envelope\n");
-        printf("# pos <name> <pseq> <t_ms> <flags> <area> <x> <y> <z> <yaw> <payload>     a pose: parse, check, pack again\n");
         printf("# event <name> <kind> <recipient session> <id> <total> <part> <bytes> <payload>\n");
         printf("# eventack <name> <sender session> <id> <parts> <epoch> <payload>         parts received, of this epoch\n");
         printf("# sign <name> <seed> <message> <public key> <signature>                   the key a seed gives, and what it signs\n");
@@ -836,33 +747,6 @@ int main(int argc, char **argv) {
         printf("msg test %llu 7 %u %s %s\n", 0x1020304050607080ULL, COOP_K_TEST, hex((const uint8_t *)test, sizeof test - 1),
                hex(out, coop_msg_pack(out, sizeof out, 0x1020304050607080ULL, 7, COOP_K_TEST, test, sizeof test - 1)));
 
-        CoopPos p = { 0 };
-        p.pseq = 7, p.t_ms = 123456, p.flags = COOP_POS_ADULT | COOP_POS_IN_WORLD;
-        strcpy(p.area, "Kokiri Forest");
-        p.pos[0] = 1.5f, p.pos[1] = 2.5f, p.pos[2] = -3.5f, p.yaw = 0.25f;
-        p.nslots = 2;
-        strcpy(p.slot[0].node, "idle"), p.slot[0].frame = 12.5f;
-        strcpy(p.slot[1].node, "walk"), p.slot[1].frame = 3.25f;
-        uint32_t bx, by, bz, byaw;
-        memcpy(&bx, &p.pos[0], 4), memcpy(&by, &p.pos[1], 4), memcpy(&bz, &p.pos[2], 4), memcpy(&byaw, &p.yaw, 4);
-        printf("pos forest %u %u %u %s %08x %08x %08x %08x %s\n", p.pseq, p.t_ms, p.flags, hex((const uint8_t *)p.area, strlen(p.area)),
-               bx, by, bz, byaw, hex(out, coop_pos_pack(out, sizeof out, &p)));
-        CoopPos still = p;
-        still.nslots = 0, still.flags = 0;
-        still.pos[0] = -0.5f, still.pos[1] = 0.0f, still.pos[2] = 4095.75f, still.yaw = -1.0f;
-        memcpy(&bx, &still.pos[0], 4), memcpy(&by, &still.pos[1], 4), memcpy(&bz, &still.pos[2], 4), memcpy(&byaw, &still.yaw, 4);
-        printf("pos no-slots %u %u %u %s %08x %08x %08x %08x %s\n", still.pseq, still.t_ms, 0, hex((const uint8_t *)still.area, strlen(still.area)),
-               bx, by, bz, byaw, hex(out, coop_pos_pack(out, sizeof out, &still)));
-        CoopPos all = p;
-        all.nslots = COOP_POS_SLOTS;
-        strcpy(all.area, "Ganon's Tower");
-        strcpy(all.slot[2].node, "hurt"), all.slot[2].frame = 0.5f;
-        strcpy(all.slot[3].node, "death"), all.slot[3].frame = 1.0f;
-        all.pseq = 4294967295u, all.t_ms = 4294967295u, all.flags = COOP_POS_IN_WORLD;
-        memcpy(&bx, &all.pos[0], 4), memcpy(&by, &all.pos[1], 4), memcpy(&bz, &all.pos[2], 4), memcpy(&byaw, &all.yaw, 4);
-        printf("pos four-slots %u %u %u %s %08x %08x %08x %08x %s\n", all.pseq, all.t_ms, all.flags, hex((const uint8_t *)all.area, strlen(all.area)),
-               bx, by, bz, byaw, hex(out, coop_pos_pack(out, sizeof out, &all)));
-
         const char body[] = "the room's rules, in its first part";
         CoopEventPart ep = { 0x5566778899aabbccULL, 9, (uint16_t)(sizeof body - 1), COOP_K_SECTION, 0, (const uint8_t *)body };
         printf("event section %u %llu %llu %u %u %s %s\n", ep.kind, (unsigned long long)ep.recipient_session, (unsigned long long)ep.id,
@@ -935,13 +819,6 @@ int main(int argc, char **argv) {
         const size_t mn2 = coop_msg_pack(out, sizeof out, 0x0102030405060708ULL, 4, COOP_K_LINE, text, sizeof text - 1);
         out[0] = COOP_MSG_V1 + 1;   /* an envelope of a version this build does not read */
         printf("reject msg other-version %s\n", hex(out, mn2));
-        coop_pos_pack(out, sizeof out, &p);
-        const size_t pn2 = coop_pos_pack(out, sizeof out, &p);
-        out[0] = COOP_POS_VERSION - 1;   /* version 1 had a u16 counter */
-        printf("reject pos other-version %s\n", hex(out, pn2));
-        coop_pos_pack(out, sizeof out, &p);
-        out[10] = COOP_POS_TEXT + 1;   /* an area longer than a POS carries */
-        printf("reject pos long-area %s\n", hex(out, pn2));
         coop_event_part_pack(out, sizeof out, &ep);
         const size_t ehn3 = coop_event_part_pack(out, sizeof out, &ep);
         printf("reject event cut-short %s\n", hex(out, ehn3 - 1));
@@ -961,13 +838,12 @@ int main(int argc, char **argv) {
     }
     known_answers();
     codecs();
-    pos_counter();
     check_vectors(argv[1]);
     fuzz(argv[1]);
     if (fails) {
         printf("coop_proto: %d checks failed\n", fails);
         return 1;
     }
-    printf("PASS: host/coop_proto.c: the room's frames, the player messages, the POS, the events and the signatures\n");
+    printf("PASS: host/coop_proto.c: the room's frames, the player messages, the events and the signatures\n");
     return 0;
 }

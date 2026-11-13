@@ -46,7 +46,7 @@ enum { COOP_FLAG_AWAY = 1, COOP_FLAG_MAKER = 2 };   // roster flags: not heard f
 
 // The kinds of player messages (the first byte of a message). The session carries application kinds and owns
 // EVENT / EVENT_ACK for reliable delivery. A kind of 0xF0 and above is free for tests, not production layers.
-enum { COOP_K_HELLO = 1, COOP_K_POS = 2, COOP_K_DIGEST = 3, COOP_K_SECTION = 4, COOP_K_SYNC_NEED = 5, COOP_K_NOTICE = 6,
+enum { COOP_K_HELLO = 1, COOP_K_DIGEST = 3, COOP_K_SECTION = 4, COOP_K_SYNC_NEED = 5, COOP_K_NOTICE = 6,
        COOP_K_BYE = 7, COOP_K_EVENT = 16, COOP_K_EVENT_ACK = 17, COOP_K_LINE = 32, COOP_K_TEST = 0xF0 };
 
 typedef struct {
@@ -146,42 +146,3 @@ int coop_sign_check(const uint8_t sig[COOP_SIG_LEN], const uint8_t pk[COOP_PK_LE
 // BLAKE2b of msg keyed with key (klen at most 64, 0 for none), outlen bytes (1 to 64): the sync layer's derivations.
 void coop_blake2b(uint8_t *out, size_t outlen, const void *key, size_t klen, const void *msg, size_t n);
 
-// ---- POS (COOP_K_POS): where a player is and what Link plays, for showing the other players in the world, sent about 15
-// times a second as a player message (above). The bytes after the kind, little endian: u8 version
-// (COOP_POS_VERSION), u32 pseq (the sender's counter: one more for each POS it sends), u32 t_ms (the sender's clock), u8
-// flags, u8 area length (<= COOP_POS_TEXT) and the area's name (the game's current-area text), f32 x y z, f32 yaw
-// (radians, 0 facing +z), u8 slot count (<= COOP_POS_SLOTS), per AS slot u8 node name length (<= COOP_POS_TEXT), the
-// node's name, f32 frame. A parser takes exactly one message of its version: another version is another format this
-// build cannot read (version 1 had a u16 pseq). The names come from another player's game and reach this one's log and
-// its animation lookup, so a name with a byte outside printable ASCII (0x20..0x7e) is refused, and so is a number that
-// is not finite.
-#define COOP_POS_VERSION 2
-#define COOP_POS_TEXT 47
-#define COOP_POS_SLOTS 4
-enum { COOP_POS_ADULT = 1, COOP_POS_IN_WORLD = 2 };
-typedef struct {
-    uint32_t pseq;
-    uint32_t t_ms;
-    uint8_t flags, nslots;
-    char area[COOP_POS_TEXT + 1];
-    float pos[3], yaw;
-    struct { char node[COOP_POS_TEXT + 1]; float frame; } slot[COOP_POS_SLOTS];
-} CoopPos;
-size_t coop_pos_pack(uint8_t *out, size_t cap, const CoopPos *p);   // 0 when it does not fit cap
-int coop_pos_parse(const uint8_t *p, size_t n, CoopPos *out);
-
-// The receiver's counter of one POS sender (a message can arrive more than once: docs/coop.md, "Replay"). A pose is
-// taken only above the last one taken from the same member id in the same session, so neither a pose sent again nor one
-// recorded earlier in the session moves the puppet back while that sender's poses keep being taken; the first pose of
-// another session (another player given the id, the member back in a new session, or a roster that lists an earlier
-// session) starts the counter again. After COOP_POS_QUIET_MS with none taken, whoever holds the sender's messages back
-// that long can have its recorded poses of the session taken again: only the puppet moves.
-// session: the one the roster lists for the member (CoopView). Returns 0 to drop the pose, 1 to take it, 2 to take it
-// and drop what was kept of the sender's earlier poses.
-#define COOP_POS_QUIET_MS 3000
-typedef struct {
-    uint64_t session, at_ms;    // the session of the last pose taken, and when it was taken
-    uint32_t last;              // its counter
-    int any;                    // a pose was taken
-} CoopPosSeen;
-int coop_pos_fresh(CoopPosSeen *s, uint64_t session, uint32_t pseq, uint64_t now_ms);

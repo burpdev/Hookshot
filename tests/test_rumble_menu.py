@@ -56,6 +56,7 @@ FIXTURE = r"""
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL %%d %%s\n", __LINE__, #x); return 1; } } while (0)
 %(options)s
 Options opts;
+int coop_port = 43400;   // (the Co-op tab's Port row, whose key ini_key names)
 %(tabs)s
 %(row)s
 int saves = 0, presets = 0;

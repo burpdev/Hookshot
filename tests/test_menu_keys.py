@@ -142,8 +142,8 @@ static bool coop_secret_shown;                            // (masked again at ea
 static void coop_refresh(bool*) { (void)coop_secret_shown; }
 static bool coop_option_line(const char*, const char*) { return false; }
 struct TextField { char text[64]; int len = 0, max = 63; };
-static TextField coop_name_field, coop_relay_field;
-static bool coop_relay_whole = true;
+static TextField coop_name_field, coop_server_field;
+static bool coop_server_whole = true;
 static void text_set(TextField& f, const char* t) {
     f.len = (int)std::min(std::strlen(t), sizeof f.text - 1);
     std::memcpy(f.text, t, (size_t)f.len);
@@ -208,6 +208,7 @@ static std::string mic_want;
 [[maybe_unused]] static uint64_t auto_for = 0, auto_tuned = 0;   // (the Quality preset Auto (this PC)'s fingerprints, which save() writes)
 [[maybe_unused]] static struct { uint32_t w = 0, h = 0; } auto_output;   // (and the Output resolution it set, by its size)
 static struct { int steps = 0; bool went_down = false; } auto_tuning;   // (and its tuning's steps)
+static int coop_port = 43400;   // (the Co-op tab's Port row, whose key ini_key names)
 static std::string mic_key(const char* name) { return name; }
 static void mic_tell_host() {}
 static int rumble_step(int v) { return v; }

@@ -1,13 +1,14 @@
 """The Insert menu's Co-op tab: making, joining, accepting and leaving a co-op room from the menu (host/coop.h's session).
 
 The menu's side is cut out of gpu/vk/vk_menu.cpp by its text and driven as menu_tick drives it: which rows the tab shows in
-each state of the room (Make a room and Join a room outside one; the room's secret and Leave in one; Accept while the room
-is offered), what the relay's and the secret's fields take, what each press asks of the host (Make at once; Accept and Leave
+each state of the room (Host a room and Join a room outside one; the room's secret and Leave in one; Accept while the room
+is offered), what the join address's and the secret's fields take, what each press asks of the host (Host at once, the Port
+row's port with it; Accept and Leave
 at the second press only; the secret shown and hidden without asking anything), the fields' Enter (Join emptied once taken,
-or why not; a relay the host refuses not saved), and the selection staying on its row while rows come and go. The host's
+or why not; a host address the host refuses not saved), and the selection staying on its row while rows come and go. The host's
 side, host/coop_menu.c, is compiled as C with the wire format's real secrets (host/coop_proto.c, Monocypher) and the session
 stubbed: the view as the tab gets it (you, the maker), the commands turned into coop_configure and coop_command (a name or a
-relay set at the start never restarts a running session; a secret that is not one never switches co-op on), and
+join address set at the start never restarts a running session; a secret that is not one never switches co-op on), and
 HOS_COOP_DEMO=1's made-up room walked through on a made-up clock. The Room rules page (what a room this game makes shares)
 is checked against the engine itself: a C program with host/coop_state.h's categories, modes and defaults and the rows'
 keys, ranges, steps and defaults as the source has them. Then the wiring is checked in the source: the interface's
@@ -62,6 +63,7 @@ enum { VK_BACK = 8, VK_RETURN = 0x0d, VK_ESCAPE = 0x1b, VK_END = 0x23, VK_HOME =
 @@ROW@@
 @@TEXT@@
 static struct { int coop_progress = 1; } opts;
+int coop_port = 43400;   // (vk_menu.cpp's Port row, which coop_press sends before Host a room)
 @@RULES@@
 Row rows[] = {
     {TAB_GAMEPLAY, "Restart", nullptr, 0, 0, 0, nullptr, nullptr},
@@ -123,21 +125,21 @@ int main() {
     CHECK(kRows == 1 + kCoopRows);   // (every row of the tab is one coop_kind knows)
     for (const Row& r : rows) CHECK(r.tab != TAB_COOP || (coop_kind(r) >= 0 && !r.value && r.help && std::strlen(r.help) > 20));
     CHECK(coop_kind(rows[0]) == -1);
-    CHECK(shows({kCoopName, kCoopRelay, kCoopMake, kCoopJoin, kCoopRules}));   // (off)
+    CHECK(shows({kCoopName, kCoopServer, kCoopMake, kCoopJoin, kCoopRules}));   // (off)
     set_room(HOS_COOP_STATE_LEFT, "", 0, 0);
-    CHECK(shows({kCoopName, kCoopRelay, kCoopMake, kCoopJoin, kCoopRules}));
-    tab_selected[TAB_COOP] = 2;   // (on Make a room)
+    CHECK(shows({kCoopName, kCoopServer, kCoopMake, kCoopJoin, kCoopRules}));
+    tab_selected[TAB_COOP] = 2;   // (on Host a room)
     set_room(HOS_COOP_STATE_CONNECTING, "K7XG2M-RTB9DH-W4PZ5N", 0, 0);
-    CHECK(shows({kCoopName, kCoopRelay, kCoopSecret, kCoopLeave}) && selected_kind() == kCoopSecret);   // (its row gone: the first after the fields)
+    CHECK(shows({kCoopName, kCoopServer, kCoopSecret, kCoopLeave}) && selected_kind() == kCoopSecret);   // (its row gone: the first after the fields)
     set_room(HOS_COOP_STATE_JOINED, "K7XG2M-RTB9DH-W4PZ5N", 0, 0);
-    CHECK(shows({kCoopName, kCoopRelay, kCoopSecret, kCoopLeave}));
+    CHECK(shows({kCoopName, kCoopServer, kCoopSecret, kCoopLeave}));
     tab_selected[TAB_COOP] = 3;   // (on Leave)
     set_room(HOS_COOP_STATE_JOINED, "K7XG2M-RTB9DH-W4PZ5N", 77, 0);   // (offered)
-    CHECK(shows({kCoopName, kCoopRelay, kCoopSecret, kCoopAccept, kCoopLeave}) && selected_kind() == kCoopLeave);   // (kept on its row)
+    CHECK(shows({kCoopName, kCoopServer, kCoopSecret, kCoopAccept, kCoopLeave}) && selected_kind() == kCoopLeave);   // (kept on its row)
     set_room(HOS_COOP_STATE_JOINED, "K7XG2M-RTB9DH-W4PZ5N", 77, 1);   // (accepted)
-    CHECK(shows({kCoopName, kCoopRelay, kCoopSecret, kCoopLeave}) && selected_kind() == kCoopLeave);
+    CHECK(shows({kCoopName, kCoopServer, kCoopSecret, kCoopLeave}) && selected_kind() == kCoopLeave);
     set_room(HOS_COOP_STATE_RECONNECTING, "K7XG2M-RTB9DH-W4PZ5N", 77, 0);   // (not offered while reconnecting)
-    CHECK(shows({kCoopName, kCoopRelay, kCoopSecret, kCoopLeave}));
+    CHECK(shows({kCoopName, kCoopServer, kCoopSecret, kCoopLeave}));
     {   // (the same view again: nothing changed, nothing to draw)
         bool changed = false;
         coop_refresh(&changed);
@@ -165,8 +167,9 @@ int main() {
     coop_press(row(kCoopLeave)), coop_press(row(kCoopLeave));
     CHECK(n_asked == 2 && asked[1].cmd == HOS_COOP_CMD_LEAVE);
     set_room(HOS_COOP_STATE_LEFT, "", 0, 0);
-    coop_press(row(kCoopMake));   // (at once)
-    CHECK(n_asked == 3 && asked[2].cmd == HOS_COOP_CMD_MAKE && !pending);
+    coop_press(row(kCoopMake));   // (at once: the Port row's port first, then the room)
+    CHECK(n_asked == 4 && asked[2].cmd == HOS_COOP_CMD_PORT && asked[2].number == (uint32_t)coop_port &&
+          asked[3].cmd == HOS_COOP_CMD_MAKE && !pending);
     // (the maker's remedies: only to the game holding the maker's key; Remove a player among the others with a key)
     room = MkwVkCoopView{};
     room.state = HOS_COOP_STATE_JOINED, room.remedies = 1, room.n = 3, room.version = 99, room.member[0].self = 1;
@@ -176,7 +179,7 @@ int main() {
     {
         bool changed = false;
         coop_refresh(&changed);
-        CHECK(changed && shows({kCoopName, kCoopRelay, kCoopSecret, kCoopRemove, kCoopReset, kCoopLeave, kCoopRules}));
+        CHECK(changed && shows({kCoopName, kCoopServer, kCoopSecret, kCoopRemove, kCoopReset, kCoopLeave, kCoopRules}));
     }
     n_asked = 0, coop_remove_at = 0;
     coop_press(row(kCoopRemove));
@@ -192,26 +195,26 @@ int main() {
     {
         bool changed = false;
         coop_refresh(&changed);
-        CHECK(shows({kCoopName, kCoopRelay, kCoopSecret, kCoopReset, kCoopLeave, kCoopRules}));
+        CHECK(shows({kCoopName, kCoopServer, kCoopSecret, kCoopReset, kCoopLeave, kCoopRules}));
     }
     tab_selected[TAB_COOP] = 3;   // (on Reset the pools)
     room.offer = 78, room.accepted = 0, room.version++;   // (a new offer, a player came: the remedies and Room rules stand back
     {                                                      // until it is accepted, so that the members' keys have the room)
         bool changed = false;
         coop_refresh(&changed);
-        CHECK(shows({kCoopName, kCoopRelay, kCoopSecret, kCoopAccept, kCoopLeave}) && selected_kind() == kCoopSecret);
+        CHECK(shows({kCoopName, kCoopServer, kCoopSecret, kCoopAccept, kCoopLeave}) && selected_kind() == kCoopSecret);
     }
     room.accepted = 1, room.version++;
     {
         bool changed = false;
         coop_refresh(&changed);
-        CHECK(shows({kCoopName, kCoopRelay, kCoopSecret, kCoopReset, kCoopLeave, kCoopRules}));
+        CHECK(shows({kCoopName, kCoopServer, kCoopSecret, kCoopReset, kCoopLeave, kCoopRules}));
     }
     room.remedies = 0, room.version++;   // (not the maker's game: no remedies)
     {
         bool changed = false;
         coop_refresh(&changed);
-        CHECK(shows({kCoopName, kCoopRelay, kCoopSecret, kCoopLeave}));
+        CHECK(shows({kCoopName, kCoopServer, kCoopSecret, kCoopLeave}));
     }
     // ---- the Room rules page's values and what is said under them ----
     CHECK(!std::strcmp(tx_rule_shared(1), "Shared") && !std::strcmp(tx_rule_shared(0), "Per player"));
@@ -223,13 +226,13 @@ int main() {
     CHECK(hn_rule_follows(1, 0) && !hn_rule_follows(1, 1) && hn_rule_keys(0, 0) && !hn_rule_keys(0, 1));   // (the help box's height)
 
     // ---- the fields: what they take, and their Enter ----
-    text_set(coop_relay_field, "");
-    for (const char* s = "relay.example.org:24680 /@[::1]_x"; *s; s++) text_edit(coop_relay_field, (unsigned char)*s);
-    CHECK(!std::strcmp(coop_relay_field.text, "relay.example.org:24680[::1]_x"));
+    text_set(coop_server_field, "");
+    for (const char* s = "host.example.org:24680 /@[::1]_x"; *s; s++) text_edit(coop_server_field, (unsigned char)*s);
+    CHECK(!std::strcmp(coop_server_field.text, "host.example.org:24680[::1]_x"));
     text_set(coop_join_field, "");
     for (const char* s = "k7xg2m-rtb9dh w4pz5n./!"; *s; s++) text_edit(coop_join_field, (unsigned char)*s);
     CHECK(!std::strcmp(coop_join_field.text, "k7xg2m-rtb9dh w4pz5n"));
-    CHECK(coop_name_field.max == 24 && coop_relay_field.max == 63 && coop_join_field.max <= (int)sizeof coop_join_field.text - 1);
+    CHECK(coop_name_field.max == 24 && coop_server_field.max == 63 && coop_join_field.max <= (int)sizeof coop_join_field.text - 1);
     n_asked = 0, saves = 0;
     answer = 0;   // (the host says it is not a secret)
     CHECK(coop_join_apply() && std::strstr(coop_join_apply(), "Not a room's secret") && n_asked == 2);
@@ -239,10 +242,10 @@ int main() {
     n_asked = 0;
     CHECK(coop_join_apply() && std::strstr(coop_join_apply(), "Type the room's secret") && n_asked == 0);   // (empty: nothing asked)
     answer = 0;
-    CHECK(coop_relay_apply() && std::strstr(coop_relay_apply(), "host or host:port") && saves == 0);   // (refused: not saved)
+    CHECK(coop_server_apply() && std::strstr(coop_server_apply(), "host or host:port") && saves == 0);   // (refused: not saved)
     CHECK(asked[0].cmd == HOS_COOP_CMD_SERVER && asked[0].number == 1);
-    answer = 1, n_asked = 0, coop_relay_whole = false;
-    CHECK(coop_relay_apply() == nullptr && saves == 1 && coop_relay_whole);
+    answer = 1, n_asked = 0, coop_server_whole = false;
+    CHECK(coop_server_apply() == nullptr && saves == 1 && coop_server_whole);
     text_set(coop_name_field, "Malon");
     CHECK(coop_name_apply() == nullptr && saves == 2 && asked[1].cmd == HOS_COOP_CMD_NAME && !std::strcmp(asked[1].text, "Malon") &&
           asked[1].number == 1);
@@ -295,6 +298,8 @@ int coop_command(CoopCmd cmd, const char *secret) {
     snprintf(last_secret, sizeof last_secret, "%s", secret ? secret : "(null)");
     return session.state != COOP_OFF;
 }
+static uint16_t last_port;
+void coop_port_set(uint16_t port) { last_port = port; }
 int coop_server_parse(const char *text, char *host, size_t cap, uint16_t *port) {   /* (host[:port], nothing else) */
     (void)cap;
     if (!*text || strpbrk(text, " /@")) return 0;
@@ -322,18 +327,20 @@ static void real(void) {
     MkwVkCoopView v;
     hos_coop_menu_view(&v);
     CHECK(v.state == HOS_COOP_STATE_OFF && v.n == 0 && v.offer == 0);
-    /* (the saved name and relay at the start: kept, nothing switched on) */
+    CHECK(hos_coop_menu_command(HOS_COOP_CMD_PORT, NULL, 43400) && last_port == 43400 && configures == 0 && commands == 0);
+    CHECK(!hos_coop_menu_command(HOS_COOP_CMD_PORT, NULL, 80) && last_port == 43400);   /* (below the row's range: refused) */
+    /* (the saved name and join address at the start: kept, nothing switched on) */
     CHECK(hos_coop_menu_command(HOS_COOP_CMD_NAME, "Malon", 0) && hos_coop_menu_command(HOS_COOP_CMD_SERVER, "", 0) && configures == 0);
-    CHECK(!hos_coop_menu_command(HOS_COOP_CMD_SERVER, "relay host", 1) && configures == 0);   /* (not an address: refused) */
+    CHECK(!hos_coop_menu_command(HOS_COOP_CMD_SERVER, "join host", 1) && configures == 0);   /* (not an address: refused) */
     /* (a field emptied: the options file's, as coop_init takes it) */
-    ini_server = "relay.example.org";
+    ini_server = "host.example.org";
     CHECK(!hos_coop_menu_command(HOS_COOP_CMD_JOIN, "not a secret", 0) && configures == 0 && commands == 0);
     CHECK(hos_coop_menu_command(HOS_COOP_CMD_JOIN, "k7xg2m rtb9dh-w4pz5n", 0));
-    CHECK(configures == 1 && last_on == 1 && !strcmp(last_name, "Malon") && !strcmp(last_server, "relay.example.org"));
+    CHECK(configures == 1 && last_on == 1 && !strcmp(last_name, "Malon") && !strcmp(last_server, "host.example.org"));
     CHECK(commands == 1 && last_cmd == COOP_CMD_JOIN && !strcmp(last_secret, "K7XG2MRTB9DHW4PZ5N"));
     CHECK(hos_coop_menu_command(HOS_COOP_CMD_SERVER, "10.0.0.2:24680", 1) && configures == 2 && !strcmp(last_server, "10.0.0.2:24680"));
     CHECK(hos_coop_menu_command(HOS_COOP_CMD_NAME, "Talon", 0) && configures == 2);   /* (0: kept, a running session left alone) */
-    CHECK(hos_coop_menu_command(HOS_COOP_CMD_MAKE, NULL, 0) && configures == 3 && !strcmp(last_name, "Talon") && last_cmd == COOP_CMD_CREATE &&
+    CHECK(hos_coop_menu_command(HOS_COOP_CMD_MAKE, NULL, 0) && configures == 3 && !strcmp(last_name, "Talon") && last_cmd == COOP_CMD_HOST &&
           !strcmp(last_secret, "(null)"));
     CHECK(hos_coop_menu_command(HOS_COOP_CMD_LEAVE, NULL, 0) && last_cmd == COOP_CMD_LEAVE && configures == 3);
     CHECK(!hos_coop_menu_command(HOS_COOP_CMD_ACCEPT, NULL, 5));   /* (progress sync has no offer) */
@@ -362,9 +369,9 @@ static void real(void) {
     session.state = COOP_LEFT, session.n = 0;   /* (out of the room: progress sync is not asked) */
     hos_coop_menu_view(&v);
     CHECK(!v.offer && !v.remedies && v.n == 0);
-    /* (Make with HOS_COOP_ROOM in the environment: that room, as a test session's second game knows it) */
+    /* (Host with HOS_COOP_ROOM in the environment: that room, as a test session's second game knows it) */
     set_env("HOS_COOP_ROOM", "k7xg2m rtb9dh w4pz5n");
-    CHECK(hos_coop_menu_command(HOS_COOP_CMD_MAKE, NULL, 0) && last_cmd == COOP_CMD_CREATE && !strcmp(last_secret, "K7XG2MRTB9DHW4PZ5N"));
+    CHECK(hos_coop_menu_command(HOS_COOP_CMD_MAKE, NULL, 0) && last_cmd == COOP_CMD_HOST && !strcmp(last_secret, "K7XG2MRTB9DHW4PZ5N"));
     set_env("HOS_COOP_ROOM", NULL);
     puts("PASS: the tab's commands reach the session and progress sync; its view of the room");
 }
@@ -547,7 +554,7 @@ def main():
     need(menu, r'\{TAB_RULES, "Co-op at start", &opts\.coop, 0, 1, 1, tx_onoff,', "vk_menu.cpp: no Co-op at start row")
     need(block(menu, "bool row_shown(int i) {"), r"\(rows\[i\]\.tab != TAB_COOP \|\| coop_row_shown\(rows\[i\], coop_now\)\)",
          "row_shown: the Co-op tab's rows do not follow the room")
-    need(menu, r'\{"Your name", &coop_name_field, coop_name_apply\},\s*\{"Relay", &coop_relay_field, coop_relay_apply\},\s*'
+    need(menu, r'\{"Your name", &coop_name_field, coop_name_apply\},\s*\{"Join address", &coop_server_field, coop_server_apply\},\s*'
                r'\{"Join a room", &coop_join_field, coop_join_apply\}\};', "vk_menu.cpp: the Co-op tab's fields are not text fields")
     tick = block(menu, "void menu_tick() {")
     need(tick, r"if \(open_now\.load\(\)\) coop_refresh\(&changed\);", "menu_tick: the room is not read while the menu is open")
@@ -564,11 +571,11 @@ def main():
     need(tick, r"if \(\(tab_left \|\| tab_right\) && cur_tab == TAB_RULES\) cur_tab = TAB_COOP;", "menu_tick: the tabs' keys from the Room rules page index past the strip")
     need(block(menu, "void menu_init() {"), r"if \(opts\.coop_keys == 1\) opts\.coop_keys = 2;\s*if \(opts\.coop_rupees == 1\) opts\.coop_rupees = 0;\s*"
          r"if \(opts\.coop_ammo == 1\) opts\.coop_ammo = 0;", "menu_init: a mode a pool row does not have is shown and saved as it is")
-    need(block(menu, "void save() {"), r'key == "coop_name" \|\|\s*\(key == "coop_server" && coop_relay_whole\).*'
-         r'fprintf\(f, "coop_name=%s\\n", coop_name_field\.text\).*fprintf\(f, "coop_server=%s\\n", coop_relay_field\.text\)',
+    need(block(menu, "void save() {"), r'key == "coop_name" \|\|\s*\(key == "coop_server" && coop_server_whole\).*'
+         r'fprintf\(f, "coop_name=%s\\n", coop_name_field\.text\).*fprintf\(f, "coop_server=%s\\n", coop_server_field\.text\)',
          "save: hookshot_options.ini's coop_name= and coop_server= (host/coop.c reads them at the start) are not the tab's")
     need(block(menu, "void menu_init() {"), r'!strcmp\(line, "coop_name"\) \|\| !strcmp\(line, "coop_server"\).*'
-         r'host->coop_command\(HOS_COOP_CMD_NAME, coop_name_field\.text, 0\)', "menu_init: the saved name and relay are not read")
+         r'host->coop_command\(HOS_COOP_CMD_NAME, coop_name_field\.text, 0\)', "menu_init: the saved name and host are not read")
     need(block(menu, "void draw_options(ui::Ctx& c) {"), r"if \(cur_tab == TAB_COOP\) \{.*?draw_coop_rows\(", "draw_options: no Co-op layout")
     print("PASS: the Co-op tab's wiring: the interface's coop_view and coop_command, the host's table, the strip, the Room "
           "rules page, the options file")
